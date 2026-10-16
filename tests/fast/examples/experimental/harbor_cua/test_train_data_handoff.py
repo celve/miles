@@ -100,3 +100,24 @@ def test_the_launcher_passes_dynamic_microbatching_and_not_the_global_flag():
     assert "--use-dynamic-batch-size" in source
     assert "--max-tokens-per-gpu" in source
     assert "--use-dynamic-global-batch-size " not in source.replace("NOT --use-dynamic-global-batch-size", "")
+
+
+def _launcher_source() -> str:
+    return (Path(__file__).parents[5] / LAUNCHER).read_text()
+
+
+def test_the_default_backend_is_the_one_with_working_multimodal_rope():
+    """FSDP trains Qwen3-VL with linear positions, so megatron is the default (LIN-2046)."""
+    source = _launcher_source()
+
+    assert 'backend: Literal["megatron", "fsdp"] = "megatron"' in source
+    assert "--megatron-to-hf-mode bridge" in source
+
+
+def test_the_importance_ratio_uses_the_recorded_rollout_logprobs():
+    """Without this the ratio is taken against a trainer recomputation, not the engine."""
+    assert "--use-rollout-logprobs" in _launcher_source()
+
+
+def test_exported_values_are_shell_quoted():
+    assert "shlex.quote" in _launcher_source()

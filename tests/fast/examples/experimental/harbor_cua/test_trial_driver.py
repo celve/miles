@@ -79,3 +79,17 @@ def test_the_deterministic_inference_seed_is_forwarded():
     )
 
     assert kwargs["llm_call_kwargs"]["seed"] == 1234
+
+
+def test_a_zero_seed_is_still_a_seed():
+    kwargs = _agent_kwargs(api_base="http://x/v1", session_id="s", sampling_params={"sampling_seed": 0}, max_turns=2)
+
+    assert kwargs["llm_call_kwargs"]["seed"] == 0
+
+
+def test_miles_own_seed_name_wins_over_the_openai_one():
+    kwargs = _agent_kwargs(
+        api_base="http://x/v1", session_id="s", sampling_params={"sampling_seed": 7, "seed": 9}, max_turns=2
+    )
+
+    assert kwargs["llm_call_kwargs"]["seed"] == 7

@@ -7,6 +7,10 @@ a conversion fault shows up before any GPU time goes into training.
     python -m examples.experimental.harbor_cua.check_trial_live \\
         --model /personal/lin2045/models/Qwen3-VL-4B-Instruct \\
         --router-port 30000 --instances cua-basics--click-target--red --repeat 2
+
+``--router-port`` points at a standalone engine by default, which is what this checker
+is for; pass ``--upstream`` to name one explicitly, or ``--use-miles-router`` when the
+port is a Miles router whose engines have to be discovered.
 """
 
 from __future__ import annotations
@@ -32,8 +36,11 @@ def build_state(args: argparse.Namespace) -> SimpleNamespace:
             rollout_max_context_len=args.max_context_len,
             harbor_cua_max_turns=args.max_turns,
             harbor_cua_max_sandboxes=args.max_sandboxes,
-            harbor_cua_max_pixels=args.max_pixels,
             harbor_cua_write_off_mode=args.write_off_mode,
+            harbor_cua_upstream=args.upstream,
+            # get_worker_urls reads this when the upstream is resolved from the router,
+            # and nothing else here would supply it.
+            use_miles_router=args.use_miles_router,
         ),
         processor=load_processor(args.model, trust_remote_code=True),
         tokenizer=load_tokenizer(args.model, trust_remote_code=True),
@@ -69,8 +76,9 @@ async def one_episode(state, instance_id: str, index: int, temperature: float) -
             for key in (
                 "exit_status",
                 "harbor_episodes",
-                "recorded_action_calls",
-                "auxiliary_calls_excluded",
+                "recorded_trained_calls",
+                "compactor_calls_excluded",
+                "evaluation_siblings_dropped",
                 "segments",
                 "kept_segments",
                 "dropped_text_only_segments",
@@ -132,8 +140,14 @@ def main() -> None:
     parser.add_argument("--max-turns", type=int, default=10)
     parser.add_argument("--max-sandboxes", type=int, default=4)
     parser.add_argument("--max-context-len", type=int, default=32768)
-    parser.add_argument("--max-pixels", type=int, default=None)
     parser.add_argument("--write-off-mode", default="abort_group")
+    parser.add_argument(
+        "--upstream",
+        default="router",
+        help="'router' forwards straight to --router-port, which is what a standalone engine is; "
+        "or name an engine's URL, or 'auto' to discover one through a Miles router",
+    )
+    parser.add_argument("--use-miles-router", action="store_true", help="only when resolving through a Miles router")
     parser.add_argument("--json-out", default=None)
     args = parser.parse_args()
     raise SystemExit(asyncio.run(main_async(args)))

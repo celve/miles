@@ -111,8 +111,12 @@ def _agent_kwargs(
     if (max_tokens := sampling_params.get("max_new_tokens") or sampling_params.get("max_tokens")) is not None:
         call_kwargs["max_tokens"] = int(max_tokens)
     # Miles sends this per request under --sglang-enable-deterministic-inference, and
-    # the OpenAI surface names it `seed`; dropping it would silently lose determinism.
-    if (seed := sampling_params.get("sampling_seed") or sampling_params.get("seed")) is not None:
+    # the OpenAI surface names it `seed`. Tested against None rather than truthiness,
+    # because seed 0 is a seed; Miles's own name wins when both are present.
+    seed = sampling_params.get("sampling_seed")
+    if seed is None:
+        seed = sampling_params.get("seed")
+    if seed is not None:
         call_kwargs["seed"] = int(seed)
     return {
         "api_base": api_base,

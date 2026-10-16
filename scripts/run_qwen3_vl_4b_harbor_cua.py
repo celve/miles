@@ -22,6 +22,9 @@ Args:
     --harbor-env-type: Harbor ``EnvironmentType`` for the trials (required).
     --harbor-tasks-dir: where ``prepare`` writes the generated task directories.
     --harbor-trials-dir: where Harbor writes trial directories on the worker.
+    --backend: ``megatron`` is the default because LIN-2046 measured FSDP training
+        Qwen3-VL without its multimodal RoPE; ``fsdp`` is for throughput and plumbing
+        work, not for a result.
     --skip-prepare: leave the checkpoint, the task directories and the warmed
         templates as they are, for a rerun or a hand-curated data directory.
     --mode: ``rollout`` converts rollouts and stops before any optimizer step,
@@ -37,6 +40,7 @@ Usage:
 """
 
 import os
+import shlex
 from dataclasses import dataclass
 from typing import Literal
 
@@ -86,6 +90,12 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     desktop_width: int = 1024
     desktop_height: int = 900
     mode: Literal["train", "rollout", "eval"] = "train"
+    # megatron by default because LIN-2046 measured FSDP training Qwen3-VL with linear
+    # 1-D positions, so its multimodal RoPE never runs (max |logit diff| 32.72 on a
+    # three-image sample) while megatron-bridge reconstructs the 3-D positions itself.
+    # fsdp stays selectable for throughput and plumbing work, never for a result.
+    backend: Literal["megatron", "fsdp"] = "megatron"
+    tensor_model_parallel_size: int = 2
     skip_prepare: bool = False
     eval_interval: int = 5
     wandb_project: str = "miles-harbor-cua"
@@ -121,7 +131,11 @@ def prepare(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
     )
     # Serial, and before any rollout: Harbor has no retry around a template build, so
     # concurrent trials on an unbuilt template lose a whole GRPO group to a 409.
-    exports = "".join(f"export {name}={value} && " for name, value in sorted((harbor_env or {}).items()))
+    # Quoted: HARBOR_ENV_KWARGS is JSON and a provider key path can contain spaces, so
+    # an unquoted export either fails or silently strips the quotes out of the JSON.
+    exports = "".join(
+        f"export {name}={shlex.quote(str(value))} && " for name, value in sorted((harbor_env or {}).items())
+    )
     U.exec_command_cpu(
         f"{exports}cd {command_utils.repo_base_dir} && "
         "python -m examples.experimental.harbor_cua.warm_templates "
@@ -178,6 +192,9 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
         "--entropy-coef 0.00 "
         "--eps-clip 0.2 "
         "--eps-clip-high 0.28 "
+        # The recorder's whole purpose: the importance ratio is taken against the
+        # logprobs the engine reported, not against a trainer recomputation.
+        "--use-rollout-logprobs "
     )
 
     optimizer_args = (
@@ -193,7 +210,7 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
     # instead, which is what makes a variable sibling count safe without it.
     perf_args = "--use-dynamic-batch-size --max-tokens-per-gpu 16384 "
 
-    train_backend_args = (
+    fsdp_args = (
         "--train-backend fsdp "
         "--gradient-checkpointing "
         "--update-weight-buffer-size 536870912 "
@@ -203,6 +220,25 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
         # ranks sit in their first collective (miles#2406).
         "--distributed-timeout-minutes 60 "
         """--train-env-vars '{"PYTORCH_CUDA_ALLOC_CONF":"expandable_segments:True"}' """
+    )
+
+    megatron_args = (
+        "--train-backend megatron "
+        f"--load {args.model_path} "
+        f"--tensor-model-parallel-size {args.tensor_model_parallel_size} "
+        "--sequence-parallel "
+        "--pipeline-model-parallel-size 1 "
+        "--context-parallel-size 1 "
+        "--recompute-granularity full "
+        "--recompute-method uniform "
+        "--recompute-num-layers 1 "
+        "--attention-dropout 0.0 "
+        "--hidden-dropout 0.0 "
+        "--accumulate-allreduce-grads-in-fp32 "
+        "--attention-softmax-in-fp32 "
+        "--attention-backend flash "
+        "--megatron-to-hf-mode bridge "
+        "--distributed-timeout-minutes 60 "
     )
 
     sglang_args = (
@@ -228,17 +264,25 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
         f"--dump-details {args.output_dir}/dump "
     )
 
+    backend_args = megatron_args if args.backend == "megatron" else fsdp_args
     U.execute_train(
         train_args=(
             f"{ckpt_args} {rollout_args} {cua_args} {eval_args} {grpo_args} "
-            f"{optimizer_args} {perf_args} {train_backend_args} {sglang_args} "
+            f"{optimizer_args} {perf_args} {backend_args} {sglang_args} "
             f"{wandb_args} {misc_args} {args.extra_args} "
         ),
         num_gpus_per_node=args.num_gpus_per_node,
-        megatron_model_type=None,
+        megatron_model_type=_megatron_model_type(args),
         megatron_path=args.megatron_path,
         extra_env_vars=_worker_env(args, harbor_env or {}),
     )
+
+
+def _megatron_model_type(args: ScriptArgs) -> str | None:
+    """The text model Megatron loads for this checkpoint, as geo3k's VLM recipe maps it."""
+    if args.backend != "megatron":
+        return None
+    return "qwen3-4B"
 
 
 def _worker_env(args: ScriptArgs, harbor_env: dict[str, str]) -> dict:
@@ -251,6 +295,8 @@ def _worker_env(args: ScriptArgs, harbor_env: dict[str, str]) -> dict:
         "HARBOR_CUA_DESKTOP_HEIGHT": str(args.desktop_height),
         "AGENT_MAX_INPUT_TOKENS": os.environ.get("AGENT_MAX_INPUT_TOKENS", "32768"),
         "AGENT_MAX_OUTPUT_TOKENS": os.environ.get("AGENT_MAX_OUTPUT_TOKENS", "2048"),
+        # Qwen3-VL's rotary base, which the Megatron model args read from the environment.
+        **({"MODEL_ARGS_ROTARY_BASE": "5000000"} if args.backend == "megatron" else {}),
     }
     env.update(harbor_env)
     return env
