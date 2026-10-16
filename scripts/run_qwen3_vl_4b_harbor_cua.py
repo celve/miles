@@ -53,6 +53,9 @@ HF_REPO = "Qwen/Qwen3-VL-4B-Instruct"
 MODEL_NAME = "Qwen3-VL-4B-Instruct"
 WANDB_GROUP = "qwen3-vl-4b-harbor-cua"
 GENERATE_FN = "examples.experimental.harbor_cua.rollout.generate"
+# text_config.rope_theta of Qwen/Qwen3-VL-4B-Instruct; the shared qwen3-4B model args
+# default to 1000000, which is the text model's, not this checkpoint's.
+ROTARY_BASE = 5_000_000
 
 
 @dataclass
@@ -264,7 +267,13 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
         f"--dump-details {args.output_dir}/dump "
     )
 
-    backend_args = megatron_args if args.backend == "megatron" else fsdp_args
+    backend_args = fsdp_args
+    if args.backend == "megatron":
+        backend_args = megatron_args
+        # Set here, not in the worker environment: scripts/models/qwen3-4B.py reads this
+        # while the model args are expanded in *this* process, and defaults to 1000000.
+        # Qwen3-VL-4B-Instruct's text_config.rope_theta is 5000000, read off the checkpoint.
+        os.environ["MODEL_ARGS_ROTARY_BASE"] = str(ROTARY_BASE)
     U.execute_train(
         train_args=(
             f"{ckpt_args} {rollout_args} {cua_args} {eval_args} {grpo_args} "
@@ -295,8 +304,6 @@ def _worker_env(args: ScriptArgs, harbor_env: dict[str, str]) -> dict:
         "HARBOR_CUA_DESKTOP_HEIGHT": str(args.desktop_height),
         "AGENT_MAX_INPUT_TOKENS": os.environ.get("AGENT_MAX_INPUT_TOKENS", "32768"),
         "AGENT_MAX_OUTPUT_TOKENS": os.environ.get("AGENT_MAX_OUTPUT_TOKENS", "2048"),
-        # Qwen3-VL's rotary base, which the Megatron model args read from the environment.
-        **({"MODEL_ARGS_ROTARY_BASE": "5000000"} if args.backend == "megatron" else {}),
     }
     env.update(harbor_env)
     return env

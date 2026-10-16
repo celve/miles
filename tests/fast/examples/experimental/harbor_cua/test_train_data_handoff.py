@@ -121,3 +121,12 @@ def test_the_importance_ratio_uses_the_recorded_rollout_logprobs():
 
 def test_exported_values_are_shell_quoted():
     assert "shlex.quote" in _launcher_source()
+
+
+def test_the_rotary_base_is_set_where_the_model_args_are_expanded():
+    """scripts/models/qwen3-4B.py reads it in the launcher process, not on the workers."""
+    source = _launcher_source()
+
+    assert 'os.environ["MODEL_ARGS_ROTARY_BASE"]' in source
+    assert "ROTARY_BASE = 5_000_000" in source
+    assert "MODEL_ARGS_ROTARY_BASE" not in source.split("def _worker_env")[1]
