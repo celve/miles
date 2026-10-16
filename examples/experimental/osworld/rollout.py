@@ -22,6 +22,28 @@ LIN-1996's workspace. Without them the policy runner accepts no
 ``history_policy`` and discards every token id, so ``completion_evidence``
 comes back empty and every episode is written off.
 
+**Every episode returns exactly ``osworld_samples_per_episode`` samples**, the
+real segments first and inert padding after. A data-dependent sample count
+cannot be trained on an image batch today: the schedule that counts
+``--global-batch-size`` in rollouts rather than samples
+(``miles/utils/dp_schedule.py``) is switched off for any batch carrying
+``multimodal_train_inputs`` (``train_data_conversion.py:381``) and needs a
+schedule config the FSDP backend never publishes, so the legacy sample-strided
+split runs instead and floor-divides the shard into steps -- leaving the tail
+rows without log-probs while they keep their rewards, which is an ``IndexError``
+in ``get_grpo_returns``. A fixed count makes that division exact. Set the cap to
+OSWorld's step cap and it is an upper bound by construction, since an episode
+cannot produce more segments than it makes model calls.
+
+**An infrastructure failure aborts the group rather than scoring zero.**
+``remove_sample`` only zeroes the loss mask -- the row keeps its reward and
+still moves the group's mean and standard deviation, which Miles documents
+deliberately in ``filter_hub/sample_filters.py`` and pins in its tests -- and
+``Sample.Status.FAILED`` is read nowhere in the framework. ``ABORTED`` is what
+``apply_aborted_filter`` rejects a group on, before any reward statistic exists,
+and what oversampling then refills. So a sandbox crash costs its group and a
+regenerated prompt; it never teaches the policy that the task was impossible.
+
 Wire with:
   --custom-generate-function-path examples.experimental.osworld.rollout.generate
   --custom-rm-path examples.experimental.osworld.rollout.reward_func
@@ -35,34 +57,87 @@ import copy
 import io
 import logging
 import os
+from dataclasses import dataclass
 from typing import Any
 
 from PIL import Image as PILImage
 
+from examples.experimental.osworld.media_binding import (
+    MediaBindingError,
+    expanded_token_counts,
+    media_digests,
+    processor_identity,
+    verify_image_token_layout,
+)
 from miles.utils.types import Sample
 
 logger = logging.getLogger(__name__)
 
+# Why an episode kept no trainable segment. Reported per episode and summed over
+# the run, because an episode that quietly contributes nothing is the failure
+# mode this converter is most likely to have and least likely to show.
+_REJECTIONS = (
+    "no_exact_evidence",
+    "stitch_violation",
+    "image_mismatch",
+    "text_only_call",
+    "over_context",
+)
+
+
+@dataclass(frozen=True)
+class EpisodeConfig:
+    """Run-wide knobs this converter needs, resolved once per call site.
+
+    They arrive through the environment rather than as flags because Miles's
+    training entry parses argv strictly -- an unknown ``--osworld-*`` would be
+    rejected -- and because every one of them is a launch constraint: the run is
+    correct only if every episode uses the same value. The launcher forwards
+    them and derives ``--global-batch-size`` from ``samples_per_episode``, so
+    the two cannot be set apart.
+    """
+
+    gym_url: str
+    samples_per_episode: int
+    max_sandboxes: int
+    episode_timeout_s: float
+
+    @classmethod
+    def read(cls, args: Any) -> EpisodeConfig:
+        def knob(name: str, env: str, default: str) -> str:
+            value = getattr(args, f"osworld_{name}", None)
+            return str(value) if value is not None else os.environ.get(env, default)
+
+        samples_per_episode = int(knob("samples_per_episode", "MILES_SCRIPT_OSWORLD_SAMPLES_PER_EPISODE", "0"))
+        if samples_per_episode < 1:
+            raise ValueError(
+                "MILES_SCRIPT_OSWORLD_SAMPLES_PER_EPISODE must be set to at least 1: an episode's sample count has "
+                "to be fixed for the training batch to divide. This module's docstring says why."
+            )
+        gym_url = knob("gym_url", "MILES_SCRIPT_GYM_URL", "http://127.0.0.1:11001").rstrip("/")
+        return cls(
+            gym_url=gym_url,
+            samples_per_episode=samples_per_episode,
+            max_sandboxes=int(knob("max_sandboxes", "MILES_SCRIPT_OSWORLD_MAX_SANDBOXES", "8")),
+            episode_timeout_s=float(knob("episode_timeout_s", "MILES_SCRIPT_OSWORLD_EPISODE_TIMEOUT_S", "2400")),
+        )
+
 _gate: asyncio.Semaphore | None = None
 
 
-def _sandbox_gate(args: Any) -> asyncio.Semaphore:
+def _sandbox_gate(config: EpisodeConfig) -> asyncio.Semaphore:
     """Cap concurrent OSWorld VMs process-wide, independent of batch geometry."""
     global _gate
     if _gate is None:
-        _gate = asyncio.Semaphore(int(getattr(args, "osworld_max_sandboxes", 8)))
+        _gate = asyncio.Semaphore(config.max_sandboxes)
     return _gate
 
 
-async def _run_gym_task(args: Any, task: dict, sampling_params: dict) -> dict:
+async def _run_gym_task(config: EpisodeConfig, task: dict, sampling_params: dict) -> dict:
     """POST one task to Gym and return its response envelope."""
     import aiohttp  # noqa: PLC0415
 
-    # The launcher forwards the URL through the worker environment, so a Gym on
-    # another host needs no config file.
-    base_url = str(
-        getattr(args, "osworld_gym_url", None) or os.environ.get("MILES_SCRIPT_GYM_URL") or "http://127.0.0.1:11001"
-    ).rstrip("/")
+    base_url = config.gym_url
     create_params = dict(task.get("responses_create_params") or {})
     create_params.setdefault("max_output_tokens", int(sampling_params.get("max_new_tokens", 1500)))
     create_params.setdefault("temperature", float(sampling_params.get("temperature", 1.0)))
@@ -77,7 +152,7 @@ async def _run_gym_task(args: Any, task: dict, sampling_params: dict) -> dict:
     }
     body["responses_create_params"].setdefault("metadata", {})["nemo_rl_rollout_purpose"] = "training"
 
-    timeout = aiohttp.ClientTimeout(total=float(getattr(args, "osworld_episode_timeout_s", 2400)))
+    timeout = aiohttp.ClientTimeout(total=config.episode_timeout_s)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.post(f"{base_url}/run", json=body) as response:
             response.raise_for_status()
@@ -160,9 +235,18 @@ def _stitch(segment: list[dict]) -> tuple[list[int], list[int], list[float], int
     return tokens, loss_mask, logprobs, response_start
 
 
-def _images(segment: list[dict], media_assets: dict[str, dict]) -> list[PILImage.Image]:
-    """Decode the screenshots this segment's prompts referenced, in order."""
+def _images(segment: list[dict], media_assets: dict[str, dict]) -> tuple[list[PILImage.Image], list[bytes], list[str]]:
+    """Decode this segment's screenshots in prompt order, with their bytes and ids.
+
+    First-appearance order across the segment's calls is the prompt order
+    whether Gym lists each call's whole media set or only its new ones, because
+    prompts within a segment extend one another. A screenshot referenced twice
+    in one prompt would collapse here, which ``verify_image_token_layout`` then
+    rejects as a run-count disagreement rather than mis-binding it.
+    """
     images: list[PILImage.Image] = []
+    payloads: list[bytes] = []
+    media_ids: list[str] = []
     seen: set[str] = set()
     for call in segment:
         for media_id in call.get("media_ids") or []:
@@ -176,59 +260,45 @@ def _images(segment: list[dict], media_assets: dict[str, dict]) -> list[PILImage
             url = part if isinstance(part, str) else str((part or {}).get("url") or source.get("url") or "")
             if "base64," not in url:
                 continue
-            images.append(PILImage.open(io.BytesIO(base64.b64decode(url.split("base64,", 1)[1]))).convert("RGB"))
-    return images
+            payload = base64.b64decode(url.split("base64,", 1)[1])
+            images.append(PILImage.open(io.BytesIO(payload)).convert("RGB"))
+            payloads.append(payload)
+            media_ids.append(str(media_id))
+    return images, payloads, media_ids
 
 
-def _vision_inputs(state: Any, images: list[PILImage.Image], tokens: list[int]) -> dict | None:
-    """pixel_values/image_grid_thw for the sequence, verified against its ids.
+def _vision_inputs(state: Any, images: list[PILImage.Image], tokens: list[int]) -> tuple[dict, int] | None:
+    """pixel_values/image_grid_thw for the sequence, verified image by image.
 
-    Matched by prefix rather than count: a screenshot taken after the segment's
-    last model call never entered a prompt, so the trace can hold more images
-    than the ids account for. Anything but an exact prefix match is a processing
-    disagreement and fails loudly.
+    The engine returns prompt ids already expanded, so each image owns one run
+    of ``<|image_pad|>`` as long as that image costs. Run *i* is checked against
+    image *i* positionally, which a summed total would not do: it would accept a
+    wrong per-image assignment whose total agrees, and a wrong image order.
+
+    Returns the inputs and how many leading images the ids account for, or
+    ``None`` for a legitimate text-only call. Any disagreement raises.
     """
     if not images:
         return None
-    import torch  # noqa: PLC0415
 
     image_token_id = state.processor.tokenizer.convert_tokens_to_ids("<|image_pad|>")
-    actual = sum(1 for token in tokens if token == image_token_id)
-    if actual == 0:
+    expected = expanded_token_counts(state.processor, images)
+    keep = verify_image_token_layout(tokens, image_token_id, expected)
+    if keep == 0:
         return None
 
-    processed = state.processor.image_processor(images=images, return_tensors="pt")
-    grid = processed["image_grid_thw"]
-    merge = getattr(state.processor.image_processor, "merge_size", 2)
-    per_image = (torch.prod(grid, dim=-1) // (merge * merge)).tolist()
-
-    total, keep = 0, 0
-    for count in per_image:
-        if total == actual:
-            break
-        total += int(count)
-        keep += 1
-    if total != actual:
-        raise ValueError(
-            f"image token mismatch: ids have {actual}, screenshots produce {int(sum(per_image))} (no prefix matches)"
-        )
-
-    reprocessed = processed if keep == len(images) else state.processor.image_processor(
-        images=images[:keep], return_tensors="pt"
-    )
-    return {"pixel_values": reprocessed["pixel_values"], "image_grid_thw": reprocessed["image_grid_thw"]}
+    processed = state.processor.image_processor(images=images[:keep], return_tensors="pt")
+    return {"pixel_values": processed["pixel_values"], "image_grid_thw": processed["image_grid_thw"]}, keep
 
 
-def _failed(sample: Sample, reason: str, state: Any) -> Sample:
-    """A structurally valid write-off that trains on nothing.
+def _inert(sample: Sample, state: Any) -> Sample:
+    """Shape a sample so it travels with the batch and trains on nothing.
 
-    The write-off carries one minimal image, not just a pad token: under FSDP
-    every rank must invoke the vision tower the same number of times per
-    microbatch, because its layers' weight all-gathers are collectives. A
-    text-only sample skips them and stalls the ranks that did issue them
-    (miles#2406).
+    It carries one minimal image, not just a pad token: under FSDP every rank
+    must invoke the vision tower the same number of times per microbatch,
+    because its layers' weight all-gathers are collectives. A text-only sample
+    skips them and stalls the ranks that did issue them (miles#2406).
     """
-    logger.warning(reason)
     import torch  # noqa: PLC0415
 
     tokenizer = state.processor.tokenizer
@@ -236,7 +306,6 @@ def _failed(sample: Sample, reason: str, state: Any) -> Sample:
     merge = getattr(state.processor.image_processor, "merge_size", 2)
     n_image_tokens = int(torch.prod(processed["image_grid_thw"], dim=-1).sum().item()) // (merge * merge)
 
-    sample.status = Sample.Status.FAILED
     sample.remove_sample = True
     sample.tokens = (
         [tokenizer.convert_tokens_to_ids("<|vision_start|>")]
@@ -251,8 +320,63 @@ def _failed(sample: Sample, reason: str, state: Any) -> Sample:
     sample.response = ""
     sample.loss_mask = []
     sample.rollout_log_probs = []
-    sample.metadata.setdefault("reward", 0.0)
     return sample
+
+
+def _aborted(sample: Sample, reason: str, state: Any, counters: dict) -> list[Sample]:
+    """Give up on this episode for an infrastructure reason, costing its group.
+
+    ``ABORTED`` is the one status Miles acts on: ``apply_aborted_filter``
+    rejects the whole group before ``_post_process_rewards`` computes anything,
+    and oversampling regenerates the prompt. Writing the episode off with
+    ``remove_sample`` instead would keep its row, and its 0.0 would enter the
+    group's mean and standard deviation as a real task failure -- teaching the
+    policy that a task its sandbox never ran was impossible.
+    """
+    logger.warning("osworld episode aborted: %s", reason)
+    sample = _inert(sample, state)
+    sample.status = Sample.Status.ABORTED
+    sample.metadata = dict(sample.metadata or {})
+    sample.metadata["reward"] = 0.0
+    sample.metadata["osworld_abort_reason"] = reason
+    sample.metadata["osworld_rejections"] = dict(counters)
+    return [sample]
+
+
+def _padding(template: Sample, reward: float, rollout_id: int, index: int, state: Any) -> Sample:
+    """Fill a fixed-size episode out to its sample count with an inert sibling.
+
+    It carries the episode's own reward rather than zero, because
+    ``_normalize_rewards_by_rollout`` refuses a rollout whose siblings disagree
+    on one, and because the group's statistics are taken over one reward per
+    rollout -- so padding changes no statistic at all.
+    """
+    pad = _inert(copy.deepcopy(template), state)
+    pad.status = Sample.Status.COMPLETED
+    pad.rollout_id = rollout_id
+    pad.metadata = dict(pad.metadata or {})
+    pad.metadata["reward"] = reward
+    pad.metadata["osworld_segment_index"] = index
+    pad.metadata["osworld_padding"] = True
+    return pad
+
+
+def _boundary_provenance(response: dict) -> list[dict]:
+    """Gym's rewrite boundaries, kept so a segment count can be explained later.
+
+    A boundary is the only record of *why* an episode split where it did, and
+    the segmentation statistics this recipe reports are read off it rather than
+    off a cached-prefix proxy.
+    """
+    return [
+        {
+            "segment_id": event.get("segment_id"),
+            "reason": event.get("reason"),
+            "retained_media": event.get("retained_media_count"),
+            "removed_media": event.get("removed_media_count"),
+        }
+        for event in response.get("boundary_events") or []
+    ]
 
 
 async def generate(args: Any, sample: Sample, sampling_params) -> list[Sample]:
@@ -266,48 +390,75 @@ async def generate(args: Any, sample: Sample, sampling_params) -> list[Sample]:
     task = (sample.metadata or {}).get("osworld_task")
     if not task:
         raise ValueError("no OSWorld task row: expected sample.metadata['osworld_task']")
+    config = EpisodeConfig.read(args)
+    per_episode = config.samples_per_episode
+    counters = dict.fromkeys(_REJECTIONS, 0)
 
-    async with _sandbox_gate(args):
+    async with _sandbox_gate(config):
         try:
-            envelope = await _run_gym_task(args, task, dict(sampling_params))
+            envelope = await _run_gym_task(config, task, dict(sampling_params))
         except Exception as e:  # noqa: BLE001
             # One episode is one VM and a long run starts thousands; a provider
             # or timeout failure is routine and must not take the rollout down.
             logger.warning("osworld episode failed to run: %s", e, exc_info=True)
-            return [_failed(sample, f"osworld episode errored: {type(e).__name__}", state)]
+            return _aborted(sample, f"transport: {type(e).__name__}: {e}", state, counters)
 
     # Gym puts the grade and the admission decision on the row, not inside the
     # response envelope that carries the trace.
     response = envelope.get("response") or {}
     reward = float(envelope.get("reward") or 0.0)
     if envelope.get("mask_sample") is True or envelope.get("runtime_eligible") is False:
+        # Gym's own verdict that the episode was never validly evaluated, which
+        # is an environment fault and not a score the policy earned.
         reason = envelope.get("runtime_admission_reason") or "unknown"
-        return [_failed(sample, f"osworld episode not runtime-eligible: {reason}", state)]
+        return _aborted(sample, f"not runtime-eligible: {reason}", state, counters)
 
     media_assets = response.get("media_assets") or {}
     try:
         calls = _calls(response)
     except ValueError as e:
-        return [_failed(sample, f"osworld episode dropped: {e}", state)]
+        return _aborted(sample, f"inconsistent exact trace: {e}", state, counters)
     segments = _segments(calls)
     if not segments:
-        return [_failed(sample, "osworld episode carried no exact model-call evidence", state)]
+        counters["no_exact_evidence"] += 1
+        return _aborted(sample, "carried no exact model-call evidence", state, counters)
 
+    context_limit = int(getattr(args, "rollout_max_context_len", 0) or 0)
+    processor = processor_identity(state.processor.image_processor)
+    boundaries = _boundary_provenance(response)
     rollout_id = sample.rollout_id if sample.rollout_id is not None else sample.index
     siblings: list[Sample] = []
+
     for index, segment in enumerate(segments):
         stitched = _stitch(segment)
         if stitched is None:
+            counters["stitch_violation"] += 1
             logger.warning("osworld segment %d did not stitch; dropped", index)
             continue
         tokens, loss_mask, logprobs, response_start = stitched
+        # Nothing downstream compares a sample against the context bound: both
+        # rollout length flags are read only inside Miles's own request builder,
+        # which a custom generate function never reaches, so an over-long
+        # sequence would surface as a rope indexing error in the forward pass.
+        if context_limit and len(tokens) > context_limit:
+            counters["over_context"] += 1
+            logger.warning("osworld segment %d is %d tokens over %d; dropped", index, len(tokens), context_limit)
+            continue
+        images, payloads, media_ids = _images(segment, media_assets)
         try:
-            vision = _vision_inputs(state, _images(segment, media_assets), tokens)
-        except ValueError as e:
+            vision = _vision_inputs(state, images, tokens)
+        except MediaBindingError as e:
+            counters["image_mismatch"] += 1
             logger.warning("osworld segment %d dropped: %s", index, e)
             continue
         if vision is None:
+            # A model call with no screenshot is legitimate -- a text-only
+            # summary turn -- but FSDP's vision-tower collectives make a
+            # text-only sample unsafe, so it is counted rather than trained.
+            counters["text_only_call"] += 1
+            logger.info("osworld segment %d is text-only; counted and dropped", index)
             continue
+        vision_inputs, kept_images = vision
 
         # Sample is a plain dataclass; the copy happens before any tensor is
         # attached, so it stays cheap.
@@ -317,25 +468,59 @@ async def generate(args: Any, sample: Sample, sampling_params) -> list[Sample]:
         child.response_length = len(tokens) - response_start
         child.loss_mask = loss_mask
         child.rollout_log_probs = logprobs
-        child.multimodal_train_inputs = vision
+        child.multimodal_train_inputs = vision_inputs
         child.response = state.tokenizer.decode(tokens[response_start:], skip_special_tokens=False)
         child.metadata = dict(child.metadata or {})
         child.metadata["reward"] = reward
         child.metadata["osworld_segment_index"] = index
+        # Provenance: which Gym segment these tokens are, which pixels they were
+        # bound to, and under what preprocessing. Without the digests and the
+        # processor identity a later run cannot tell a reproduction from a
+        # coincidence.
+        child.metadata["osworld_segment_id"] = segment[0].get("segment_id")
+        child.metadata["osworld_media_ids"] = media_ids[:kept_images]
+        child.metadata["osworld_media_digests"] = media_digests(payloads[:kept_images])
+        child.metadata["osworld_processor"] = processor
+        child.metadata["osworld_boundary_events"] = boundaries
         child.status = Sample.Status.COMPLETED
         siblings.append(child)
 
     if not siblings:
-        return [_failed(sample, f"osworld episode kept no segment of {len(segments)}", state)]
+        return _aborted(sample, f"kept no segment of {len(segments)}", state, counters)
+    if len(siblings) > per_episode:
+        # Impossible while the cap is OSWorld's step cap, since segments cannot
+        # outnumber model calls -- so this means the two were configured apart,
+        # and silently dropping real segments would bias training toward the
+        # start of every episode.
+        return _aborted(
+            sample,
+            f"produced {len(siblings)} segments over the configured cap of {per_episode} samples per episode",
+            state,
+            counters,
+        )
+
+    kept = len(siblings)
+    for index in range(kept, per_episode):
+        siblings.append(_padding(sample, reward, rollout_id, index, state))
+    siblings[0].metadata["osworld_rejections"] = dict(counters)
+    siblings[0].metadata["osworld_segment_stats"] = {
+        "calls": len(calls),
+        "segments": len(segments),
+        "kept": kept,
+        "padded": per_episode - kept,
+        "boundaries": len(boundaries),
+    }
 
     logger.info(
-        "[osworld %s] reward=%.3f calls=%d segments=%d kept=%d tokens=%d",
+        "[osworld %s] reward=%.3f calls=%d segments=%d kept=%d padded=%d tokens=%d rejections=%s",
         (task.get("verifier_metadata") or {}).get("task_id", "unknown"),
         reward,
         len(calls),
         len(segments),
-        len(siblings),
+        kept,
+        per_episode - kept,
         sum(len(s.tokens) for s in siblings),
+        {name: count for name, count in counters.items() if count},
     )
     return siblings
 
