@@ -86,7 +86,18 @@ class TorchNativeTrainRayActor(TrainRayActor):
 
     @property
     def train_parallel_config(self) -> dict:
-        return {"dp_size": get_parallel_state().intra_dp.size}
+        # Every axis but dp is a single-rank group on this backend, so the
+        # pipeline fields are 1 rather than absent: advertising all four is what
+        # lets `has_full_schedule_config` admit the rollout-side schedule, which
+        # counts a global batch in rollouts instead of samples and is the only
+        # path that keeps a variable-length rollout's samples in one step.
+        state = get_parallel_state()
+        return {
+            "dp_size": state.intra_dp.size,
+            "cp_size": state.cp.size,
+            "vpp_size": 1,
+            "microbatch_group_size_per_vp_stage": 1,
+        }
 
     def _build_weight_updater(self, model, iterator_factory: Callable) -> WeightUpdater:
         self._published_weight_version = 0
