@@ -155,14 +155,30 @@ def render_prompt_ids(processor, messages: list[dict], images: Sequence[Image.Im
     local render that disagreed would be the thing in doubt.
     """
     rendered = processor.apply_chat_template(
-        messages,
+        _hf_content(messages, images),
         tokenize=True,
         add_generation_prompt=True,
         return_dict=True,
-        images=list(images) or None,
     )
     ids = rendered["input_ids"]
-    return ids[0].tolist() if hasattr(ids, "tolist") and ids.ndim > 1 else list(ids)
+    return ids[0].tolist() if hasattr(ids, "tolist") and getattr(ids, "ndim", 1) > 1 else list(ids)
+
+
+def _hf_content(messages: list[dict], images: Sequence[Image.Image]) -> list[dict]:
+    """OpenAI ``image_url`` parts as the chat template's own ``image`` parts, in order."""
+    remaining = iter(images)
+    converted = []
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            converted.append(message)
+            continue
+        parts = [
+            {"type": "image", "image": next(remaining)} if part.get("type") == "image_url" else part
+            for part in content
+        ]
+        converted.append({**message, "content": parts})
+    return converted
 
 
 def first_difference(left: Sequence[int], right: Sequence[int]) -> int | None:

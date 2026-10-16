@@ -131,11 +131,16 @@ async def main_async(args: argparse.Namespace) -> int:
     finally:
         await recorder.stop()
 
-    print(json.dumps(checks.results, indent=2, default=str))
+    if args.json_out:
+        with open(args.json_out, "w", encoding="utf-8") as handle:
+            json.dump(checks.results, handle, indent=2, default=str)
+    for name, result in checks.results.items():
+        print(f"{'PASS' if result['ok'] else 'FAIL'}  {name}")
+    print(json.dumps({"stats": checks.results.get("samples_valid", {}).get("detail")}, default=str)[:600])
     if checks.failures:
-        print("\nFAILED:\n  " + "\n  ".join(checks.failures))
+        print("FAILED:\n  " + "\n  ".join(failure[:400] for failure in checks.failures))
         return 1
-    print("\nAll live checks passed.")
+    print("All live checks passed.")
     return 0
 
 
@@ -269,6 +274,7 @@ def main() -> None:
     parser.add_argument("--turns", type=int, default=4)
     parser.add_argument("--max-pixels", type=int, default=None)
     parser.add_argument("--timeout", type=float, default=600.0)
+    parser.add_argument("--json-out", default=None, help="write the full check record here")
     args = parser.parse_args()
     args.model_name = args.model_name or args.model
     raise SystemExit(asyncio.run(main_async(args)))
