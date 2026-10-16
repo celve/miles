@@ -81,123 +81,213 @@ class EngineImageConfig:
 
 
 class EngineBinding:
-    """Resolves and checks the image configuration of every engine that could serve a turn.
+    """Resolves the one engine that will serve this run's image turns, and checks it.
 
     Not at construction: Miles waits for this server's listener *before* it launches
     any engine (`placement_group` waits for the session server, then initializes the
-    inference controller), so a constructor-time lookup has nothing to ask and
-    deadlocks the run.
+    inference controller), so a constructor-time lookup has nothing to ask.
 
-    And not the backend's own answer: the backend is the router
-    (`specs/inference.py` passes the router's address), which transparently returns
-    one selected worker's info and then picks a worker per request by least
-    connections. Asking it once binds whichever worker happened to answer, while the
-    next `/generate` can land on another with different preprocessing — and neither
-    the id gate nor the logprob comparison can see that. So every eligible worker is
-    checked, and the set is rechecked when membership changes.
+    And not the backend as a whole: the backend is the router
+    (`specs/inference.py` passes the router's address), which picks a worker per
+    request. Four review rounds showed that no amount of checking *through* the
+    router establishes which worker serves a turn — the session server neither
+    chooses nor observes that choice, so membership polling only narrows a window.
+    So the router is taken out of the image path instead: one engine is resolved and
+    validated, and image generations go straight to it. The validated worker is then
+    the serving worker by construction.
 
     A readiness or transport failure is retried on the next image request; a
-    configuration this path does not support is cached and refused for good.
+    topology or configuration this path cannot serve is cached and refused for good.
     """
 
-    def __init__(self, checkpoint: str, backend_url: str) -> None:
+    def __init__(self, checkpoint: str, backend_url: str, engine_url: str | None = None) -> None:
         self.checkpoint = checkpoint
         self.backend_url = backend_url.rstrip("/")
+        self.configured_engine_url = engine_url.rstrip("/") if engine_url else None
         self._lock = asyncio.Lock()
-        self._resolved: EngineImageConfig | None = None
-        self._validated: frozenset[str] = frozenset()
+        self._resolved: ResolvedEngine | None = None
         self._rejected: SessionError | None = None
 
     @property
-    def resolved(self) -> EngineImageConfig | None:
+    def resolved(self) -> "ResolvedEngine | None":
         return self._resolved
 
-    @property
-    def validated_engines(self) -> list[str]:
-        return sorted(self._validated)
-
-    async def get(self, backend: Any) -> EngineImageConfig:
-        """The configuration every eligible engine shares, or refuse."""
+    async def get(self, backend: Any) -> "ResolvedEngine":
+        """The engine image turns go to, validated. Raises until one can be."""
+        if self._resolved is not None:
+            return self._resolved
         if self._rejected is not None:
             raise self._rejected
-        urls = await self._eligible_urls(backend)
-        if self._resolved is not None and urls == self._validated:
-            return self._resolved
         async with self._lock:
-            # Another request may have validated this very set while we waited.
+            if self._resolved is not None:
+                return self._resolved
             if self._rejected is not None:
                 raise self._rejected
-            if self._resolved is not None and urls == self._validated:
-                return self._resolved
             try:
-                engine = await self._validate_all(backend, urls)
+                url, payload = await self._resolve_engine_url(backend)
+                if payload is None:
+                    status, body = await backend.do_get(f"{url}/get_server_info")
+                    payload = _server_info_payload(url, status, body)
+                config = parse_engine_image_config(payload, where=url)
+                assert_engine_preprocessing_supported(config, checkpoint=self.checkpoint, where=url)
             except SessionError as exc:
                 if isinstance(exc, EngineUnsupportedError):
                     self._rejected = exc
                 raise
-            logger.info(
-                "[session] Engine image configuration accepted for %d engine(s): %s",
-                len(urls),
-                engine.to_dict(),
-            )
-            self._resolved, self._validated = engine, urls
-            return engine
+            logger.info("[session] Image turns pinned to engine %s: %s", url, config.to_dict())
+            self._resolved = ResolvedEngine(url=url, config=config)
+            return self._resolved
 
-    async def _eligible_urls(self, backend: Any) -> frozenset[str]:
-        """Every worker the router could route an image turn to.
+    async def _resolve_engine_url(self, backend: Any) -> tuple[str, dict[str, Any] | None]:
+        """Which single engine serves image turns, plus its server info when already read.
 
-        A backend that serves no worker list is a single engine addressed directly.
+        Fail-closed on anything ambiguous.
         """
-        status, body = await backend.do_get(f"{self.backend_url}/list_workers")
-        if status == 0:
+        if self.configured_engine_url:
+            return self.configured_engine_url, None
+        workers = await self._enumerate_workers(backend)
+        if workers is None:
+            return await self._backend_as_direct_engine(backend)
+        if not workers:
             raise EngineNotReadyError(
-                f"the backend at {self.backend_url} could not be reached to list its engines: "
-                f"{body.decode(errors='replace')[:200]}"
+                f"the router at {self.backend_url} reports no registered engines yet, "
+                "so no image turn can be served"
             )
-        if status == 404:
-            return frozenset({self.backend_url})
-        if status != 200:
-            raise EngineNotReadyError(
-                f"the backend's /list_workers answered {status}, so the engines that could serve an "
-                "image turn are unknown"
-            )
-        try:
-            payload = orjson.loads(body)
-        except orjson.JSONDecodeError as exc:
-            raise EngineNotReadyError(f"the backend's /list_workers is not JSON: {exc}") from exc
-        urls = payload.get("urls") if isinstance(payload, dict) else None
-        if urls is None and isinstance(payload, dict):
-            urls = payload.get("worker_urls")
-        if isinstance(urls, dict):
-            urls = list(urls)
-        if not isinstance(urls, list) or not all(isinstance(url, str) and url for url in urls):
-            # Not a worker list: the backend is itself the engine.
-            return frozenset({self.backend_url})
-        if not urls:
-            raise EngineNotReadyError(
-                "the router reports no registered engines yet, so no image turn can be served"
-            )
-        return frozenset(url.rstrip("/") for url in urls)
-
-    async def _validate_all(self, backend: Any, urls: frozenset[str]) -> EngineImageConfig:
-        """Check each engine, and require them to agree: one of them will serve the turn."""
-        configs: dict[str, EngineImageConfig] = {}
-        for url in sorted(urls):
-            status, body = await backend.do_get(f"{url}/get_server_info")
-            configs[url] = _parse_server_info(url, status, body)
-            assert_engine_preprocessing_supported(configs[url], checkpoint=self.checkpoint, where=url)
-        distinct = {engine.to_dict_json(): url for url, engine in configs.items()}
-        if len(distinct) > 1:
+        if len(workers) > 1:
             raise EngineUnsupportedError(
-                f"the {len(urls)} engines behind {self.backend_url} do not agree about image handling "
-                f"({sorted(distinct.values())} differ), and the router picks one per request, so which "
-                "pixels an image turn gets would depend on load. Serve one configuration to all of them."
+                f"the router at {self.backend_url} fronts {len(workers)} engines ({sorted(workers)}) and "
+                "picks one per request, so the engine whose image preprocessing was checked need not be "
+                "the one that serves a turn. Name the engine image turns must use with "
+                "--session-image-engine-url. Image turns then bypass the router; text turns are unaffected."
             )
-        return next(iter(configs.values()))
+        return workers[0], None
+
+    async def _enumerate_workers(self, backend: Any) -> list[str] | None:
+        """The backend's workers, or ``None`` when it exposes no worker list at all.
+
+        Both router APIs are recognized: `/list_workers` on MilesRouter and
+        `/workers` on sglang-router >= 0.3.0, which `sglang_router_api_client` itself
+        uses. Reading a 404 from only one of them as "direct engine" is what let a
+        modern gateway through in round 4.
+        """
+        for path, extract in (("list_workers", _urls_from_list_workers), ("workers", _urls_from_workers)):
+            status, body = await backend.do_get(f"{self.backend_url}/{path}")
+            if status == 0:
+                raise EngineNotReadyError(
+                    f"the backend at {self.backend_url} could not be reached: "
+                    f"{body.decode(errors='replace')[:200]}"
+                )
+            if status == 404:
+                continue
+            if status != 200:
+                raise EngineNotReadyError(
+                    f"the backend's /{path} answered {status}, so the engines behind it are unknown"
+                )
+            try:
+                payload = orjson.loads(body)
+            except orjson.JSONDecodeError as exc:
+                raise EngineNotReadyError(f"the backend's /{path} is not JSON: {exc}") from exc
+            urls = extract(payload)
+            if urls is not None:
+                return urls
+            raise EngineUnsupportedError(
+                f"the backend's /{path} answered a shape this path does not recognize "
+                f"({sorted(payload)[:12] if isinstance(payload, dict) else type(payload).__name__}), so the "
+                "engines behind it cannot be established. Name the engine image turns must use with "
+                "--session-image-engine-url."
+            )
+        return None
+
+    async def _backend_as_direct_engine(self, backend: Any) -> tuple[str, dict[str, Any]]:
+        """Require the backend to identify itself as the engine, rather than assuming it.
+
+        A direct engine advertises its own ``host``/``port``, which match the address
+        dialed. A gateway proxying a worker's info reports that worker's port instead,
+        so it fails this and is refused — the hole that "404 means direct" left open.
+        """
+        status, body = await backend.do_get(f"{self.backend_url}/get_server_info")
+        payload = _server_info_payload(self.backend_url, status, body)
+        dialed = _url_authority(self.backend_url)
+        advertises = _advertises_dialed_address(payload, dialed)
+        if advertises is None:
+            raise EngineUnsupportedError(
+                f"{self.backend_url} exposes no worker list and states no host/port of its own, so it "
+                "cannot be shown to be the engine that serves an image turn rather than a proxy in front "
+                "of one. Name the engine with --session-image-engine-url."
+            )
+        if not advertises:
+            raise EngineUnsupportedError(
+                f"{self.backend_url} was dialed at {dialed} but advertises "
+                f"{payload.get('host')}:{payload.get('port')}, so it is proxying an engine rather than "
+                "being one, and the engine that serves an image turn need not be the one checked. "
+                "Name the engine with --session-image-engine-url."
+            )
+        return self.backend_url, payload
 
 
-def _parse_server_info(url: str, status: int, body: bytes) -> EngineImageConfig:
-    """One engine's image configuration, or refuse."""
+@dataclass(frozen=True)
+class ResolvedEngine:
+    """The engine image turns are sent to, and what it said about itself."""
+
+    url: str
+    config: EngineImageConfig
+
+
+def _urls_from_list_workers(payload: Any) -> list[str] | None:
+    """MilesRouter: ``{"urls": [...]}``."""
+    if not isinstance(payload, dict):
+        return None
+    urls = payload.get("urls")
+    if isinstance(urls, list) and all(isinstance(url, str) and url for url in urls):
+        return [url.rstrip("/") for url in urls]
+    return None
+
+
+def _urls_from_workers(payload: Any) -> list[str] | None:
+    """sglang-router >= 0.3.0: ``{"workers": [{"url": ...}, ...]}``."""
+    if not isinstance(payload, dict):
+        return None
+    workers = payload.get("workers")
+    if not isinstance(workers, list):
+        return None
+    urls = []
+    for worker in workers:
+        url = worker.get("url") if isinstance(worker, dict) else worker
+        if not isinstance(url, str) or not url:
+            return None
+        urls.append(url.rstrip("/"))
+    return urls
+
+
+def _url_authority(url: str) -> str:
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url if "//" in url else f"//{url}")
+    return f"{parts.hostname or ''}:{parts.port or ''}"
+
+
+def _advertises_dialed_address(payload: dict[str, Any], dialed: str) -> bool | None:
+    """Whether the engine says it listens on the address dialed; ``None`` when it says nothing.
+
+    The port is what discriminates: a gateway proxying a worker's server info reports
+    that worker's port, not the port the request arrived on. A wildcard bind answers
+    for whatever address reached it, so only the port is compared then.
+    """
+    port = payload.get("port")
+    if port is None:
+        return None
+    host = payload.get("host")
+    dialed_host, _, dialed_port = dialed.partition(":")
+    if str(port) != dialed_port:
+        return False
+    if host in (None, "", "0.0.0.0", "::", "*"):
+        return True
+    loopback = {"127.0.0.1", "localhost", "::1"}
+    return host == dialed_host or (host in loopback and dialed_host in loopback)
+
+
+def _server_info_payload(url: str, status: int, body: bytes) -> dict[str, Any]:
+    """The engine's own server-info object, or refuse."""
     if status == 0:
         raise EngineNotReadyError(
             f"engine {url} could not be reached for its image configuration: "
@@ -215,7 +305,7 @@ def _parse_server_info(url: str, status: int, body: bytes) -> EngineImageConfig:
         raise EngineNotReadyError(
             f"engine {url} answered /get_server_info with {type(payload).__name__}, not an object"
         )
-    return parse_engine_image_config(payload, where=url)
+    return payload
 
 
 def parse_engine_image_config(payload: dict[str, Any], *, where: str = "the engine") -> EngineImageConfig:
@@ -293,7 +383,7 @@ class SessionImageSupport:
     def new_session_media(self) -> "SessionMedia":
         return SessionMedia(counter=ImageTokenCounter(self.processor, self.fingerprint))
 
-    async def engine(self, backend: Any) -> EngineImageConfig:
+    async def engine(self, backend: Any) -> "ResolvedEngine":
         return await self.binding.get(backend)
 
     def parsers(self, engine: EngineImageConfig) -> CompletionParsers:
@@ -313,11 +403,11 @@ class SessionImageSupport:
         The engine half is present once it has been resolved, which is on the first
         image request; a text-only session never resolves it and records none.
         """
-        engine = self.binding.resolved
+        resolved = self.binding.resolved
         return {
             "processor": self.fingerprint.to_dict(),
-            "engine": engine.to_dict() if engine is not None else None,
-            "validated_engines": self.binding.validated_engines,
+            "engine": resolved.config.to_dict() if resolved is not None else None,
+            "engine_url": resolved.url if resolved is not None else None,
         }
 
     def process(self, asset_ids: list[str], counts: list[int], media: "SessionMedia") -> list[ProcessedImage]:
@@ -381,7 +471,7 @@ def build_image_support(config: SessionServerConfig, tokenizer: Any) -> SessionI
         fingerprint=fingerprint,
         tokenizer=tokenizer,
         text_only_leaf=config.session_image_text_only_leaf,
-        binding=EngineBinding(config.hf_checkpoint, config.backend_url),
+        binding=EngineBinding(config.hf_checkpoint, config.backend_url, config.session_image_engine_url),
         generation_defaults=read_generation_defaults(config.hf_checkpoint),
     )
 

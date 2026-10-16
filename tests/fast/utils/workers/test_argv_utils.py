@@ -135,6 +135,7 @@ class TestConfigToArgv:
             lora_train_only=False,
             use_session_server="v2",
             session_image_support="off",
+            session_image_engine_url=None,
             session_image_text_only_leaf="drop",
             session_message_matcher="strict",
             pause_generation_mode=None,

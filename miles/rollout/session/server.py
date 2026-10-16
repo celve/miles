@@ -96,8 +96,12 @@ class SessionServer:
         except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
             return 0, f"{type(exc).__name__}: {exc}".encode()
 
-    async def do_proxy(self, request: ProxyRequest, path: str, *, body: bytes, headers: dict) -> dict:
-        url = f"{self.backend_url}/{path}"
+    async def do_proxy(
+        self, request: ProxyRequest, path: str, *, body: bytes, headers: dict, base: str | None = None
+    ) -> dict:
+        # `base` sends a turn to one named engine instead of the router: an image turn
+        # must reach the engine whose preprocessing was checked.
+        url = f"{(base or self.backend_url).rstrip('/')}/{path}"
         if request.query:
             url = f"{url}?{request.query}"
 

@@ -36,6 +36,7 @@ def _measure(version):
         chat_template_path=None,
         use_session_server=version,
         session_image_support="off",
+        session_image_engine_url=None,
         session_image_text_only_leaf="drop",
         session_server_instances=1,
         mock_backend_procs=1,

@@ -194,9 +194,10 @@ class SessionCoreV2(SessionCore):
                 # listener before it launches any engine, so there is nothing to ask
                 # until a request arrives. Cached, so the lock holds one GET per process.
                 support = self.registry.image_support
-                engine = await support.engine(self.backend)
+                resolved = await support.engine(self.backend)
+                engine = resolved.config
                 validate_image_request_features(request_body, parser=engine.tool_call_parser)
-                route = "generate"
+                route, route_base = "generate", resolved.url
                 proxy_body = orjson.dumps(
                     build_generate_body(
                         request_body,
@@ -207,15 +208,18 @@ class SessionCoreV2(SessionCore):
                     )
                 )
             else:
-                route = "v1/chat/completions"
+                route, route_base = "v1/chat/completions", None
                 # orjson: the body carries the whole prompt's input_ids on every turn.
                 proxy_body = orjson.dumps(request_body)
         # --- lock released ---
 
         # --- Phase 2: proxy to backend (NO lock held) ---
         headers = {**headers, "X-SMG-Routing-Key": session_id}
+        # `base` only when an image turn pins an engine, so a backend without the
+        # extension keeps working on the text path.
+        routed = {"base": route_base} if route_base is not None else {}
         result = await self.backend.do_proxy(
-            ProxyRequest(method=method, query=query), route, body=proxy_body, headers=headers
+            ProxyRequest(method=method, query=query), route, body=proxy_body, headers=headers, **routed
         )
 
         # Non-200 (e.g. 400 context too long) passes through unrecorded so the

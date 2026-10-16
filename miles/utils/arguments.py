@@ -2788,6 +2788,17 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "indexer replay side channels, whose per-token rows are sized on the expanded sequence.",
             )
             parser.add_argument(
+                "--session-image-engine-url",
+                type=str,
+                default=None,
+                help="v2 only, with --session-image-support. The one inference engine image turns are "
+                "sent to, bypassing the router. The router picks a worker per request, so the engine "
+                "whose image preprocessing was checked need not be the one that serves a turn, and the "
+                "session server can neither pin nor observe that choice. Omit it when the backend is a "
+                "single engine, or when the router fronts exactly one; a router fronting several refuses "
+                "image support until this names one. Text turns always use the router.",
+            )
+            parser.add_argument(
                 "--session-image-text-only-leaf",
                 type=str,
                 default="drop",

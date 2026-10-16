@@ -56,6 +56,7 @@ class SessionServerConfig(FrozenStrictBaseModel):
     lora_train_only: bool
     use_session_server: bool | str | None
     session_image_support: str
+    session_image_engine_url: str | None
     session_image_text_only_leaf: str
     session_message_matcher: str
     pause_generation_mode: str | None
@@ -91,6 +92,7 @@ def compute_session_server_config(
         lora_train_only=getattr(args, "lora_train_only", False),
         use_session_server=getattr(args, "use_session_server", None),
         session_image_support=getattr(args, "session_image_support", SESSION_IMAGE_SUPPORT_OFF),
+        session_image_engine_url=getattr(args, "session_image_engine_url", None),
         session_image_text_only_leaf=getattr(args, "session_image_text_only_leaf", "drop"),
         session_message_matcher=getattr(args, "session_message_matcher", "strict"),
         pause_generation_mode=getattr(args, "pause_generation_mode", None),
