@@ -20,6 +20,8 @@ Args:
     --harbor-env-type: Harbor ``EnvironmentType`` for the trials (required).
     --harbor-tasks-dir: where ``prepare`` writes the generated task directories.
     --harbor-trials-dir: where Harbor writes trial directories on the worker.
+    --skip-prepare: leave the checkpoint, the task directories and the warmed
+        templates as they are, for a rerun or a hand-curated data directory.
     --mode: ``rollout`` converts rollouts and stops before any optimizer step,
         ``eval`` scores the evaluation split only, ``train`` does the GRPO run --
         which evaluates once before the first update and every
@@ -76,6 +78,7 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     desktop_width: int = 1024
     desktop_height: int = 900
     mode: Literal["train", "rollout", "eval"] = "train"
+    skip_prepare: bool = False
     eval_interval: int = 5
     wandb_project: str = "miles-harbor-cua"
     extra_args: str = ""
@@ -106,6 +109,13 @@ def prepare(args: ScriptArgs):
         f"cd {command_utils.repo_base_dir} && python -m examples.experimental.harbor_cua.make_harbor_cua_tasks "
         f"--tasks-dir {args.harbor_tasks_dir} --data-dir {args.data_dir} "
         f"--train-per-family {args.train_per_family} --eval-per-family {args.eval_per_family}"
+    )
+    # Serial, and before any rollout: Harbor has no retry around a template build, so
+    # concurrent trials on an unbuilt template lose a whole GRPO group to a 409.
+    U.exec_command_cpu(
+        f"cd {command_utils.repo_base_dir} && python -m examples.experimental.harbor_cua.warm_templates "
+        f"--tasks-dir {args.harbor_tasks_dir} --trials-dir {args.harbor_trials_dir} "
+        f"--data {args.data_dir}/train.jsonl {args.data_dir}/eval.jsonl"
     )
 
 
@@ -239,7 +249,8 @@ def main(args: ScriptArgs):
         )
     args.agent_model_name = args.served_model_name
     harbor_env = harbor_env_vars(args)
-    prepare(args)
+    if not args.skip_prepare:
+        prepare(args)
     execute(args, harbor_env=harbor_env)
 
 
