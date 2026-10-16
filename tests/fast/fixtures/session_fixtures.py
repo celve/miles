@@ -27,6 +27,8 @@ def make_session_server_config(**overrides: Any) -> SessionServerConfig:
         lora_adapter_path=None,
         lora_train_only=False,
         use_session_server=None,
+        session_image_support="off",
+        session_image_text_only_leaf="drop",
         session_message_matcher="strict",
         pause_generation_mode=None,
         session_sample_picker_path=None,

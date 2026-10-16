@@ -16,6 +16,13 @@ from miles.rollout.session.core import (
     proxy_result_to_response,
 )
 from miles.rollout.session.errors import SessionNotFoundError, TokenizationError
+from miles.rollout.session.generate_transport import (
+    adapt_generate_response,
+    assert_effective_prompt_ids,
+    build_generate_body,
+    validate_image_request_features,
+)
+from miles.rollout.session.image_processing import expand_input_ids
 from miles.rollout.session.request_args import filter_turn_args, parse_chat_request
 from miles.rollout.session.samples.codec import COMPUTED_FIELDS_V2, ROLLOUT_SAMPLING_MASK_FIELDS, encode_samples
 from miles.rollout.session.types import GetSessionResponse, SessionRecord
@@ -164,6 +171,7 @@ class SessionCoreV2(SessionCore):
                 config=self.config,
                 tito_tokenizer=self.registry.tito_tokenizer,
                 message_matcher=self.registry.message_matcher,
+                image_support=self.registry.image_support,
             )
             request_body, tito_tokenizer = prepared.body, self.registry.tito_tokenizer
             response_intent = prepared.response_intent
@@ -175,14 +183,28 @@ class SessionCoreV2(SessionCore):
             self._maybe_request_addition_r3(request_body, checkpoint_token_ids, prompt_token_ids)
             _add_session_extra_key(request_body, session)
 
-            # orjson: the body carries the whole prompt's input_ids on every turn.
-            proxy_body = orjson.dumps(request_body)
+            # An image turn goes to the native route, which is the only one that carries pixels
+            # alongside pretokenized ids; a text turn keeps the chat route unchanged.
+            if prepared.has_media:
+                validate_image_request_features(request_body)
+                route = "generate"
+                proxy_body = orjson.dumps(
+                    build_generate_body(
+                        request_body,
+                        image_data=[session.media.arena.get(a).to_data_url() for a in prepared.media.asset_ids],
+                        content_hashes=list(prepared.media.asset_ids),
+                    )
+                )
+            else:
+                route = "v1/chat/completions"
+                # orjson: the body carries the whole prompt's input_ids on every turn.
+                proxy_body = orjson.dumps(request_body)
         # --- lock released ---
 
         # --- Phase 2: proxy to backend (NO lock held) ---
         headers = {**headers, "X-SMG-Routing-Key": session_id}
         result = await self.backend.do_proxy(
-            ProxyRequest(method=method, query=query), "v1/chat/completions", body=proxy_body, headers=headers
+            ProxyRequest(method=method, query=query), route, body=proxy_body, headers=headers
         )
 
         # Non-200 (e.g. 400 context too long) passes through unrecorded so the
@@ -190,6 +212,8 @@ class SessionCoreV2(SessionCore):
         if result["status_code"] != 200:
             return proxy_result_to_response(result)
 
+        if prepared.has_media:
+            result = self._chat_result_from_generate(result, request_body, prepared)
         response, choice, assistant_message, completion_token_ids = extract_completion(result)
         assistant_message = tito_tokenizer.postprocess_completion(
             choice=choice,
@@ -224,10 +248,36 @@ class SessionCoreV2(SessionCore):
                 response_id=response.get("id", ""),
                 finish_reason=choice.get("finish_reason") or "",
                 turn_args=request_body,
+                media=prepared.media,
             )
         # --- lock released ---
 
         return _chat_client_response(result, response, response_intent)
+
+    def _chat_result_from_generate(self, result: dict, request_body: dict, prepared) -> dict:
+        """Check the ids inference consumed, then give the native reply the chat shape.
+
+        The rest of this method, the record, and every sample consumer then see
+        exactly the envelope the chat route would have produced.
+        """
+        generated = orjson.loads(result["response_body"])
+        assert_effective_prompt_ids(
+            generated,
+            expand_input_ids(
+                request_body["input_ids"], prepared.media_counts, self.registry.image_support.placeholder_id
+            ),
+            prepared.media,
+            prepared.media_counts,
+        )
+        envelope = adapt_generate_response(
+            result,
+            generated,
+            model=request_body.get("model") or self.config.tito_model,
+            tools=request_body.get("tools"),
+            parsers=self.registry.image_support.parsers,
+            separate_reasoning=request_body.get("separate_reasoning", True),
+        )
+        return {**result, "response_body": _render_json(envelope)}
 
 
 def _add_session_extra_key(request_body: dict, session: SessionStateV2) -> None:

@@ -35,6 +35,8 @@ def _measure(version):
         tito_model="qwen3",
         chat_template_path=None,
         use_session_server=version,
+        session_image_support="off",
+        session_image_text_only_leaf="drop",
         session_server_instances=1,
         mock_backend_procs=1,
         bench_driver_procs=1,

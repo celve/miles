@@ -12,15 +12,16 @@ model resolver, which decides which fields inherit or must stay compatible.
 """
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import orjson
 
 from miles.rollout.generate_utils.rollout_topk_logprobs import configure_rollout_topk_logprobs_request
 from miles.rollout.generate_utils.sampling_mask import validate_sampling_support_request
-from miles.rollout.session.config import SessionServerConfig
+from miles.rollout.session.config import SESSION_IMAGE_SUPPORT_OFF, SessionServerConfig
 from miles.rollout.session.errors import MessageValidationError
+from miles.rollout.session.media import EMPTY_MEDIA, IMAGE_PART_TYPES, RequestMedia
 from miles.utils.chat_template_utils.tito_tokenizer import TITOTokenizer, extract_template_args
 from miles.utils.lora.utils import LORA_ADAPTER_NAME, lora_rollout_enabled
 
@@ -59,11 +60,21 @@ class ClientResponseIntent:
 @dataclass
 class PreparedChatRequest:
     """Outbound body before adding ``input_ids``, template args to render them,
-    and what the client asked the response to carry."""
+    and what the client asked the response to carry.
+
+    ``media`` and ``media_counts`` are this request's image occurrences in prompt
+    order and the tokens each expands into; both are empty on a text request.
+    """
 
     body: dict[str, Any]
     template_args: dict[str, Any]
     response_intent: ClientResponseIntent
+    media: RequestMedia = EMPTY_MEDIA
+    media_counts: list[int] = field(default_factory=list)
+
+    @property
+    def has_media(self) -> bool:
+        return bool(self.media.occurrences)
 
 
 def prepare_chat_request(
@@ -85,6 +96,8 @@ def prepare_chat_request(
     resolves them, and they become the turn's recorded history, so they are shared read-only.
     """
     owned_args = {key: value if key == "messages" else deepcopy(value) for key, value in client_args.items()}
+    if config.session_image_support == SESSION_IMAGE_SUPPORT_OFF:
+        assert_no_image_content(owned_args.get("messages") or [])
     request_args, response_intent = resolve_request_args_by_config(owned_args, config, evaluation=evaluation)
     apply_session_sampling_defaults(request_args, sampling_defaults or {}, evaluation=evaluation)
     try:
@@ -114,6 +127,20 @@ def prepare_chat_request(
     return PreparedChatRequest(
         body=request_args, template_args=extract_template_args(request_args), response_intent=response_intent
     )
+
+
+def assert_no_image_content(messages: list[dict[str, Any]]) -> None:
+    """Refuse image parts on a text-only deployment, naming the flag that enables them."""
+    for message_index, message in enumerate(messages):
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for part_index, part in enumerate(content):
+            if isinstance(part, dict) and part.get("type") in IMAGE_PART_TYPES:
+                raise MessageValidationError(
+                    f"messages[{message_index}].content[{part_index}] carries an image, which this "
+                    "session server does not accept: start it with --session-image-support"
+                )
 
 
 def apply_session_sampling_defaults(

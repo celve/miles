@@ -134,6 +134,8 @@ class TestConfigToArgv:
             lora_adapter_path=None,
             lora_train_only=False,
             use_session_server="v2",
+            session_image_support="off",
+            session_image_text_only_leaf="drop",
             session_message_matcher="strict",
             pause_generation_mode=None,
             session_sample_picker_path="miles.rollout.session.v2.picker_hub.drop_same_prompt_retries",

@@ -43,6 +43,7 @@ from miles.utils.object_store_config import (
     compute_mooncake_init_kwargs_from_env,
     compute_mooncake_init_kwargs_vanilla,
 )
+from miles.rollout.session.config import validate_session_image_args
 from miles.utils.rollout_topk_logprobs import validate_rollout_topk_logprobs_args
 from miles.utils.run_uuid import RUN_UUID_LENGTH, generate_run_uuid, validate_run_uuid
 from miles.utils.score_centering import validate_score_centering_args
@@ -2774,6 +2775,31 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "the pretokenized prefix in multi-turn agentic sessions.",
             )
             parser.add_argument(
+                "--session-image-support",
+                type=str,
+                default="off",
+                choices=["off", "qwen3_vl"],
+                help="v2 only. Carry images through the session server so a screenshot harness can "
+                "train through the agent-function interface. 'off' (default) keeps the text-only "
+                "behavior and rejects image content. 'qwen3_vl' loads the checkpoint's processor, "
+                "sends image-bearing turns to the engine's native /generate route, and assembles "
+                "pixel_values / image_grid_thw per retained leaf. Requires --use-session-server v2 and "
+                "a checkpoint whose processor produces image grids; incompatible with the routing and "
+                "indexer replay side channels, whose per-token rows are sized on the expanded sequence.",
+            )
+            parser.add_argument(
+                "--session-image-text-only-leaf",
+                type=str,
+                default="drop",
+                choices=["drop", "keep"],
+                help="v2 only, with --session-image-support. What to do with a training sample whose "
+                "retained tokens carry no image, such as one built from a text-only summary call. "
+                "'drop' (default) removes it: under FSDP the vision tower's weight all-gathers are "
+                "collectives, so a text-only sample in an image-bearing batch stalls the ranks that "
+                "issued them. 'keep' emits it, for a trainer that tolerates mixed modality. A "
+                "placeholder image is never injected into a real sampled context either way.",
+            )
+            parser.add_argument(
                 "--session-message-matcher",
                 type=str,
                 default="strict",
@@ -3476,6 +3502,8 @@ def miles_validate_args(args):
             raise ValueError(
                 f"--use-session-server v2 does not support {', '.join(unsupported)}; v2 returns list[Sample]"
             )
+
+    validate_session_image_args(args)
 
     if args.use_session_server and args.use_rollout_routing_replay and args.pause_generation_mode == "retract":
         logger.warning(

@@ -8,6 +8,7 @@ concurrency, and tokenization live one layer up in ``session_state``.
 from dataclasses import dataclass, field
 from typing import Any
 
+from miles.rollout.session.media import EMPTY_MEDIA, RequestMedia
 from miles.rollout.session.types import SessionRecord
 from miles.utils.chat_template_utils.message_matcher_hub import SessionMessageMatcher, strict_message_matches
 
@@ -28,6 +29,9 @@ class TrajectoryNode:
     finish_reason: str
     # Full resolved request for this generation, held by reference: read-only once committed.
     turn_args: dict[str, Any] = field(default_factory=dict)
+    # This generation's whole prompt media, in order — not just the delta's, because
+    # truncation and retry comparisons both read the request as the engine saw it.
+    media: RequestMedia = EMPTY_MEDIA
     parent: "TrajectoryNode | None" = None
     children: list["TrajectoryNode"] = field(default_factory=list, repr=False)
 
@@ -79,6 +83,7 @@ class SessionTree:
         record: SessionRecord,
         finish_reason: str,
         turn_args: dict[str, Any] | None = None,
+        media: RequestMedia = EMPTY_MEDIA,
     ) -> TrajectoryNode:
         if len(self.nodes) >= MAX_NODES:
             raise ValueError(
@@ -96,6 +101,7 @@ class SessionTree:
             record=record,
             finish_reason=finish_reason,
             turn_args=turn_args or {},
+            media=media,
             parent=parent,
         )
         self.nodes.append(node)
