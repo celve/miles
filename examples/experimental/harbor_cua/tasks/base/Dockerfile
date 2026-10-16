@@ -38,4 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-COPY page.html /app/page.html
+# The page is inlined as base64 rather than copied in: the sandbox deployment these
+# tasks run on has no build-context upload endpoint, so a copy instruction cannot
+# resolve there (AgentENV#23).
+RUN echo '__PAGE_BASE64__' | base64 -d > /app/page.html

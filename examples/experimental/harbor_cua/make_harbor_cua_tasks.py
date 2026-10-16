@@ -13,6 +13,7 @@ family and variant it came from and which split it is in.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import shutil
 from pathlib import Path
@@ -80,9 +81,15 @@ def write_task(tasks_dir: Path, family: Family, variant: Variant) -> Path:
     (task_dir / "environment").mkdir(parents=True, exist_ok=True)
     (task_dir / "tests").mkdir(parents=True, exist_ok=True)
 
-    page = (_TEMPLATES / "pages" / family.page).read_text()
-    (task_dir / "environment" / PAGE_PLACEHOLDER).write_text(substitute(page, variant.substitutions))
-    shutil.copyfile(_TEMPLATES / "base" / "Dockerfile", task_dir / "environment" / "Dockerfile")
+    page = substitute((_TEMPLATES / "pages" / family.page).read_text(), variant.substitutions)
+    # Kept beside the Dockerfile for reading and diffing; the image takes it from the
+    # base64 below, since this sandbox deployment cannot resolve a COPY.
+    (task_dir / "environment" / PAGE_PLACEHOLDER).write_text(page)
+    dockerfile = substitute(
+        (_TEMPLATES / "base" / "Dockerfile").read_text(),
+        {"PAGE_BASE64": base64.b64encode(page.encode()).decode()},
+    )
+    (task_dir / "environment" / "Dockerfile").write_text(dockerfile)
 
     verifier = task_dir / "tests" / "test.sh"
     shutil.copyfile(_TEMPLATES / "base" / "verify.sh", verifier)

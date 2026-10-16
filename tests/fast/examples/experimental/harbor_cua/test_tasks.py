@@ -1,5 +1,6 @@
 """The task set: a disjoint split, substituted pages, and a verifier contract."""
 
+import base64
 import json
 
 import pytest
@@ -59,8 +60,19 @@ def test_no_placeholder_survives_generation(generated):
     tmp_path, _ = generated
 
     for path in (tmp_path / "tasks").rglob("*"):
-        if path.suffix in {".html", ".md", ".toml"}:
+        if path.suffix in {".html", ".md", ".toml"} or path.name == "Dockerfile":
             assert "__" not in path.read_text().replace("__pycache__", ""), path
+
+
+def test_the_page_is_inlined_rather_than_copied(generated):
+    """This sandbox deployment has no build-context upload, so a COPY cannot resolve."""
+    tmp_path, _ = generated
+    task_dir = next((tmp_path / "tasks").iterdir())
+    dockerfile = (task_dir / "environment" / "Dockerfile").read_text()
+
+    assert not any(line.startswith("COPY ") for line in dockerfile.splitlines())
+    encoded = dockerfile.split("RUN echo '")[1].split("'")[0]
+    assert base64.b64decode(encoded).decode() == (task_dir / "environment" / "page.html").read_text()
 
 
 def test_the_verifier_gets_the_stage_count_and_any_expected_answer(tmp_path):
