@@ -169,10 +169,12 @@ def _check_call_accounting(record, outcome: TrialOutcome, metadata: dict[str, An
     actions = len(record.action_calls())
     metadata["harbor_episodes"] = episodes
     metadata["recorded_action_calls"] = actions
+    metadata["rejected_calls"] = list(record.rejected)
     if episodes and actions < episodes:
         raise ValueError(
             f"recorded {actions} action calls for {episodes} Harbor episodes; "
-            f"{len(record.auxiliary_calls())} calls were classified as the compactor's"
+            f"{len(record.auxiliary_calls())} were classified as the compactor's and "
+            f"{len(record.rejected)} were refused: {record.rejected[:3]}"
         )
 
 
