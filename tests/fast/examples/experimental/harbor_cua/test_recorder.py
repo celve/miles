@@ -209,3 +209,22 @@ def test_media_parsing_keeps_occurrence_order_across_messages():
 
     assert [payload for payload, _ in media] == [first, second]
     assert problems == []
+
+
+async def test_token_ids_hoisted_to_the_envelope_are_still_read(recorder):
+    """A proxy in front of the engine may answer there instead of on the choice."""
+    response = chat_response(prompt_ids=[1, 2], output_ids=[9])
+    choice = response["choices"][0]
+    response["prompt_token_ids"] = choice.pop("prompt_token_ids")
+    response["response_token_ids"] = choice.pop("response_token_ids")
+    response["meta_info"] = choice.pop("meta_info")
+    canned(recorder, response)
+    token = recorder.open_rollout()
+
+    await post_chat(recorder, token, messages_with(png_bytes((2, 4, 6))))
+    record = recorder.take(token)
+
+    assert record.rejected == []
+    assert record.calls[0].prompt_token_ids == (1, 2)
+    assert record.calls[0].output_token_ids == (9,)
+    assert len(record.calls[0].output_logprobs) == 1

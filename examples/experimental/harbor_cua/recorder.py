@@ -96,11 +96,19 @@ def parse_media(messages: list) -> tuple[list[tuple[bytes, str]], list[str]]:
     return media, problems
 
 
-def parse_choice(choice: dict) -> ParsedChoice:
-    meta_info = choice.get("meta_info") or {}
+def parse_choice(choice: dict, envelope: dict | None = None) -> ParsedChoice:
+    """Read one choice's token evidence, wherever the server put it.
+
+    sglang answers on the choice, and a proxy in front of it may hoist the ids to
+    the envelope instead -- which is where Harbor's own reader looks for the
+    prompt ids. Accepting both is what keeps the recorder working behind the
+    Miles router as well as against an engine directly.
+    """
+    envelope = envelope or {}
+    meta_info = choice.get("meta_info") or envelope.get("meta_info") or {}
     triples = meta_info.get("output_token_logprobs") or []
 
-    output_ids = choice.get("response_token_ids")
+    output_ids = choice.get("response_token_ids") or envelope.get("response_token_ids")
     if not isinstance(output_ids, list) and triples:
         output_ids = [triple[1] for triple in triples]
 
@@ -109,7 +117,7 @@ def parse_choice(choice: dict) -> ParsedChoice:
         content = (choice.get("logprobs") or {}).get("content") or []
         logprobs = [entry["logprob"] for entry in content if "logprob" in entry]
 
-    prompt_ids = choice.get("prompt_token_ids")
+    prompt_ids = choice.get("prompt_token_ids") or envelope.get("prompt_token_ids")
     if not isinstance(prompt_ids, list):
         raise CallEvidenceError(
             "the engine returned no prompt_token_ids; the recorder asks for them with "
@@ -239,7 +247,7 @@ class CallRecorder:
             record.rejected.append(f"call {index}: the engine returned no choices")
             return
         try:
-            parsed = parse_choice(choices[0])
+            parsed = parse_choice(choices[0], data)
             occurrences: tuple[MediaOccurrence, ...] = tuple(
                 record.arena.put(payload, media_type) for payload, media_type in media_bytes
             )
@@ -257,7 +265,11 @@ class CallRecorder:
                 )
             )
         except CallEvidenceError as exc:
-            record.rejected.append(f"call {index}: {exc}")
+            # The keys are in the message because the usual cause is a proxy that
+            # re-serialises the reply and drops the fields the recorder asked for.
+            record.rejected.append(
+                f"call {index}: {exc} (choice keys {sorted(choices[0])}, envelope keys {sorted(data)})"
+            )
 
     async def _passthrough(self, path: str, request: Request) -> Response:
         upstream_request = self._client.build_request(
