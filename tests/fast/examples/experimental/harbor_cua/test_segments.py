@@ -7,6 +7,7 @@ from examples.experimental.harbor_cua.calls import CallEvidenceError, RecordedCa
 from examples.experimental.harbor_cua.media import (
     MediaMismatchError,
     MediaProcessor,
+    build_train_inputs,
     pad_token_runs,
     verify_occurrence_runs,
 )
@@ -381,3 +382,27 @@ def test_weight_versions_keep_prefill_spans_for_every_call(episode, fake_process
     assert [len(call.prefill_spans) for call in versions] == [1, 1]
     for per_call in versions:
         per_call.validate(num_tokens=len(samples[0].tokens))
+
+
+def test_adjacent_occurrences_are_two_runs_not_one(fake_processor, episode):
+    """Back-to-back images are separated by their vision-start/end tokens."""
+    call = episode.turn(image=png_bytes((1, 1, 1)))
+    media = MediaProcessor(fake_processor)
+    second = episode.record.arena.put(png_bytes((2, 2, 2)), "image/png")
+    assets = media.process_all(episode.record.arena, (*call.media, second))
+    tokens = [1, *image_block(), *image_block(), 2]
+
+    assert pad_token_runs(tokens, media.image_pad_id) == [TOKENS_PER_IMAGE] * 2
+    verify_occurrence_runs(tokens, media.image_pad_id, assets, where="adjacent")
+
+
+def test_one_image_used_twice_is_two_occurrences(fake_processor, episode):
+    call = episode.turn(image=png_bytes((3, 3, 3)))
+    media = MediaProcessor(fake_processor)
+    repeated = (*call.media, call.media[0])
+    assets = media.process_all(episode.record.arena, repeated)
+
+    assert len(episode.record.arena.assets) == 1
+    verify_occurrence_runs([*image_block(), *image_block()], media.image_pad_id, assets, where="repeated")
+    train_inputs = build_train_inputs(assets)
+    assert int(train_inputs["image_grid_thw"].shape[0]) == 2
