@@ -122,19 +122,19 @@ def _read_code_variants() -> tuple[Variant, ...]:
 
 FAMILIES: tuple[Family, ...] = (
     Family(
-        # 32px targets: the one family whose difficulty comes from grounding precision
-        # rather than from following the instruction, which is where a small model lands
-        # between always and never -- the band GRPO needs.
+        # Difficulty here comes from grounding precision rather than from following the
+        # instruction. Measured on Qwen3-VL-4B: 150px is solved 8/8 and 32px missed 8/8,
+        # so 64px is the size tried for the 1-to-7-of-8 band GRPO needs.
         name="click-small",
         page="click_target.html",
         instruction=(
             "Open the browser and navigate to `file:///app/page.html`.\n"
-            "The page shows five small coloured squares, 32 pixels wide. Click the __COLOR_NAME__ one\n"
+            "The page shows five small coloured squares, 64 pixels wide. Click the __COLOR_NAME__ one\n"
             "precisely; a near miss does not count. The square turns green when you hit it.\n"
             "Then finish with the `done` action."
         ),
         max_turns=10,
-        variants=_click_target_variants(tile_px=32),
+        variants=_click_target_variants(tile_px=64),
     ),
     Family(
         name="click-target",
