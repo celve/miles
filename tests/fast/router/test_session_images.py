@@ -94,6 +94,7 @@ class ScriptedGenerateBackend:
         unready_calls: int = 0,
         worker_urls: list[str] | None = None,
         worker_api: str = "list_workers",
+        worker_shape: dict | None = None,
     ):
         self.vlm = vlm
         self.replies = replies
@@ -109,6 +110,7 @@ class ScriptedGenerateBackend:
         # None => neither worker API answers, i.e. the backend must identify itself.
         self.worker_urls = worker_urls
         self.worker_api = worker_api
+        self.worker_shape = worker_shape
         self.host = "127.0.0.1"
         self.port = find_available_port(32000)
         self.server_info = {
@@ -134,6 +136,8 @@ class ScriptedGenerateBackend:
 
         @self.app.get("/list_workers")
         async def list_workers():
+            if self.worker_shape is not None:
+                return JSONResponse(content=self.worker_shape)
             if self.worker_urls is None or self.worker_api != "list_workers":
                 return JSONResponse(content={"detail": "Not Found"}, status_code=404)
             return JSONResponse(content={"urls": self.worker_urls})
@@ -252,6 +256,8 @@ def image_router(
     unready_calls: int = 0,
     worker_urls: list[str] | None = None,
     worker_api: str = "list_workers",
+    worker_shape: dict | None = None,
+    declare_engine: bool = True,
 ):
     backend = ScriptedGenerateBackend(
         vlm,
@@ -264,6 +270,7 @@ def image_router(
         unready_calls=unready_calls,
         worker_urls=worker_urls,
         worker_api=worker_api,
+        worker_shape=worker_shape,
     )
     backend.start()
     args_values: dict[str, Any] = {
@@ -291,6 +298,11 @@ def image_router(
         "session_sample_picker_path": "miles.rollout.session.v2.picker_hub.drop_same_prompt_retries",
         "session_sample_postprocessor_path": "miles.rollout.session.v2.postprocessor_hub.default_postprocess",
     }
+    # A bare engine exposes no worker API and cannot be derived, so the ordinary
+    # fixture declares itself — the supported standalone deployment. Tests that
+    # assert the refusal pass declare_engine=False.
+    if declare_engine and worker_urls is None and worker_shape is None:
+        args_values["session_image_engine_url"] = backend.url
     args_values.update(extra_args or {})
     port = find_available_port(31000)
     config = compute_session_server_config(
@@ -603,7 +615,7 @@ class TestEngineAgreement:
     )
     def test_a_reply_that_states_nothing_is_refused_not_defaulted(self, vlm, body):
         """Each of these used to read as 'no override', i.e. supported."""
-        assert b"states no host/port of its own" in self.refusal(vlm, server_info_body=body)
+        assert b"does not state model_path" in self.refusal(vlm, server_info_body=body)
 
     def test_a_self_identifying_engine_omitting_a_deciding_field_is_still_refused(self, vlm):
         """Self-identification comes first, so the field check needs its own case."""
@@ -995,26 +1007,42 @@ class TestRoutedTopology:
             assert b"no registered engines" in response.content
 
     def test_an_unrecognized_enumeration_shape_is_refused(self, vlm):
-        with image_router(vlm, ["a"], worker_urls=None) as env:
-            # A gateway that answers the worker API with something else entirely.
-            env.backend.worker_urls = ["ok"]
-            env.backend.worker_api = "list_workers"
-            env.backend.server_info = {**env.backend.server_info, "port": 1}
+        """A genuinely unrecognized payload, so deleting the shape guard fails this."""
+        with image_router(vlm, ["a"], worker_shape={"nodes": [{"endpoint": "http://x:1"}]}) as env:
             session_id = _create_session(env.url)
             response = chat(env, session_id, [user_turn(SHOT1, "look")])
             assert response.status_code >= 400, response.content
+            assert b"shape this path does not recognize" in response.content
 
-    def test_a_proxy_that_hides_its_workers_is_refused_not_assumed_direct(self, vlm):
-        """The reference gateway 404s both worker APIs and still proxies one worker's info."""
-        with image_router(vlm, ["a"], worker_urls=None, server_info={"port": 59999}) as env:
+    @pytest.mark.parametrize(
+        "info",
+        [
+            {},
+            # The same port as the proxy, on another host, truthfully reported by a
+            # healthy worker — a wildcard bind reports exactly this.
+            {"host": "0.0.0.0"},
+            # No host at all.
+            {"host": None},
+        ],
+        ids=["as-is", "wildcard-host", "no-host"],
+    )
+    def test_a_backend_with_no_worker_api_is_refused_not_assumed_direct(self, vlm, info):
+        """Host/port cannot prove endpoint identity: a proxy forwards a worker's truthful info.
+
+        Every one of these was accepted before, including the same-port case, which is
+        why the endpoint is now declared with the flag rather than derived.
+        """
+        with image_router(vlm, ["a"], worker_urls=None, server_info=info, declare_engine=False) as env:
             session_id = _create_session(env.url)
             response = chat(env, session_id, [user_turn(SHOT1, "look")])
             assert response.status_code >= 400, response.content
-            assert b"proxying an engine rather than being one" in response.content
+            assert b"--session-image-engine-url" in response.content
+            assert b"no worker API this path recognizes" in response.content
 
-    def test_a_direct_engine_that_identifies_itself_is_accepted(self, vlm):
+    def test_a_standalone_engine_declares_itself_with_the_flag(self, vlm):
+        """The replacement for the deleted inference: one line of configuration."""
         with image_router(vlm, ["a"], worker_urls=None) as env:
             session_id = _create_session(env.url)
             assert chat(env, session_id, [user_turn(SHOT1, "look")]).status_code == 200
             provenance = collect(env.url, session_id)[0].metadata["image_provenance"]
-            assert provenance["engine_url"].endswith(str(env.backend.port))
+            assert provenance["engine_url"] == env.backend.url

@@ -147,7 +147,17 @@ class EngineBinding:
             return self.configured_engine_url, None
         workers = await self._enumerate_workers(backend)
         if workers is None:
-            return await self._backend_as_direct_engine(backend)
+            # Five review rounds established that nothing reachable through the
+            # backend proves which engine serves a turn: a proxy forwards a healthy
+            # worker's truthful server info, and host/port can coincide. So an
+            # unrecognized or absent worker list is evidence of nothing, and the
+            # endpoint is declared rather than derived.
+            raise EngineUnsupportedError(
+                f"{self.backend_url} exposes no worker API this path recognizes, so the engine that will "
+                "serve an image turn cannot be established — a proxy in front of an engine answers the "
+                "same way one does, and may even share its port. Name the engine image turns must use "
+                "with --session-image-engine-url. A standalone engine sets it to its own address."
+            )
         if not workers:
             raise EngineNotReadyError(
                 f"the router at {self.backend_url} reports no registered engines yet, "
@@ -198,32 +208,6 @@ class EngineBinding:
             )
         return None
 
-    async def _backend_as_direct_engine(self, backend: Any) -> tuple[str, dict[str, Any]]:
-        """Require the backend to identify itself as the engine, rather than assuming it.
-
-        A direct engine advertises its own ``host``/``port``, which match the address
-        dialed. A gateway proxying a worker's info reports that worker's port instead,
-        so it fails this and is refused — the hole that "404 means direct" left open.
-        """
-        status, body = await backend.do_get(f"{self.backend_url}/get_server_info")
-        payload = _server_info_payload(self.backend_url, status, body)
-        dialed = _url_authority(self.backend_url)
-        advertises = _advertises_dialed_address(payload, dialed)
-        if advertises is None:
-            raise EngineUnsupportedError(
-                f"{self.backend_url} exposes no worker list and states no host/port of its own, so it "
-                "cannot be shown to be the engine that serves an image turn rather than a proxy in front "
-                "of one. Name the engine with --session-image-engine-url."
-            )
-        if not advertises:
-            raise EngineUnsupportedError(
-                f"{self.backend_url} was dialed at {dialed} but advertises "
-                f"{payload.get('host')}:{payload.get('port')}, so it is proxying an engine rather than "
-                "being one, and the engine that serves an image turn need not be the one checked. "
-                "Name the engine with --session-image-engine-url."
-            )
-        return self.backend_url, payload
-
 
 @dataclass(frozen=True)
 class ResolvedEngine:
@@ -257,33 +241,6 @@ def _urls_from_workers(payload: Any) -> list[str] | None:
             return None
         urls.append(url.rstrip("/"))
     return urls
-
-
-def _url_authority(url: str) -> str:
-    from urllib.parse import urlsplit
-
-    parts = urlsplit(url if "//" in url else f"//{url}")
-    return f"{parts.hostname or ''}:{parts.port or ''}"
-
-
-def _advertises_dialed_address(payload: dict[str, Any], dialed: str) -> bool | None:
-    """Whether the engine says it listens on the address dialed; ``None`` when it says nothing.
-
-    The port is what discriminates: a gateway proxying a worker's server info reports
-    that worker's port, not the port the request arrived on. A wildcard bind answers
-    for whatever address reached it, so only the port is compared then.
-    """
-    port = payload.get("port")
-    if port is None:
-        return None
-    host = payload.get("host")
-    dialed_host, _, dialed_port = dialed.partition(":")
-    if str(port) != dialed_port:
-        return False
-    if host in (None, "", "0.0.0.0", "::", "*"):
-        return True
-    loopback = {"127.0.0.1", "localhost", "::1"}
-    return host == dialed_host or (host in loopback and dialed_host in loopback)
 
 
 def _server_info_payload(url: str, status: int, body: bytes) -> dict[str, Any]:
