@@ -44,6 +44,7 @@ GYM_URL = os.environ.get("MILES_SCRIPT_GYM_URL", "http://127.0.0.1:11001")
 MODE = os.environ.get("MILES_SCRIPT_MODE", "normal")
 OUTPUT_DIR = os.environ.get("MILES_SCRIPT_OUTPUT_DIR", "/personal/lin1996/osworld-rl")
 PROMPT_DATA = os.environ.get("MILES_SCRIPT_PROMPT_DATA", "/personal/lin1996/osworld_train.jsonl")
+MAX_TOKENS_PER_GPU = int(os.environ.get("MILES_SCRIPT_MAX_TOKENS_PER_GPU", "24576"))
 
 SMOKE = MODE == "smoke"
 # 2 prompts x 4 samples: the group size is what gives GRPO its within-group
@@ -116,6 +117,18 @@ def execute() -> None:
         "--distributed-timeout-minutes 60 "
     )
 
+    # Deliberately NOT --use-dynamic-global-batch-size: `postprocess_rollout_data`
+    # only produces `dynamic_global_batch_size` for a non-compact batch, and
+    # setting any `rollout_id` makes this batch compact, so the flag trips
+    # `assert args.use_dynamic_global_batch_size == (x is not None)` instead of
+    # reconciling anything. The rollout-side schedule that would count the
+    # global batch in rollouts is unreachable here on two counts:
+    # `can_schedule_on_rollout_side` returns False for any batch carrying
+    # `multimodal_train_inputs`, and FSDP publishes only `dp_size` where
+    # `has_full_schedule_config` wants four keys. So the converter emits one
+    # sample per episode and the legacy sample-strided split divides evenly.
+    dynamic_batch_args = ""
+
     grpo_args = (
         "--advantage-estimator grpo "
         "--kl-loss-coef 0.00 "
@@ -165,6 +178,7 @@ def execute() -> None:
         f"{grpo_args} "
         f"{command_utils.get_default_wandb_args(__file__)} "
         f"{fsdp_args} "
+        f"{dynamic_batch_args} "
         f"{sglang_args} "
         f"{telemetry_args} "
         f"{debug_args} "

@@ -219,8 +219,15 @@ def _vision_inputs(state: Any, images: list[PILImage.Image], tokens: list[int]) 
     return {"pixel_values": reprocessed["pixel_values"], "image_grid_thw": reprocessed["image_grid_thw"]}
 
 
-def _failed(sample: Sample, reason: str, state: Any) -> Sample:
+def _failed(sample: Sample, reason: str, state: Any, *, aborted: bool = True) -> Sample:
     """A structurally valid write-off that trains on nothing.
+
+    ``aborted`` marks the whole GRPO group for rejection and refill, which is
+    what an environment failure deserves: ``remove_sample`` alone only zeroes
+    the loss and the row's reward still enters the group's mean and std, so a
+    Docker crash would otherwise be learned from as a genuine 0.0. Only
+    ``Status.ABORTED`` reaches ``apply_aborted_filter``; ``Status.FAILED`` is
+    read nowhere in Miles.
 
     The write-off carries one minimal image, not just a pad token: under FSDP
     every rank must invoke the vision tower the same number of times per
@@ -236,7 +243,7 @@ def _failed(sample: Sample, reason: str, state: Any) -> Sample:
     merge = getattr(state.processor.image_processor, "merge_size", 2)
     n_image_tokens = int(torch.prod(processed["image_grid_thw"], dim=-1).sum().item()) // (merge * merge)
 
-    sample.status = Sample.Status.FAILED
+    sample.status = Sample.Status.ABORTED if aborted else Sample.Status.FAILED
     sample.remove_sample = True
     sample.tokens = (
         [tokenizer.convert_tokens_to_ids("<|vision_start|>")]
@@ -291,8 +298,10 @@ async def generate(args: Any, sample: Sample, sampling_params) -> list[Sample]:
         return [_failed(sample, f"osworld episode dropped: {e}", state)]
     segments = _segments(calls)
     if not segments:
-        return [_failed(sample, "osworld episode carried no exact model-call evidence", state)]
+        return [_failed(sample, "osworld episode carried no exact model-call evidence", state, aborted=False)]
 
+    max_context = int(getattr(args, "rollout_max_context_len", 0) or 0)
+    one_per_episode = str(os.environ.get("OSWORLD_ONE_SAMPLE_PER_EPISODE", "1")).lower() not in ("0", "false", "no")
     rollout_id = sample.rollout_id if sample.rollout_id is not None else sample.index
     siblings: list[Sample] = []
     for index, segment in enumerate(segments):
@@ -307,6 +316,14 @@ async def generate(args: Any, sample: Sample, sampling_params) -> list[Sample]:
             logger.warning("osworld segment %d dropped: %s", index, e)
             continue
         if vision is None:
+            continue
+        if max_context and len(tokens) > max_context:
+            logger.warning(
+                "osworld segment %d dropped: %d tokens exceeds --rollout-max-context-len %d",
+                index,
+                len(tokens),
+                max_context,
+            )
             continue
 
         # Sample is a plain dataclass; the copy happens before any tensor is
@@ -326,7 +343,11 @@ async def generate(args: Any, sample: Sample, sampling_params) -> list[Sample]:
         siblings.append(child)
 
     if not siblings:
-        return [_failed(sample, f"osworld episode kept no segment of {len(segments)}", state)]
+        return [_failed(sample, f"osworld episode kept no segment of {len(segments)}", state, aborted=False)]
+
+    if one_per_episode:
+        # The longest-trained segment carries the most signal of the episode.
+        siblings = [max(siblings, key=lambda child: sum(child.loss_mask))]
 
     logger.info(
         "[osworld %s] reward=%.3f calls=%d segments=%d kept=%d tokens=%d",
