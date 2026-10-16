@@ -99,11 +99,6 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     # fsdp stays selectable for throughput and plumbing work, never for a result.
     backend: Literal["megatron", "fsdp"] = "megatron"
     tensor_model_parallel_size: int = 2
-    # Megatron's own default is transformer_engine, which Miles installs from prebuilt
-    # wheels in its image; on a plain sglang image those wheels break torch's NCCL
-    # symbols, so `local` -- megatron's pure-PyTorch layer spec -- is what runs there.
-    # transformer_engine is faster and is the right choice on the Miles image.
-    transformer_impl: Literal["local", "transformer_engine"] = "local"
     skip_prepare: bool = False
     eval_interval: int = 5
     wandb_project: str = "miles-harbor-cua"
@@ -245,7 +240,6 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
         "--accumulate-allreduce-grads-in-fp32 "
         "--attention-softmax-in-fp32 "
         "--attention-backend flash "
-        f"--transformer-impl {args.transformer_impl} "
         "--megatron-to-hf-mode bridge "
         "--distributed-timeout-minutes 60 "
     )
