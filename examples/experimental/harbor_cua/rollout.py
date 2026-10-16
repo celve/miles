@@ -143,7 +143,7 @@ async def _shared_recorder(args, options: HarborCuaOptions) -> CallRecorder:
     global _recorder
     async with _recorder_lock:
         if _recorder is None:
-            upstream = f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
+            upstream = options.engine_url(args)
             recorder = CallRecorder(upstream=upstream, timeout=options.call_timeout_s)
             await recorder.start()
             logger.info("harbor cua recorder listening on 127.0.0.1:%d for %s", recorder.port, upstream)

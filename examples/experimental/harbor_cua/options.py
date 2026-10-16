@@ -27,6 +27,10 @@ class HarborCuaOptions:
     write_off_mode: str = WRITE_OFF_ABORT_GROUP
     min_pixels: int | None = None
     max_pixels: int | None = None
+    # Measured on the Miles sglang router at 0.5.22: a chat reply comes back without
+    # prompt_token_ids, response_token_ids or meta_info, so the recorder has no exact
+    # evidence and refuses the call. Naming an engine's own URL here restores it.
+    upstream: str = ""
 
     def __post_init__(self) -> None:
         if self.write_off_mode not in WRITE_OFF_MODES:
@@ -50,6 +54,10 @@ class HarborCuaOptions:
         }
         return settings or None
 
+    def engine_url(self, args) -> str:
+        """Where the recorder forwards: an explicit engine, else the router."""
+        return self.upstream or f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
+
     def sample_token_budget(self, args) -> int | None:
         if self.max_sample_tokens is not None:
             return self.max_sample_tokens
@@ -68,5 +76,6 @@ def add_arguments(parser) -> None:
     group.add_argument(
         "--harbor-cua-write-off-mode", choices=list(WRITE_OFF_MODES), default=defaults.write_off_mode
     )
+    group.add_argument("--harbor-cua-upstream", type=str, default=defaults.upstream)
     group.add_argument("--harbor-cua-min-pixels", type=int, default=defaults.min_pixels)
     group.add_argument("--harbor-cua-max-pixels", type=int, default=defaults.max_pixels)

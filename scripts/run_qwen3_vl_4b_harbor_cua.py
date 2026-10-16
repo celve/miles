@@ -75,6 +75,9 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     attn_implementation: str = "flash_attention_3"
     max_sandboxes: int = 8
     max_pixels: int = 1_204_224
+    # Empty means the router, which on sglang 0.5.22 answers without the token-evidence
+    # fields the recorder needs; name an engine's own URL to get them.
+    recorder_upstream: str = ""
     desktop_width: int = 1024
     desktop_height: int = 900
     mode: Literal["train", "rollout", "eval"] = "train"
@@ -147,6 +150,7 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
         f"--harbor-cua-max-turns {args.max_turns} "
         f"--harbor-cua-max-sandboxes {args.max_sandboxes} "
         f"--harbor-cua-max-pixels {args.max_pixels} "
+        + (f"--harbor-cua-upstream {args.recorder_upstream} " if args.recorder_upstream else "")
         "--harbor-cua-write-off-mode abort_group "
         + ("--debug-rollout-only " if args.mode == "rollout" else "")
     )
