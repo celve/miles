@@ -60,7 +60,9 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     harbor_env_type: str = ""
     harbor_env_kwargs: str = ""
     e2b_api_key_file: str = ""
-    agent_model_name: str = MODEL_NAME
+    # Empty means "whatever the engines serve", which is the checkpoint path Miles passes
+    # as --hf-checkpoint; a litellm model name that is not the served one fails every call.
+    agent_model_name: str = ""
     agent_timeout: int = 600
     train_per_family: int = 4
     eval_per_family: int = 2
@@ -85,6 +87,10 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     @property
     def global_batch_size(self) -> int:
         return self.rollout_batch_size * self.n_samples_per_prompt
+
+    @property
+    def served_model_name(self) -> str:
+        return self.agent_model_name or self.model_path
 
     @property
     def rollouts(self) -> int:
@@ -231,6 +237,7 @@ def main(args: ScriptArgs):
             "--harbor-env-type is required: in-process trials need a sandbox backend the "
             "rollout worker can reach, such as e2b"
         )
+    args.agent_model_name = args.served_model_name
     harbor_env = harbor_env_vars(args)
     prepare(args)
     execute(args, harbor_env=harbor_env)
