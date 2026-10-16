@@ -33,6 +33,7 @@ import asyncio
 import base64
 import io
 import logging
+import os
 from typing import Any
 
 from PIL import Image as PILImage
@@ -56,7 +57,11 @@ async def _run_gym_task(args: Any, task: dict, sampling_params: dict) -> dict:
     """POST one task to Gym and return its response envelope."""
     import aiohttp  # noqa: PLC0415
 
-    base_url = str(getattr(args, "osworld_gym_url", "http://127.0.0.1:11000")).rstrip("/")
+    # The launcher forwards the URL through the worker environment, so a Gym on
+    # another host needs no config file.
+    base_url = str(
+        getattr(args, "osworld_gym_url", None) or os.environ.get("MILES_SCRIPT_GYM_URL") or "http://127.0.0.1:11001"
+    ).rstrip("/")
     create_params = dict(task.get("responses_create_params") or {})
     create_params.setdefault("max_output_tokens", int(sampling_params.get("max_new_tokens", 1500)))
     create_params.setdefault("temperature", float(sampling_params.get("temperature", 1.0)))
