@@ -34,9 +34,9 @@ from miles.utils.processing_utils import load_processor, load_tokenizer
 from miles.utils.test_utils.uvicorn_thread_server import UvicornThreadServer
 from miles.utils.types import Sample
 
-# 75.0 s measured for the whole file on a devbox, not on a CI runner; each case
+# 91.0 s measured for the whole file on a devbox, not on a CI runner; each case
 # starts its own server because the flags under test are launch-scoped.
-register_cpu_ci(est_time=100, suite="stage-b-cpu", labels=["rollout"])
+register_cpu_ci(est_time=120, suite="stage-b-cpu", labels=["rollout"])
 
 CHECKPOINT = "Qwen/Qwen3-VL-2B-Instruct"
 IMAGE_TOKEN = "<|image_pad|>"
@@ -92,6 +92,7 @@ class ScriptedGenerateBackend:
         server_info_status: int = 200,
         server_info_body: dict | None = None,
         unready_calls: int = 0,
+        worker_urls: list[str] | None = None,
     ):
         self.vlm = vlm
         self.replies = replies
@@ -114,6 +115,8 @@ class ScriptedGenerateBackend:
         self.server_info_status = server_info_status
         self.server_info_body = server_info_body
         self.unready_calls = unready_calls
+        # None => no /list_workers, i.e. the backend is the engine addressed directly.
+        self.worker_urls = worker_urls
         self.host = "127.0.0.1"
         self.port = find_available_port(32000)
         self.app = FastAPI()
@@ -122,6 +125,12 @@ class ScriptedGenerateBackend:
         @self.app.get("/health")
         async def health():
             return JSONResponse(content={"status": "ok"})
+
+        @self.app.get("/list_workers")
+        async def list_workers():
+            if self.worker_urls is None:
+                return JSONResponse(content={"detail": "Not Found"}, status_code=404)
+            return JSONResponse(content={"urls": self.worker_urls})
 
         @self.app.get("/get_server_info")
         async def server_info():
@@ -228,6 +237,7 @@ def image_router(
     server_info_status: int = 200,
     server_info_body: dict | None = None,
     unready_calls: int = 0,
+    worker_urls: list[str] | None = None,
 ):
     backend = ScriptedGenerateBackend(
         vlm,
@@ -238,6 +248,7 @@ def image_router(
         server_info_status=server_info_status,
         server_info_body=server_info_body,
         unready_calls=unready_calls,
+        worker_urls=worker_urls,
     )
     backend.start()
     args_values: dict[str, Any] = {
@@ -551,7 +562,7 @@ class TestEngineAgreement:
         )
 
     def test_a_different_served_checkpoint_is_refused(self, vlm):
-        assert b"the engine serves" in self.refusal(vlm, server_info={"model_path": "Qwen/Qwen3-0.6B"})
+        assert b"but --hf-checkpoint is" in self.refusal(vlm, server_info={"model_path": "Qwen/Qwen3-0.6B"})
 
     def test_a_non_default_image_backend_is_refused(self, vlm):
         assert b"image-processor-backend" in self.refusal(
@@ -819,3 +830,121 @@ class TestColdStart:
             session_id = _create_session(env.url)
             assert chat(env, session_id, [user_turn(None, "text only")]).status_code == 200
             assert chat(env, session_id, [user_turn(SHOT1, "look")]).status_code == 503
+
+
+class SingleWorker:
+    """One engine behind a router, stating its own image configuration."""
+
+    def __init__(self, server_info: dict):
+        self.server_info = server_info
+        self.app = FastAPI()
+        self.host = "127.0.0.1"
+        self.port = find_available_port(33000)
+        self._server = UvicornThreadServer(self.app, host=self.host, port=self.port)
+
+        @self.app.get("/get_server_info")
+        async def info():
+            return JSONResponse(content=self.server_info)
+
+    @property
+    def url(self) -> str:
+        return f"http://{self.host}:{self.port}"
+
+    def start(self):
+        self._server.start()
+
+    def stop(self):
+        self._server.stop()
+
+
+def worker_info(**overrides) -> dict:
+    return {
+        "model_path": CHECKPOINT,
+        "revision": None,
+        "mm_process_config": {},
+        "image_processor_backend": "auto",
+        "sampling_defaults": "model",
+        "tool_call_parser": None,
+        "reasoning_parser": None,
+        **overrides,
+    }
+
+
+class TestRoutedTopology:
+    """The backend is the router, and it picks a worker per request.
+
+    `specs/inference.py` passes the router's address as the session server's
+    backend, and the router selects by least connections. So asking the backend
+    once binds whichever worker answered, while the next `/generate` can land on a
+    different one — which neither the id gate nor the logprob comparison can see.
+    """
+
+    @contextmanager
+    def routed(self, vlm, *worker_infos: dict, replies: list[str] | None = None):
+        workers = [SingleWorker(info) for info in worker_infos]
+        for worker in workers:
+            worker.start()
+        try:
+            with image_router(
+                vlm, replies or ["a"], worker_urls=[w.url for w in workers]
+            ) as env:
+                env.workers = workers
+                yield env
+        finally:
+            for worker in workers:
+                worker.stop()
+
+    def test_every_worker_behind_the_router_is_checked(self, vlm):
+        """One supported worker does not make the pool supported."""
+        with self.routed(
+            vlm,
+            worker_info(),
+            worker_info(mm_process_config={"image": {"do_normalize": False}}),
+        ) as env:
+            session_id = _create_session(env.url)
+            response = chat(env, session_id, [user_turn(SHOT1, "look")])
+            assert response.status_code >= 400, response.content
+            assert b"mm-process-config" in response.content
+
+    def test_a_homogeneous_pool_is_accepted_and_recorded(self, vlm):
+        with self.routed(vlm, worker_info(), worker_info()) as env:
+            session_id = _create_session(env.url)
+            assert chat(env, session_id, [user_turn(SHOT1, "look")]).status_code == 200
+            provenance = collect(env.url, session_id)[0].metadata["image_provenance"]
+            assert len(provenance["validated_engines"]) == 2
+
+    def test_engines_that_disagree_are_refused_even_when_each_is_supported(self, vlm):
+        """Both are individually fine, but which pixels a turn gets would depend on load."""
+        with self.routed(
+            vlm, worker_info(), worker_info(tool_call_parser="qwen25")
+        ) as env:
+            session_id = _create_session(env.url)
+            response = chat(env, session_id, [user_turn(SHOT1, "look")])
+            assert response.status_code >= 400, response.content
+            assert b"do not agree about image handling" in response.content
+
+    def test_an_empty_worker_list_is_not_ready(self, vlm):
+        with image_router(vlm, ["a"], worker_urls=[]) as env:
+            session_id = _create_session(env.url)
+            response = chat(env, session_id, [user_turn(SHOT1, "look")])
+            assert response.status_code == 503
+            assert b"no registered engines" in response.content
+
+    def test_a_worker_joining_later_is_checked_before_it_can_serve(self, vlm):
+        """Membership change invalidates the binding, so a new worker cannot slip in."""
+        good, bad = SingleWorker(worker_info()), SingleWorker(
+            worker_info(mm_process_config={"image": {"do_normalize": False}})
+        )
+        good.start()
+        bad.start()
+        try:
+            with image_router(vlm, ["a", "b"], worker_urls=[good.url]) as env:
+                session_id = _create_session(env.url)
+                assert chat(env, session_id, [user_turn(SHOT1, "look")]).status_code == 200
+                env.backend.worker_urls = [good.url, bad.url]
+                response = chat(env, session_id, [user_turn(SHOT2, "again")])
+                assert response.status_code >= 400, response.content
+                assert b"mm-process-config" in response.content
+        finally:
+            good.stop()
+            bad.stop()

@@ -64,6 +64,10 @@ class EngineImageConfig:
             "reasoning_parser": self.reasoning_parser,
         }
 
+    def to_dict_json(self) -> str:
+        """A comparison key: every engine behind the router must agree on all of it."""
+        return orjson.dumps(self.to_dict(), option=orjson.OPT_SORT_KEYS).decode()
+
     def model_sampling_defaults(self, generation_defaults: dict[str, Any]) -> dict[str, Any]:
         """The defaults the engine applies to a field the request omits.
 
@@ -76,92 +80,152 @@ class EngineImageConfig:
         return dict(generation_defaults) if self.sampling_defaults == "model" else {}
 
 
-def EngineConfigError(message: str, *, retryable: bool) -> SessionError:
-    """The engine's image configuration is unusable or unsupported.
-
-    Two session errors rather than one, because the HTTP status the agent sees has
-    to say whether trying again can help: readiness is 503, a launch flag is 500.
-    """
-    return EngineNotReadyError(message) if retryable else EngineUnsupportedError(message)
-
-
 class EngineBinding:
-    """Resolves and checks the engine's image configuration once, on first use.
+    """Resolves and checks the image configuration of every engine that could serve a turn.
 
     Not at construction: Miles waits for this server's listener *before* it launches
     any engine (`placement_group` waits for the session server, then initializes the
     inference controller), so a constructor-time lookup has nothing to ask and
-    deadlocks the run. A readiness or transport failure is retried on the next image
-    request; a configuration this path does not support is cached and refused for
-    good, because retrying cannot change it.
+    deadlocks the run.
+
+    And not the backend's own answer: the backend is the router
+    (`specs/inference.py` passes the router's address), which transparently returns
+    one selected worker's info and then picks a worker per request by least
+    connections. Asking it once binds whichever worker happened to answer, while the
+    next `/generate` can land on another with different preprocessing — and neither
+    the id gate nor the logprob comparison can see that. So every eligible worker is
+    checked, and the set is rechecked when membership changes.
+
+    A readiness or transport failure is retried on the next image request; a
+    configuration this path does not support is cached and refused for good.
     """
 
-    def __init__(self, checkpoint: str) -> None:
+    def __init__(self, checkpoint: str, backend_url: str) -> None:
         self.checkpoint = checkpoint
+        self.backend_url = backend_url.rstrip("/")
         self._lock = asyncio.Lock()
         self._resolved: EngineImageConfig | None = None
+        self._validated: frozenset[str] = frozenset()
         self._rejected: SessionError | None = None
 
     @property
     def resolved(self) -> EngineImageConfig | None:
         return self._resolved
 
+    @property
+    def validated_engines(self) -> list[str]:
+        return sorted(self._validated)
+
     async def get(self, backend: Any) -> EngineImageConfig:
-        if self._resolved is not None:
-            return self._resolved
+        """The configuration every eligible engine shares, or refuse."""
         if self._rejected is not None:
             raise self._rejected
+        urls = await self._eligible_urls(backend)
+        if self._resolved is not None and urls == self._validated:
+            return self._resolved
         async with self._lock:
-            if self._resolved is not None:
-                return self._resolved
+            # Another request may have validated this very set while we waited.
             if self._rejected is not None:
                 raise self._rejected
-            payload = await _fetch_server_info(backend)
+            if self._resolved is not None and urls == self._validated:
+                return self._resolved
             try:
-                engine = parse_engine_image_config(payload)
-                assert_engine_preprocessing_supported(engine, checkpoint=self.checkpoint)
+                engine = await self._validate_all(backend, urls)
             except SessionError as exc:
                 if isinstance(exc, EngineUnsupportedError):
                     self._rejected = exc
                 raise
-            logger.info("[session] Engine image configuration accepted: %s", engine.to_dict())
-            self._resolved = engine
+            logger.info(
+                "[session] Engine image configuration accepted for %d engine(s): %s",
+                len(urls),
+                engine.to_dict(),
+            )
+            self._resolved, self._validated = engine, urls
             return engine
 
+    async def _eligible_urls(self, backend: Any) -> frozenset[str]:
+        """Every worker the router could route an image turn to.
 
-async def _fetch_server_info(backend: Any) -> dict[str, Any]:
-    """GET the engine's server info through this server's own proxy client."""
-    from miles.rollout.session.core import ProxyRequest
+        A backend that serves no worker list is a single engine addressed directly.
+        """
+        status, body = await backend.do_get(f"{self.backend_url}/list_workers")
+        if status == 0:
+            raise EngineNotReadyError(
+                f"the backend at {self.backend_url} could not be reached to list its engines: "
+                f"{body.decode(errors='replace')[:200]}"
+            )
+        if status == 404:
+            return frozenset({self.backend_url})
+        if status != 200:
+            raise EngineNotReadyError(
+                f"the backend's /list_workers answered {status}, so the engines that could serve an "
+                "image turn are unknown"
+            )
+        try:
+            payload = orjson.loads(body)
+        except orjson.JSONDecodeError as exc:
+            raise EngineNotReadyError(f"the backend's /list_workers is not JSON: {exc}") from exc
+        urls = payload.get("urls") if isinstance(payload, dict) else None
+        if urls is None and isinstance(payload, dict):
+            urls = payload.get("worker_urls")
+        if isinstance(urls, dict):
+            urls = list(urls)
+        if not isinstance(urls, list) or not all(isinstance(url, str) and url for url in urls):
+            # Not a worker list: the backend is itself the engine.
+            return frozenset({self.backend_url})
+        if not urls:
+            raise EngineNotReadyError(
+                "the router reports no registered engines yet, so no image turn can be served"
+            )
+        return frozenset(url.rstrip("/") for url in urls)
 
-    result = await backend.do_proxy(ProxyRequest(method="GET"), "get_server_info", body=b"", headers={})
-    status = result.get("status_code")
+    async def _validate_all(self, backend: Any, urls: frozenset[str]) -> EngineImageConfig:
+        """Check each engine, and require them to agree: one of them will serve the turn."""
+        configs: dict[str, EngineImageConfig] = {}
+        for url in sorted(urls):
+            status, body = await backend.do_get(f"{url}/get_server_info")
+            configs[url] = _parse_server_info(url, status, body)
+            assert_engine_preprocessing_supported(configs[url], checkpoint=self.checkpoint, where=url)
+        distinct = {engine.to_dict_json(): url for url, engine in configs.items()}
+        if len(distinct) > 1:
+            raise EngineUnsupportedError(
+                f"the {len(urls)} engines behind {self.backend_url} do not agree about image handling "
+                f"({sorted(distinct.values())} differ), and the router picks one per request, so which "
+                "pixels an image turn gets would depend on load. Serve one configuration to all of them."
+            )
+        return next(iter(configs.values()))
+
+
+def _parse_server_info(url: str, status: int, body: bytes) -> EngineImageConfig:
+    """One engine's image configuration, or refuse."""
+    if status == 0:
+        raise EngineNotReadyError(
+            f"engine {url} could not be reached for its image configuration: "
+            f"{body.decode(errors='replace')[:200]}"
+        )
     if status != 200:
-        raise EngineConfigError(
-            f"the engine's /get_server_info answered {status}, so its image configuration is unknown; "
-            "an image request cannot be served until it does",
-            retryable=True,
+        raise EngineNotReadyError(
+            f"engine {url} answered {status} for /get_server_info, so its image configuration is unknown"
         )
     try:
-        payload = orjson.loads(result["response_body"])
+        payload = orjson.loads(body)
     except orjson.JSONDecodeError as exc:
-        raise EngineConfigError(f"the engine's /get_server_info is not JSON: {exc}", retryable=True) from exc
+        raise EngineNotReadyError(f"engine {url} did not answer /get_server_info with JSON: {exc}") from exc
     if not isinstance(payload, dict):
-        raise EngineConfigError(
-            f"the engine's /get_server_info returned {type(payload).__name__}, not an object", retryable=True
+        raise EngineNotReadyError(
+            f"engine {url} answered /get_server_info with {type(payload).__name__}, not an object"
         )
-    return payload
+    return parse_engine_image_config(payload, where=url)
 
 
-def parse_engine_image_config(payload: dict[str, Any]) -> EngineImageConfig:
+def parse_engine_image_config(payload: dict[str, Any], *, where: str = "the engine") -> EngineImageConfig:
     """Read the fields that decide pixel agreement, refusing a reply that omits any."""
     missing = [key for key in EngineImageConfig.REQUIRED if key not in payload]
     if missing:
-        raise EngineConfigError(
-            f"the engine's /get_server_info does not state {', '.join(missing)}, so it cannot be checked. "
+        raise EngineNotReadyError(
+            f"{where} does not state {', '.join(missing)} in /get_server_info, so it cannot be checked. "
             f"It answered with keys {sorted(payload)[:12]}. A router or gateway that aggregates workers "
-            "answers for none of them: point --use-session-server at the engine whose images it will serve.",
-            # A router that is still electing a worker can start answering for one.
-            retryable=True,
+            "answers for none of them, and a router still electing one can start to."
         )
     return EngineImageConfig(
         model_path=str(payload["model_path"] or ""),
@@ -174,38 +238,35 @@ def parse_engine_image_config(payload: dict[str, Any]) -> EngineImageConfig:
     )
 
 
-def assert_engine_preprocessing_supported(engine: EngineImageConfig, *, checkpoint: str) -> None:
+def assert_engine_preprocessing_supported(
+    engine: EngineImageConfig, *, checkpoint: str, where: str = "the engine"
+) -> None:
     """Require the one engine image configuration whose pixels this slice has verified."""
     if not engine.model_path:
-        raise EngineConfigError(
-            "the engine states an empty model_path, so the checkpoint it serves cannot be established",
-            retryable=False,
+        raise EngineUnsupportedError(
+            f"{where} states an empty model_path, so the checkpoint it serves cannot be established"
         )
     if engine.model_path != checkpoint:
-        raise EngineConfigError(
-            f"the engine serves {engine.model_path!r} but --hf-checkpoint is {checkpoint!r}; "
-            "the two processors would disagree about every image",
-            retryable=False,
+        raise EngineUnsupportedError(
+            f"{where} serves {engine.model_path!r} but --hf-checkpoint is {checkpoint!r}; "
+            "the two processors would disagree about every image"
         )
     if engine.revision is not None:
-        raise EngineConfigError(
-            f"the engine pins revision {engine.revision!r} while this server loads the processor unpinned, "
+        raise EngineUnsupportedError(
+            f"{where} pins revision {engine.revision!r} while this server loads the processor unpinned, "
             "so the two could resize or normalize differently with every token id still matching; "
-            "serve the checkpoint's default revision",
-            retryable=False,
+            "serve the checkpoint's default revision"
         )
     if engine.mm_process_config:
-        raise EngineConfigError(
-            f"the engine was launched with --mm-process-config {engine.mm_process_config!r}, which changes "
+        raise EngineUnsupportedError(
+            f"{where} was launched with --mm-process-config {engine.mm_process_config!r}, which changes "
             "how it decodes or normalizes images; its pixels would then differ from the trainer's while "
-            "every token id stayed identical. Launch it with the checkpoint's default image preprocessing.",
-            retryable=False,
+            "every token id stayed identical. Launch it with the checkpoint's default image preprocessing."
         )
     if engine.image_processor_backend != "auto":
-        raise EngineConfigError(
-            f"the engine's --image-processor-backend is {engine.image_processor_backend!r}; this path has "
-            "only verified pixel agreement for the default 'auto' backend",
-            retryable=False,
+        raise EngineUnsupportedError(
+            f"{where} has --image-processor-backend {engine.image_processor_backend!r}; this path has "
+            "only verified pixel agreement for the default 'auto' backend"
         )
 
 
@@ -256,6 +317,7 @@ class SessionImageSupport:
         return {
             "processor": self.fingerprint.to_dict(),
             "engine": engine.to_dict() if engine is not None else None,
+            "validated_engines": self.binding.validated_engines,
         }
 
     def process(self, asset_ids: list[str], counts: list[int], media: "SessionMedia") -> list[ProcessedImage]:
@@ -319,7 +381,7 @@ def build_image_support(config: SessionServerConfig, tokenizer: Any) -> SessionI
         fingerprint=fingerprint,
         tokenizer=tokenizer,
         text_only_leaf=config.session_image_text_only_leaf,
-        binding=EngineBinding(config.hf_checkpoint),
+        binding=EngineBinding(config.hf_checkpoint, config.backend_url),
         generation_defaults=read_generation_defaults(config.hf_checkpoint),
     )
 

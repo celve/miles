@@ -80,6 +80,22 @@ class SessionServer:
             self.client = client
             yield
 
+    async def do_get(self, url: str) -> tuple[int, bytes]:
+        """GET an absolute URL with this server's own client.
+
+        Engine metadata lives off the proxy path: the backend is the router, and
+        checking what each worker behind it will do to an image means asking the
+        workers, not the router. Returns ``(0, reason)`` for a transport failure, so
+        the caller can treat it as "not ready yet" rather than as an answer.
+        """
+        try:
+            async with self.client.request(
+                "GET", url, allow_redirects=False, proxy=self.proxy, proxy_auth=self.proxy_auth
+            ) as response:
+                return response.status, await response.read()
+        except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
+            return 0, f"{type(exc).__name__}: {exc}".encode()
+
     async def do_proxy(self, request: ProxyRequest, path: str, *, body: bytes, headers: dict) -> dict:
         url = f"{self.backend_url}/{path}"
         if request.query:
