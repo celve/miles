@@ -7,9 +7,11 @@ across the ranks is refused at construction rather than at the optimizer.
 
 from __future__ import annotations
 
+import shlex
+
 import pytest
 
-from scripts.run_qwen3_vl_4b_osworld import ScriptArgs, _refuse_geometry_overrides
+from scripts.run_qwen3_vl_4b_osworld import ScriptArgs, _refuse_geometry_overrides, execute
 
 
 def test_global_batch_size_is_derived_from_the_episode_sample_count():
@@ -60,6 +62,11 @@ def _args(extra_env_vars=""):
         "--micro-batch-size 1 --global-batch-size 120 --micro-batch-size 7",
         # `=`, which argparse accepts identically.
         "--micro-batch-size 1 --micro-batch-size=7",
+        # Quoted forms: the backend tokenizes with shlex, so str.split kept
+        # these as single tokens and the guard never saw the flag.
+        "--micro-batch-size 1 \'--micro-batch-size=7\'",
+        '--micro-batch-size 1 "--micro-batch-size=7"',
+        "--micro-batch-size 1 --micro-batch-size\'=7\'",
     ],
 )
 def test_an_extra_arg_redeclaring_the_geometry_is_refused(argv):
@@ -70,7 +77,15 @@ def test_an_extra_arg_redeclaring_the_geometry_is_refused(argv):
         _refuse_geometry_overrides(argv, _args(), LAUNCHER_ENV)
 
 
-@pytest.mark.parametrize("argv", ["--micro-batch-size 1 --micro-batch=7", "--micro-batch-size 1 --global-batch 8"])
+@pytest.mark.parametrize(
+    "argv",
+    [
+        "--micro-batch-size 1 --micro-batch=7",
+        "--micro-batch-size 1 --global-batch 8",
+        # Quoted, which str.split would have kept as one opaque token.
+        "--micro-batch-size 1 \'--micro-batch=7\'",
+    ],
+)
 def test_an_abbreviated_geometry_flag_is_refused(argv):
     """Miles's parser leaves argparse's abbreviation matching on, so an
     unambiguous prefix reaches the same destination under another spelling."""
@@ -96,3 +111,58 @@ def test_an_extra_env_var_overriding_the_sample_count_is_refused(extra):
 def test_unrelated_extras_are_left_alone():
     argv = "--micro-batch-size 1 --log-passrate --seed 7 --num-rollout=3"
     assert _refuse_geometry_overrides(argv, _args("WANDB_MODE=offline"), LAUNCHER_ENV) is None
+
+
+GEOMETRY_FLAGS = (
+    "--rollout-batch-size",
+    "--n-samples-per-prompt",
+    "--global-batch-size",
+    "--micro-batch-size",
+    "--actor-num-nodes",
+    "--actor-num-gpus-per-node",
+    "--num-gpus-per-node",
+)
+
+
+def _emitted_argv(**kwargs):
+    """The argv execute() hands the backend, captured without running anything."""
+    captured = {}
+
+    class _Backend:
+        def exec_command_cpu(self, cmd, **kw):
+            pass
+
+        def execute_train(self, train_args, **kw):
+            captured["argv"] = shlex.split(train_args)
+
+    args = ScriptArgs(samples_per_episode=15, num_gpus_per_node=4, **kwargs)
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(ScriptArgs, "create_backend", lambda self: _Backend())
+    try:
+        execute(args)
+    finally:
+        monkey.undo()
+    return captured["argv"]
+
+
+def test_the_geometry_is_declared_once_and_last():
+    """This is what makes the guard belt-and-braces rather than load-bearing:
+    argparse's store action overwrites, so the launcher's declaration being
+    last is what defeats an override of any spelling."""
+    argv = _emitted_argv()
+    for flag in GEOMETRY_FLAGS:
+        assert argv.count(flag) == 1, f"{flag} is declared {argv.count(flag)} times"
+    first_geometry = min(argv.index(flag) for flag in GEOMETRY_FLAGS)
+    non_geometry_after = [
+        token
+        for token in argv[first_geometry:]
+        if token.startswith("--") and token not in GEOMETRY_FLAGS
+    ]
+    assert non_geometry_after == [], f"these flags follow the geometry block: {non_geometry_after}"
+
+
+def test_an_unrelated_extra_arg_still_takes_effect():
+    """Only the geometry block moved, so --extra-args keeps its purpose: a
+    later declaration of a non-geometry flag still wins."""
+    argv = _emitted_argv(extra_args="--lr 2e-6")
+    assert [index for index, token in enumerate(argv) if token == "--lr"][-1] > argv.index("--optimizer")

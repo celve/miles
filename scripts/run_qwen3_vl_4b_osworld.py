@@ -46,6 +46,7 @@ Usage:
     python3 scripts/run_qwen3_vl_4b_osworld.py --mode smoke --gym-url http://10.0.0.1:11001
 """
 
+import shlex
 from dataclasses import dataclass
 from typing import Literal
 
@@ -168,15 +169,18 @@ def _refuse_geometry_overrides(train_args: str, args: ScriptArgs, launcher_env: 
     accepted can still reach the trainer changed, and the first sign of it is
     an unscored tail in every shard.
 
-    Matching spellings by hand is not enough, which is why this borrows the
-    code the values actually pass through: ``ArgvManipulator`` counts
-    ``--flag value`` and ``--flag=value`` alike, ``resolve_extra_env_vars``
-    performs the real merge so the *effective* value is what gets compared --
-    covering the JSON form as well as ``NAME=value`` -- and an abbreviation is
-    refused outright, because ``argparse`` resolves any unambiguous prefix to
-    the same destination.
+    **Correctness does not rest on this function.** The protected flags are
+    emitted once, after ``--extra-args``, so the launcher's declaration already
+    wins by position whatever a user writes. This refuses the attempt anyway,
+    because a flag that is silently ignored is worse than one that errors.
+
+    Tokenization is ``shlex.split``, matching what the backend itself does
+    (``base_backend.py:177``), so a quoted spelling is seen the way argparse
+    will see it. ``resolve_extra_env_vars`` performs the real environment merge
+    so the *effective* value is what gets compared, covering the JSON form as
+    well as ``NAME=value``.
     """
-    argv = train_args.split()
+    argv = shlex.split(train_args)
     for flag in _PROTECTED_FLAGS:
         if len(ArgvManipulator.get(argv, flag)) > 1:
             raise ValueError(
@@ -215,6 +219,24 @@ def execute(args: ScriptArgs):
     U = args.create_backend()
     smoke = args.mode == "smoke"
 
+    # Emitted last, after --extra-args, and nowhere else. argparse's store
+    # action overwrites, so the launcher's declaration is the effective one
+    # whatever spelling a user writes -- an `=` form, a quoted token or an
+    # abbreviation, which resolves to the same destination. Policing the
+    # override was tried twice and defeated twice by spellings nobody had
+    # enumerated; winning by position needs no enumeration at all.
+    # execute_train's num_gpus_per_node argument only sets ray's resource
+    # count, so train.py's own flag belongs here too.
+    geometry_args = (
+        f"--rollout-batch-size {1 if smoke else args.rollout_batch_size} "
+        f"--n-samples-per-prompt {2 if smoke else args.n_samples_per_prompt} "
+        f"--global-batch-size {args.global_batch_size} "
+        f"--micro-batch-size {args.micro_batch_size} "
+        f"--actor-num-nodes {args.num_nodes} "
+        f"--actor-num-gpus-per-node {args.num_gpus_per_node} "
+        f"--num-gpus-per-node {args.num_gpus_per_node} "
+    )
+
     ckpt_args = f"--hf-checkpoint {args.model_path} --ref-load {args.model_path} "
 
     rollout_args = (
@@ -226,15 +248,12 @@ def execute(args: ScriptArgs):
         "--apply-chat-template "
         "--rollout-shuffle "
         f"--num-rollout {1 if smoke else args.num_rollout} "
-        f"--rollout-batch-size {1 if smoke else args.rollout_batch_size} "
-        f"--n-samples-per-prompt {2 if smoke else args.n_samples_per_prompt} "
         # A 15-turn episode at ~2,040 tokens of screenshot per turn reaches
         # ~11k in its longest segment, and the converter drops anything over
         # this bound rather than letting it reach the forward pass.
         "--rollout-max-response-len 12288 "
         "--rollout-max-context-len 16384 "
         "--rollout-temperature 1.0 "
-        f"--global-batch-size {args.global_batch_size} "
     )
 
     # Held-out only: the training split never appears here, so a reported
@@ -308,12 +327,6 @@ def execute(args: ScriptArgs):
     telemetry_args = "--use-miles-dashboard --dashboard-gpu-sample-interval 5 --log-multi-turn --log-passrate "
 
     misc_args = (
-        f"--actor-num-nodes {args.num_nodes} "
-        f"--actor-num-gpus-per-node {args.num_gpus_per_node} "
-        # execute_train's num_gpus_per_node only sets ray's resource count; the
-        # train.py flag defaults to 8 and has to be passed as well.
-        f"--num-gpus-per-node {args.num_gpus_per_node} "
-        f"--micro-batch-size {args.micro_batch_size} "
         "--colocate "
         f"--save {args.output_dir}/ckpt "
         "--save-interval 5 "
@@ -338,6 +351,7 @@ def execute(args: ScriptArgs):
             f"{telemetry_args} "
             f"{misc_args} "
             f"{args.extra_args} "
+            f"{geometry_args} "
     )
     # The converter's knobs reach the train actors here rather than as flags,
     # because Miles's training entry parses argv strictly and each of them is a

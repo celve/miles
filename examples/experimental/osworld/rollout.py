@@ -703,7 +703,7 @@ def log_eval_rollout_data(rollout_id, args, data, extra_metrics: dict | None = N
     Wire with --custom-eval-rollout-log-function-path.
     """
     from miles.ray.rollout.metrics import compute_rollout_step  # noqa: PLC0415
-    from miles.utils import tracking  # noqa: PLC0415
+    from miles.utils.tracking_utils import tracking  # noqa: PLC0415
 
     log_dict = dict(extra_metrics or {})
     for key, rows in data.items():

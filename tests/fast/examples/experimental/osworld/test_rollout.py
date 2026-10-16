@@ -299,40 +299,50 @@ def test_an_envelope_without_a_positive_admission_is_not_a_grade():
     assert _admitted_reward({"runtime_eligible": True, "mask_sample": False, "reward": 1}) == 1.0
 
 
-def test_the_eval_logger_excludes_infrastructure_faults_from_the_denominator(monkeypatch):
+@pytest.fixture
+def eval_log(monkeypatch):
+    """Capture what the hook logs, patching attributes on the real modules.
+
+    Deliberately not a synthetic entry in ``sys.modules``: an earlier version
+    of these tests inserted a fake ``miles.utils.tracking``, which does not
+    exist, so the suite stayed green while the wired hook raised ImportError on
+    every run. Patching attributes means the import path itself is under test.
+    """
+    from miles.ray.rollout import metrics
+    from miles.utils.tracking_utils import tracking
+
+    logged: dict = {}
+    monkeypatch.setattr(tracking, "log", lambda args, d, step_key=None: logged.update(d))
+    monkeypatch.setattr(metrics, "compute_rollout_step", lambda args, rollout_id: 1)
+    return logged
+
+
+def test_the_eval_logger_excludes_infrastructure_faults_from_the_denominator(eval_log):
     """The default logger turns a null reward into a zero before averaging, so
     one sandbox that never ran would halve a two-task score."""
-    logged = {}
-    monkeypatch.setitem(
-        __import__("sys").modules,
-        "miles.utils.tracking",
-        SimpleNamespace(log=lambda args, d, step_key=None: logged.update(d)),
-    )
-    monkeypatch.setitem(
-        __import__("sys").modules,
-        "miles.ray.rollout.metrics",
-        SimpleNamespace(compute_rollout_step=lambda args, rollout_id: 1),
-    )
     assert log_eval_rollout_data(1, SimpleNamespace(), {"heldout": {"rewards": [1.0, None]}}) is True
-    assert logged["eval/heldout"] == 1.0
-    assert logged["eval/heldout-attempted"] == 2
-    assert logged["eval/heldout-graded"] == 1
-    assert logged["eval/heldout-infrastructure_excluded"] == 1
+    assert eval_log["eval/heldout"] == 1.0
+    assert eval_log["eval/heldout-attempted"] == 2
+    assert eval_log["eval/heldout-graded"] == 1
+    assert eval_log["eval/heldout-infrastructure_excluded"] == 1
 
 
-def test_the_eval_logger_reports_no_mean_when_nothing_was_graded(monkeypatch):
+def test_the_eval_logger_reports_no_mean_when_nothing_was_graded(eval_log):
     """No score at all is not a score of zero."""
-    logged = {}
-    monkeypatch.setitem(
-        __import__("sys").modules,
-        "miles.utils.tracking",
-        SimpleNamespace(log=lambda args, d, step_key=None: logged.update(d)),
-    )
-    monkeypatch.setitem(
-        __import__("sys").modules,
-        "miles.ray.rollout.metrics",
-        SimpleNamespace(compute_rollout_step=lambda args, rollout_id: 1),
-    )
     log_eval_rollout_data(1, SimpleNamespace(), {"heldout": {"rewards": [None, None]}})
-    assert "eval/heldout" not in logged
-    assert logged["eval/heldout-infrastructure_excluded"] == 2
+    assert "eval/heldout" not in eval_log
+    assert eval_log["eval/heldout-attempted"] == 2
+    assert eval_log["eval/heldout-graded"] == 0
+    assert eval_log["eval/heldout-infrastructure_excluded"] == 2
+
+
+def test_the_eval_logger_averages_a_fully_graded_set(eval_log):
+    log_eval_rollout_data(1, SimpleNamespace(), {"heldout": {"rewards": [0.0, 1.0]}})
+    assert eval_log["eval/heldout"] == 0.5
+    assert eval_log["eval/heldout-infrastructure_excluded"] == 0
+
+
+def test_the_eval_logger_handles_an_empty_dataset(eval_log):
+    log_eval_rollout_data(1, SimpleNamespace(), {"heldout": {"rewards": []}})
+    assert "eval/heldout" not in eval_log
+    assert eval_log["eval/heldout-attempted"] == 0
