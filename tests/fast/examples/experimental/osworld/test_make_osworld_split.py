@@ -10,7 +10,13 @@ import json
 
 import pytest
 
-from scripts.tools.make_osworld_split import _read_tasks, _stratified_split, main
+from scripts.tools.make_osworld_split import (
+    _read_tasks,
+    _stratified_split,
+    main,
+    read_task_outcomes,
+    select_by_variance,
+)
 
 
 def _task(task_id, domain):
@@ -70,12 +76,13 @@ def test_the_split_is_disjoint_and_reproducible_from_its_seed(tmp_path):
 def test_provenance_records_what_a_before_after_claim_rests_on(tmp_path):
     source = _write_source(tmp_path / "src.jsonl", [_task(f"t{i}", f"d{i % 2}") for i in range(10)])
     out_dir = tmp_path / "out"
-    main(source=source, out_dir=out_dir, held_out_fraction=0.4, seed=99, only_domains="")
+    main(source=source, out_dir=out_dir, held_out_fraction=0.4, seed=99, only_domains="", variance_from=None)
 
     provenance = json.loads((out_dir / "provenance.json").read_text())
     assert provenance["seed"] == 99
     assert len(provenance["source_sha256"]) == 64
-    assert provenance["counts"] == {"total": 10, "train": 6, "held_out": 4}
+    assert provenance["counts"] == {"selected": 10, "train": 6, "held_out": 4}
+    assert provenance["selection"] == "domain stratification only"
     assert not set(provenance["train_task_ids"]) & set(provenance["held_out_task_ids"])
 
     train_rows = (out_dir / "train.jsonl").read_text().splitlines()
@@ -86,4 +93,95 @@ def test_provenance_records_what_a_before_after_claim_rests_on(tmp_path):
 def test_an_empty_selection_is_refused_rather_than_written(tmp_path):
     source = _write_source(tmp_path / "src.jsonl", [_task("t1", "chrome")])
     with pytest.raises(Exception, match="no tasks read"):
-        main(source=source, out_dir=tmp_path / "out", held_out_fraction=0.3, seed=1, only_domains="nonexistent")
+        main(
+            source=source,
+            out_dir=tmp_path / "out",
+            held_out_fraction=0.3,
+            seed=1,
+            only_domains="nonexistent",
+            variance_from=None,
+        )
+
+
+def _rollout(task_id, reward, eligible=True, masked=False):
+    return {
+        "reward": reward,
+        "runtime_eligible": eligible,
+        "mask_sample": masked,
+        "verifier_metadata": {"task_id": task_id},
+    }
+
+
+def _write_probe(path, rows):
+    path.write_text("".join(f"{json.dumps(r)}\n" for r in rows))
+    return path
+
+
+def test_outcomes_count_only_episodes_gym_admitted(tmp_path):
+    """An episode Gym refused never measured the policy, so letting it stand in
+    for a failure would make a task look unanimous when nothing was learned."""
+    probe = _write_probe(
+        tmp_path / "r.jsonl",
+        [
+            _rollout("t1", 1.0),
+            _rollout("t1", 0.0),
+            _rollout("t1", 0.0, eligible=False),
+            _rollout("t1", 0.0, masked=True),
+            _rollout("t1", True),
+        ],
+    )
+    assert read_task_outcomes(probe) == {"t1": [1.0, 0.0]}
+
+
+def test_only_tasks_whose_own_samples_disagree_are_kept(tmp_path):
+    """A GRPO group is the N samples of one prompt, so a task every sample
+    solves and a task none solves both give exactly zero advantage."""
+    source = _write_source(tmp_path / "src.jsonl", [_task(f"t{i}", "chrome") for i in range(4)])
+    tasks = _read_tasks(source)
+    outcomes = {
+        "t0": [1.0, 1.0, 1.0, 1.0],
+        "t1": [0.0, 0.0, 0.0, 0.0],
+        "t2": [1.0, 0.0, 0.0, 1.0],
+        "t3": [0.0, 1.0, 0.0, 0.0],
+    }
+    kept, report = select_by_variance(tasks, outcomes)
+    assert [t.task_id for t in kept] == ["t2", "t3"]
+    assert report["unanimous_success"] == ["t0"]
+    assert report["unanimous_failure"] == ["t1"]
+    assert {entry["task_id"] for entry in report["with_variance"]} == {"t2", "t3"}
+
+
+def test_a_task_probed_once_cannot_show_variance(tmp_path):
+    source = _write_source(tmp_path / "src.jsonl", [_task("t1", "chrome")])
+    kept, report = select_by_variance(_read_tasks(source), {"t1": [1.0]})
+    assert kept == [] and report["not_probed"] == ["t1"]
+
+
+def test_a_split_with_no_variance_anywhere_is_refused(tmp_path):
+    """Training on it would make every optimizer step a no-op, which is worth
+    an error rather than a run that looks like it worked."""
+    source = _write_source(tmp_path / "src.jsonl", [_task("t1", "chrome"), _task("t2", "gimp")])
+    probe = _write_probe(tmp_path / "r.jsonl", [_rollout("t1", 0.0), _rollout("t1", 0.0), _rollout("t2", 1.0), _rollout("t2", 1.0)])
+    with pytest.raises(Exception, match="within-task variance"):
+        main(
+            source=source,
+            out_dir=tmp_path / "out",
+            held_out_fraction=0.3,
+            seed=1,
+            only_domains="",
+            variance_from=probe,
+        )
+
+
+def test_provenance_records_the_variance_selection(tmp_path):
+    source = _write_source(tmp_path / "src.jsonl", [_task(f"t{i}", f"d{i % 2}") for i in range(6)])
+    probe = _write_probe(
+        tmp_path / "r.jsonl",
+        [_rollout(f"t{i}", r) for i in range(6) for r in ((1.0, 0.0) if i % 2 == 0 else (0.0, 0.0))],
+    )
+    out_dir = tmp_path / "out"
+    main(source=source, out_dir=out_dir, held_out_fraction=0.0, seed=5, only_domains="", variance_from=probe)
+    provenance = json.loads((out_dir / "provenance.json").read_text())
+    assert provenance["selection"] == "within-task variance"
+    assert provenance["counts"]["selected"] == 3
+    assert len(provenance["variance_report"]["unanimous_failure"]) == 3
