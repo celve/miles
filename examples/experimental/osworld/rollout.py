@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import io
 import logging
 import os
@@ -168,8 +169,11 @@ def _images(segment: list[dict], media_assets: dict[str, dict]) -> list[PILImage
             if media_id in seen:
                 continue
             seen.add(media_id)
-            part = ((media_assets.get(media_id) or {}).get("source_part") or {}).get("image_url") or {}
-            url = str(part.get("url") or "")
+            source = (media_assets.get(media_id) or {}).get("source_part") or {}
+            # Both OpenAI shapes occur: image_url as the bare data URL, and as
+            # the nested {"url": ...} object.
+            part = source.get("image_url")
+            url = part if isinstance(part, str) else str((part or {}).get("url") or source.get("url") or "")
             if "base64," not in url:
                 continue
             images.append(PILImage.open(io.BytesIO(base64.b64decode(url.split("base64,", 1)[1]))).convert("RGB"))
@@ -305,7 +309,9 @@ async def generate(args: Any, sample: Sample, sampling_params) -> list[Sample]:
         if vision is None:
             continue
 
-        child = sample if index == 0 else sample.model_copy(deep=True)
+        # Sample is a plain dataclass; the copy happens before any tensor is
+        # attached, so it stays cheap.
+        child = sample if index == 0 else copy.deepcopy(sample)
         child.rollout_id = rollout_id
         child.tokens = tokens
         child.response_length = len(tokens) - response_start
