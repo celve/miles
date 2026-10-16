@@ -87,6 +87,7 @@ export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && ray job submit
   --accumulate-allreduce-grads-in-fp32
   --attention-softmax-in-fp32
   --attention-backend flash
+  --transformer-impl local
   --megatron-to-hf-mode bridge
   --distributed-timeout-minutes 60 
   --rollout-num-gpus-per-engine 1
