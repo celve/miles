@@ -128,8 +128,8 @@ async def test_a_session_id_header_marks_the_call_auxiliary(recorder):
     record = recorder.take(token)
 
     assert record.calls[0].auxiliary is True
-    assert record.action_calls() == []
-    assert len(record.auxiliary_calls()) == 1
+    assert record.trained_calls() == []
+    assert len(record.compactor_calls()) == 1
 
 
 async def test_a_call_without_prompt_token_ids_is_refused_not_guessed(recorder):
@@ -228,3 +228,37 @@ async def test_token_ids_hoisted_to_the_envelope_are_still_read(recorder):
     assert record.calls[0].prompt_token_ids == (1, 2)
     assert record.calls[0].output_token_ids == (9,)
     assert len(record.calls[0].output_logprobs) == 1
+
+
+async def test_a_proxys_weight_versions_reach_the_call(recorder):
+    """A proxy answers with its own metadata.weight_versions instead of meta_info."""
+    response = chat_response(prompt_ids=[1, 2], output_ids=[7, 8])
+    choice = response["choices"][0]
+    choice.pop("meta_info")
+    choice["logprobs"] = {"content": [{"logprob": -0.4}, {"logprob": -0.6}]}
+    response["metadata"] = {"weight_version": "3", "weight_versions": [{"version": "3", "start": 0, "end": 2}]}
+    canned(recorder, response)
+    token = recorder.open_rollout()
+
+    await post_chat(recorder, token, messages_with(png_bytes((1, 3, 5))))
+    call = recorder.take(token).calls[0]
+
+    assert call.meta_info["weight_versions"] == [{"version": "3", "start": 0, "end": 2}]
+    # from_meta_info sizes the output region from this list, so it has to be present.
+    assert len(call.meta_info["output_token_logprobs"]) == 2
+    assert call.output_logprobs == (-0.4, -0.6)
+
+
+async def test_the_request_is_retained_without_the_image_bytes(recorder):
+    canned(recorder, chat_response(prompt_ids=[1], output_ids=[2]))
+    token = recorder.open_rollout()
+    image = png_bytes((6, 6, 6))
+
+    await post_chat(recorder, token, messages_with(image), extra={"temperature": 0.7})
+    call = recorder.take(token).calls[0]
+
+    serialized = json.dumps(call.request)
+    assert "base64" not in serialized
+    assert call.media[0].asset_id in serialized
+    assert call.request["sampling"]["temperature"] == 0.7
+    assert "return_prompt_token_ids" not in call.request["sampling"]

@@ -78,7 +78,7 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
         record = recorder.take(token)
 
     sample.metadata = {**metadata, **outcome.metadata, "trial_dir": outcome.trial_dir}
-    media = MediaProcessor(state.processor, resize_settings=options.resize_settings)
+    media = MediaProcessor(state.processor)
     sample.metadata["processor_fingerprint"] = media.fingerprint()
 
     write_off_mode = options.write_off_mode
@@ -90,7 +90,7 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
     try:
         _check_call_accounting(record, outcome, sample.metadata)
         segmentation = segment_calls(
-            record.action_calls(),
+            record.trained_calls(),
             max_sample_tokens=options.sample_token_budget(args),
         )
         samples, stats = build_samples(
@@ -114,13 +114,18 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
             samples=[_write_off(sample, state, "episode produced no trainable segment", write_off_mode)]
         )
 
+    if input.evaluation and len(samples) > 1:
+        # The eval path extends its data with every returned sample and averages that
+        # flat reward list, so N siblings would count one episode N times.
+        stats.evaluation_siblings_dropped = len(samples) - 1
+        samples = samples[:1]
     for sibling in samples:
         sibling.metadata.update(stats.as_metadata())
     logger.info(
         "harbor cua %s: reward=%s calls=%d segments=%d kept=%d tokens=%d",
         instance_id,
         outcome.reward,
-        stats.action_calls,
+        stats.trained_calls,
         stats.segments,
         stats.kept_segments,
         stats.trained_tokens,
@@ -184,22 +189,23 @@ def _rollout_id(sample: Sample) -> int:
 
 
 def _check_call_accounting(record, outcome: TrialOutcome, metadata: dict[str, Any]) -> None:
-    """Every Harbor episode makes at least one action call, so fewer means misclassified.
+    """Every Harbor episode makes at least one trainable call, so fewer means misclassified.
 
-    ``computer-1`` queries the policy once per episode, retries on a parse error
-    by spending the next episode, and only reactive compaction adds a call within
-    one -- so action calls below the episode count can only mean a call that the
+    ``computer-1`` queries the policy once per episode and retries a parse error by
+    spending the next episode, so the count is a lower bound rather than an equality:
+    reactive compaction can add a call inside one episode, and the final-answer
+    fallback adds one at the end. Fewer than one per episode can only mean a call the
     agent loop made was taken for one of the compactor's.
     """
     episodes = int((outcome.metadata.get("agent_metrics") or {}).get("n_episodes") or 0)
-    actions = len(record.action_calls())
+    actions = len(record.trained_calls())
     metadata["harbor_episodes"] = episodes
-    metadata["recorded_action_calls"] = actions
+    metadata["recorded_trained_calls"] = actions
     metadata["rejected_calls"] = list(record.rejected)
     if episodes and actions < episodes:
         raise ValueError(
             f"recorded {actions} action calls for {episodes} Harbor episodes; "
-            f"{len(record.auxiliary_calls())} were classified as the compactor's and "
+            f"{len(record.compactor_calls())} were classified as the compactor's and "
             f"{len(record.rejected)} were refused: {record.rejected[:3]}"
         )
 

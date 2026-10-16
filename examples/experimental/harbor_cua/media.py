@@ -41,12 +41,9 @@ class MediaProcessor:
     processing the whole list at once — which is what makes caching sound.
     """
 
-    def __init__(self, processor, resize_settings: dict[str, int] | None = None) -> None:
+    def __init__(self, processor) -> None:
         self._image_processor = processor.image_processor
         self._tokenizer = processor.tokenizer
-        self._resize_settings = dict(resize_settings or {})
-        for name, value in self._resize_settings.items():
-            setattr(self._image_processor, name, value)
         self._merge_size = int(getattr(self._image_processor, "merge_size", 2))
         self._cache: dict[str, ProcessedAsset] = {}
 
@@ -57,7 +54,9 @@ class MediaProcessor:
     def fingerprint(self) -> str:
         image_processor = self._image_processor
         parts = [type(image_processor).__name__, f"merge={self._merge_size}"]
-        for name in ("patch_size", "temporal_patch_size", "min_pixels", "max_pixels", "size"):
+        # ``size`` is the limit transformers v5 actually applies; min_pixels/max_pixels
+        # survive as attributes on some implementations and are recorded for that reason.
+        for name in ("patch_size", "temporal_patch_size", "size", "min_pixels", "max_pixels"):
             parts.append(f"{name}={getattr(image_processor, name, None)}")
         return "|".join(parts)
 

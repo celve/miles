@@ -29,12 +29,23 @@ def test_every_field_has_a_flag_and_the_same_default():
 
 
 def test_flags_round_trip_into_the_options():
-    namespace = parsed(["--harbor-cua-max-turns", "3", "--harbor-cua-max-pixels", "1000"])
+    namespace = parsed(["--harbor-cua-max-turns", "3", "--harbor-cua-upstream", "router"])
 
     options = HarborCuaOptions.from_args(namespace)
 
     assert options.max_turns == 3
-    assert options.resize_settings == {"max_pixels": 1000}
+    assert options.upstream == "router"
+
+
+def test_there_is_no_resize_flag():
+    """The processor config has to be the checkpoint's on both sides of the gate."""
+    assert not any("pixels" in action.option_strings[0] for action in _actions() if action.option_strings)
+
+
+def _actions():
+    parser = argparse.ArgumentParser()
+    add_arguments(parser)
+    return parser._actions
 
 
 def test_options_fall_back_to_their_defaults_on_a_bare_namespace():
@@ -42,7 +53,6 @@ def test_options_fall_back_to_their_defaults_on_a_bare_namespace():
 
     assert options.max_turns == HarborCuaOptions().max_turns
     assert options.write_off_mode == WRITE_OFF_ABORT_GROUP
-    assert options.resize_settings is None
 
 
 def test_an_impossible_option_is_refused_at_construction():

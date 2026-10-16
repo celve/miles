@@ -70,3 +70,12 @@ def test_the_agent_name_is_the_registered_one():
     from harbor.models.agent.name import AgentName
 
     assert AgentName(AGENT_NAME) is AgentName.COMPUTER_1
+
+
+def test_the_deterministic_inference_seed_is_forwarded():
+    """Miles sends sampling_seed per request; the OpenAI surface names it seed."""
+    kwargs = _agent_kwargs(
+        api_base="http://x/v1", session_id="s", sampling_params={"sampling_seed": 1234}, max_turns=2
+    )
+
+    assert kwargs["llm_call_kwargs"]["seed"] == 1234

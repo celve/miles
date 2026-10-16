@@ -205,3 +205,31 @@ async def test_asking_for_the_router_forwards_there_despite_the_evidence_gap():
     options = HarborCuaOptions(upstream="router")
 
     assert await harbor_cua._resolve_upstream(args(), options) == "http://127.0.0.1:31000"
+
+
+async def test_evaluation_reports_one_sample_per_episode(stub, state, episode):
+    """The eval path averages a flat reward list, so N siblings would count N times."""
+    episode.turn(image=png_bytes((7, 0, 0)))
+    episode.rewrite(media=[], prompt=[1, 2, 3, 900])
+    episode.turn(image=png_bytes((8, 0, 0)))
+    stub.outcome = outcome(reward=1.0, episodes=2)
+    fn = fn_input(task_sample(12), state)
+    fn.evaluation = True
+
+    output = await harbor_cua.generate(fn)
+
+    assert len(output.samples) == 1
+    assert output.samples[0].metadata["segments"] == 2
+    assert output.samples[0].metadata["evaluation_siblings_dropped"] == 1
+
+
+async def test_training_keeps_every_sibling(stub, state, episode):
+    episode.turn(image=png_bytes((7, 0, 0)))
+    episode.rewrite(media=[], prompt=[1, 2, 3, 900])
+    episode.turn(image=png_bytes((8, 0, 0)))
+    stub.outcome = outcome(reward=1.0, episodes=2)
+
+    output = await harbor_cua.generate(fn_input(task_sample(13), state))
+
+    assert len(output.samples) == 2
+    assert output.samples[0].metadata["evaluation_siblings_dropped"] == 0

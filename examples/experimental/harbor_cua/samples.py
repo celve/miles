@@ -4,6 +4,12 @@ Every sibling of one episode carries the same ``rollout_id`` and the same reward
 value: Miles normalizes one reward per rollout and raises if siblings disagree,
 and it sums the loss mask over the whole rollout so splitting an episode adds no
 weight.
+
+What trains: every policy call except the compactor's own summaries, which are
+context rather than actions. That includes Harbor's final-answer fallback, which
+builds a fresh chat and so opens a segment of its own -- it is a real completion
+sampled on a real context, and in a task graded on the answer it is the call that
+earns the reward, so excluding it would drop the signal.
 """
 
 from __future__ import annotations
@@ -25,27 +31,29 @@ from miles.utils.types import Sample, WeightVersionsPerCall
 class ConversionStats:
     """What the converter did with one episode, for the run report."""
 
-    action_calls: int = 0
-    auxiliary_calls: int = 0
+    trained_calls: int = 0
+    compactor_calls: int = 0
     segments: int = 0
     kept_segments: int = 0
     dropped_text_only: int = 0
     trained_tokens: int = 0
     image_occurrences: int = 0
     distinct_images: int = 0
+    evaluation_siblings_dropped: int = 0
     boundaries: list[BoundaryEvent] = field(default_factory=list)
     rejected: list[str] = field(default_factory=list)
 
     def as_metadata(self) -> dict:
         return {
-            "action_calls": self.action_calls,
-            "auxiliary_calls_excluded": self.auxiliary_calls,
+            "trained_calls": self.trained_calls,
+            "compactor_calls_excluded": self.compactor_calls,
             "segments": self.segments,
             "kept_segments": self.kept_segments,
             "dropped_text_only_segments": self.dropped_text_only,
             "trained_tokens": self.trained_tokens,
             "image_occurrences": self.image_occurrences,
             "distinct_images": self.distinct_images,
+            "evaluation_siblings_dropped": self.evaluation_siblings_dropped,
             "boundary_reasons": [event.reason for event in self.boundaries],
             "rejected_calls": self.rejected,
         }
@@ -63,8 +71,8 @@ def build_samples(
 ) -> tuple[list[Sample], ConversionStats]:
     """One ``Sample`` per segment that retained at least one image."""
     stats = ConversionStats(
-        action_calls=len(record.action_calls()),
-        auxiliary_calls=len(record.auxiliary_calls()),
+        trained_calls=len(record.trained_calls()),
+        compactor_calls=len(record.compactor_calls()),
         segments=len(segmentation.segments),
         boundaries=list(segmentation.boundaries),
         rejected=list(segmentation.rejected) + list(record.rejected),
@@ -131,15 +139,11 @@ def _sample_from_segment(
 def _weight_versions(segment: Segment) -> list[WeightVersionsPerCall]:
     """One entry per call, with output spans at their absolute positions.
 
-    Prefill spans survive only for a segment's first call: the engine reports them
-    relative to that call's own prompt, which coincides with the sample's tokens
-    only while the prompt starts at zero.
+    Prefill spans are kept for every call: inside a segment each prompt is the
+    segment's own token prefix starting at zero, so the engine's prompt-relative
+    spans are already absolute. They are what shows a call reusing stale KV.
     """
-    calls: list[WeightVersionsPerCall] = []
-    for output_end, meta_info, is_first in segment.weight_version_calls:
-        per_call = WeightVersionsPerCall.from_meta_info(meta_info, output_end)
-        if not is_first:
-            per_call.prefill_spans = []
-            per_call.prompt_tokens = None
-        calls.append(per_call)
-    return calls
+    return [
+        WeightVersionsPerCall.from_meta_info(meta_info, output_end)
+        for output_end, meta_info, _ in segment.weight_version_calls
+    ]

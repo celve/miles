@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import hashlib
 import json
 import logging
 import secrets
@@ -96,6 +97,29 @@ def parse_media(messages: list) -> tuple[list[tuple[bytes, str]], list[str]]:
     return media, problems
 
 
+def sanitized_request(payload: dict, media_bytes: list[tuple[bytes, str]]) -> dict:
+    """The request as sent, with image bytes replaced by their asset ids.
+
+    Kept so a call is replayable and publishable as a fixture without carrying
+    megabytes of base64 around, and without a screenshot leaking into a log.
+    """
+    ids = [f"sha256:{hashlib.sha256(payload_bytes).hexdigest()}" for payload_bytes, _ in media_bytes]
+    remaining = iter(ids)
+    messages = []
+    for message in payload.get("messages") or []:
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            messages.append(message)
+            continue
+        parts = [
+            {"type": "image_url", "asset_id": next(remaining, None)} if part.get("type") == "image_url" else part
+            for part in content
+        ]
+        messages.append({**message, "content": parts})
+    sampling = {key: value for key, value in payload.items() if key not in {"messages", *TRACE_FLAGS}}
+    return {"messages": messages, "sampling": sampling}
+
+
 def parse_choice(choice: dict, envelope: dict | None = None) -> ParsedChoice:
     """Read one choice's token evidence, wherever the server put it.
 
@@ -106,7 +130,12 @@ def parse_choice(choice: dict, envelope: dict | None = None) -> ParsedChoice:
     """
     envelope = envelope or {}
     metadata = envelope.get("metadata") if isinstance(envelope.get("metadata"), dict) else {}
-    meta_info = choice.get("meta_info") or envelope.get("meta_info") or metadata.get("meta_info") or {}
+    meta_info = dict(choice.get("meta_info") or envelope.get("meta_info") or {})
+    # A proxy in front of the engine answers with its own weight-version metadata instead
+    # of the engine's meta_info; both feed the same WeightVersionsPerCall contract.
+    for key in ("weight_version", "weight_versions", "prefill_weight_versions", "prompt_tokens"):
+        if key not in meta_info and key in metadata:
+            meta_info[key] = metadata[key]
     triples = meta_info.get("output_token_logprobs") or []
 
     output_ids = (
@@ -128,6 +157,12 @@ def parse_choice(choice: dict, envelope: dict | None = None) -> ParsedChoice:
             "the engine returned no prompt_token_ids; the recorder asks for them with "
             "return_prompt_token_ids, so an empty field means the engine did not honour it"
         )
+    if not meta_info.get("output_token_logprobs") and logprobs and output_ids:
+        # from_meta_info sizes a call's output region from this list, so a reply that
+        # carried logprobs elsewhere still has to present them in that shape.
+        meta_info["output_token_logprobs"] = [
+            [logprob, token, ""] for logprob, token in zip(logprobs, output_ids, strict=False)
+        ]
     return ParsedChoice(
         prompt_token_ids=tuple(prompt_ids),
         output_token_ids=tuple(output_ids or ()),
@@ -213,8 +248,13 @@ class CallRecorder:
             # Harbor's computer-1 never streams, so this is a misconfiguration.
             return JSONResponse({"error": {"message": "the recorder does not serve streaming"}}, status_code=400)
 
-        auxiliary = bool(request.headers.get("x-session-id") or payload.get("session_id"))
+        # Only LiteLLM.call sends this, and Computer1Chat.chat -- the agent loop and the
+        # final-answer fallback alike -- does not, so it marks the compactor's own calls
+        # and nothing else. The fallback is a real sampled completion on a real context
+        # and is trained; see the module docstring of samples.py.
+        compactor = bool(request.headers.get("x-session-id") or payload.get("session_id"))
         media_bytes, media_problems = parse_media(payload.get("messages") or [])
+        retained = sanitized_request(payload, media_bytes)
         payload.update(TRACE_FLAGS)
         payload.setdefault("logprobs", True)
 
@@ -228,7 +268,14 @@ class CallRecorder:
             return Response(content=upstream.content, status_code=upstream.status_code)
 
         data = upstream.json()
-        self._keep(record, data, auxiliary=auxiliary, media_bytes=media_bytes, media_problems=media_problems)
+        self._keep(
+            record,
+            data,
+            compactor=compactor,
+            media_bytes=media_bytes,
+            media_problems=media_problems,
+            request=retained,
+        )
         for choice in data.get("choices", []):
             if isinstance(choice, dict):
                 choice.pop("meta_info", None)
@@ -239,9 +286,10 @@ class CallRecorder:
         record: RolloutRecord,
         data: dict,
         *,
-        auxiliary: bool,
+        compactor: bool,
         media_bytes: list[tuple[bytes, str]],
         media_problems: list[str],
+        request: dict,
     ) -> None:
         index = len(record.calls)
         if media_problems:
@@ -259,7 +307,7 @@ class CallRecorder:
             record.calls.append(
                 RecordedCall(
                     index=index,
-                    auxiliary=auxiliary,
+                    auxiliary=compactor,
                     prompt_token_ids=parsed.prompt_token_ids,
                     output_token_ids=parsed.output_token_ids,
                     output_logprobs=parsed.output_logprobs,
@@ -267,6 +315,7 @@ class CallRecorder:
                     finish_reason=parsed.finish_reason,
                     meta_info=parsed.meta_info,
                     model=data.get("model"),
+                    request=request,
                 )
             )
         except CallEvidenceError as exc:

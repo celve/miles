@@ -74,7 +74,6 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     # that can reach it; flash_attention_2 keeps the recipe runnable where it cannot.
     attn_implementation: str = "flash_attention_3"
     max_sandboxes: int = 8
-    max_pixels: int = 1_204_224
     # ``auto`` asks the router for one of its engines, because the router itself answers
     # without the token-evidence fields the recorder needs; ``router`` or an explicit URL
     # overrides that.
@@ -105,7 +104,8 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
         return {"train": self.num_rollout, "rollout": 1, "eval": 0}[self.mode]
 
 
-def prepare(args: ScriptArgs):
+def prepare(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
+    """``harbor_env`` comes from ``main``; warming needs the same backend as the run."""
     U = args.create_backend()
     U.exec_command_cpu(f"mkdir -p {args.model_dir}")
     U.exec_command_cpu(f"hf download {HF_REPO} --local-dir {args.model_path}")
@@ -116,8 +116,10 @@ def prepare(args: ScriptArgs):
     )
     # Serial, and before any rollout: Harbor has no retry around a template build, so
     # concurrent trials on an unbuilt template lose a whole GRPO group to a 409.
+    exports = "".join(f"export {name}={value} && " for name, value in sorted((harbor_env or {}).items()))
     U.exec_command_cpu(
-        f"cd {command_utils.repo_base_dir} && python -m examples.experimental.harbor_cua.warm_templates "
+        f"{exports}cd {command_utils.repo_base_dir} && "
+        "python -m examples.experimental.harbor_cua.warm_templates "
         f"--tasks-dir {args.harbor_tasks_dir} --trials-dir {args.harbor_trials_dir} "
         f"--data {args.data_dir}/train.jsonl {args.data_dir}/eval.jsonl"
     )
@@ -150,7 +152,6 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
         f"--custom-generate-function-path {GENERATE_FN} "
         f"--harbor-cua-max-turns {args.max_turns} "
         f"--harbor-cua-max-sandboxes {args.max_sandboxes} "
-        f"--harbor-cua-max-pixels {args.max_pixels} "
         "--harbor-cua-write-off-mode abort_group "
         + f"--harbor-cua-upstream {args.recorder_upstream} "
         + ("--debug-rollout-only " if args.mode == "rollout" else "")
@@ -179,9 +180,13 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
         "--adam-beta1 0.9 --adam-beta2 0.98 "
     )
 
-    # An episode's segment count is data-dependent, so static micro-batching cannot
-    # guarantee dp_size alignment; arguments.py requires the dynamic pair together.
-    perf_args = "--use-dynamic-batch-size --use-dynamic-global-batch-size --max-tokens-per-gpu 16384 "
+    # Dynamic micro-batching, because an episode's segment count is data-dependent.
+    # Deliberately NOT --use-dynamic-global-batch-size: every sample here carries a
+    # rollout_id, so postprocess_rollout_data skips its whole non-compact block and
+    # returns no dynamic_global_batch_size, which convert_samples_to_train_data then
+    # asserts against the flag. The compact schedule drops whole trailing rollouts
+    # instead, which is what makes a variable sibling count safe without it.
+    perf_args = "--use-dynamic-batch-size --max-tokens-per-gpu 16384 "
 
     train_backend_args = (
         "--train-backend fsdp "
@@ -255,7 +260,7 @@ def main(args: ScriptArgs):
     args.agent_model_name = args.served_model_name
     harbor_env = harbor_env_vars(args)
     if not args.skip_prepare:
-        prepare(args)
+        prepare(args, harbor_env=harbor_env)
     execute(args, harbor_env=harbor_env)
 
 

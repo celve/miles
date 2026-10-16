@@ -296,7 +296,7 @@ def test_a_text_only_segment_is_dropped_rather_than_padded(fake_processor, episo
     assert all(sample.multimodal_train_inputs is not None for sample in samples)
 
 
-def test_auxiliary_calls_are_counted_as_exclusions(fake_processor, episode):
+def test_compactor_calls_are_counted_as_exclusions(fake_processor, episode):
     episode.turn(image=png_bytes((2, 2, 2)))
     episode.turn(auxiliary=True, output=[910])
     trainable = [call for call in episode.record.calls if not call.auxiliary]
@@ -312,9 +312,9 @@ def test_auxiliary_calls_are_counted_as_exclusions(fake_processor, episode):
         tokenizer=fake_processor.tokenizer,
     )
 
-    assert stats.action_calls == 1
-    assert stats.auxiliary_calls == 1
-    assert stats.as_metadata()["auxiliary_calls_excluded"] == 1
+    assert stats.trained_calls == 1
+    assert stats.compactor_calls == 1
+    assert stats.as_metadata()["compactor_calls_excluded"] == 1
 
 
 def test_weight_versions_land_at_absolute_output_positions(episode):
@@ -354,3 +354,30 @@ def _decoding_tokenizer():
     from tests.fast.examples.experimental.harbor_cua.conftest import FakeTokenizer
 
     return FakeTokenizer()
+
+
+def test_weight_versions_keep_prefill_spans_for_every_call(episode, fake_processor):
+    """Inside a segment each prompt is the segment's own prefix from zero, so the
+    engine's prompt-relative prefill spans are already absolute."""
+    for turn in range(2):
+        call = episode.turn(image=png_bytes((turn * 15, 0, 0)))
+        episode.record.calls[-1].meta_info["prefill_weight_versions"] = [
+            {"version": "4", "start": 0, "end": len(call.prompt_token_ids)}
+        ]
+        episode.record.calls[-1].meta_info["prompt_tokens"] = len(call.prompt_token_ids)
+    result = segment_calls(episode.record.calls)
+
+    samples, _ = build_samples(
+        template=Sample(index=2),
+        record=episode.record,
+        segmentation=result,
+        media=MediaProcessor(fake_processor),
+        reward=1.0,
+        rollout_id=2,
+        tokenizer=fake_processor.tokenizer,
+    )
+
+    versions = samples[0].weight_versions
+    assert [len(call.prefill_spans) for call in versions] == [1, 1]
+    for per_call in versions:
+        per_call.validate(num_tokens=len(samples[0].tokens))

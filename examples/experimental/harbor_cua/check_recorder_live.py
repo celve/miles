@@ -25,6 +25,7 @@ import asyncio
 import base64
 import io
 import json
+import pathlib
 from dataclasses import dataclass, field
 
 import httpx
@@ -92,7 +93,7 @@ async def main_async(args: argparse.Namespace) -> int:
     token = recorder.open_rollout()
     processor = load_processor(args.model, trust_remote_code=True)
     tokenizer = load_tokenizer(args.model, trust_remote_code=True)
-    media = MediaProcessor(processor, resize_settings={"max_pixels": args.max_pixels} if args.max_pixels else None)
+    media = MediaProcessor(processor)
 
     try:
         images = [screenshot(index) for index in range(args.turns)]
@@ -128,6 +129,8 @@ async def main_async(args: argparse.Namespace) -> int:
         _check_media(checks, record, media)
         _check_render_equivalence(checks, record, processor, sent, media)
         _check_segments(checks, record, media, tokenizer)
+        if args.fixture_out:
+            _write_fixture(pathlib.Path(args.fixture_out), record, media)
     finally:
         await recorder.stop()
 
@@ -180,12 +183,17 @@ def _check_evidence(checks: Checks, record) -> None:
         all(len(call.output_logprobs) == len(call.output_token_ids) for call in calls),
         [len(call.output_logprobs) for call in calls],
     )
-    auxiliary = [call.index for call in record.auxiliary_calls()]
-    checks.record("auxiliary_classified", len(auxiliary) == 1, {"auxiliary_call_indices": auxiliary})
+    compactor = [call.index for call in record.compactor_calls()]
+    checks.record("compactor_classified", len(compactor) == 1, {"compactor_call_indices": compactor})
+    checks.record(
+        "requests_retained",
+        all(call.request.get("messages") for call in record.calls),
+        {"first_request_sampling": record.calls[0].request.get("sampling") if record.calls else None},
+    )
 
 
 def _check_append_compatibility(checks: Checks, record) -> None:
-    actions = record.action_calls()
+    actions = record.trained_calls()
     compatible = []
     for previous, current in zip(actions, actions[1:], strict=False):
         held = previous.prompt_token_ids + previous.output_token_ids
@@ -200,7 +208,7 @@ def _check_append_compatibility(checks: Checks, record) -> None:
 def _check_media(checks: Checks, record, media: MediaProcessor) -> None:
     details = []
     ok = True
-    for call in record.action_calls():
+    for call in record.trained_calls():
         assets = media.process_all(record.arena, call.media)
         try:
             verify_occurrence_runs(call.prompt_token_ids, media.image_pad_id, assets, where=f"call {call.index}")
@@ -216,7 +224,7 @@ def _check_render_equivalence(checks: Checks, record, processor, sent: list[list
     """The strongest check: the ids inference used, against the ids we render here."""
     details = []
     ok = True
-    for call, messages in zip(record.action_calls(), sent, strict=False):
+    for call, messages in zip(record.trained_calls(), sent, strict=False):
         images = [Image.open(io.BytesIO(record.arena.get(o.asset_id))).convert("RGB") for o in call.media]
         try:
             rendered = render_prompt_ids(processor, messages, images)
@@ -240,7 +248,7 @@ def _check_render_equivalence(checks: Checks, record, processor, sent: list[list
 
 
 def _check_segments(checks: Checks, record, media, tokenizer) -> None:
-    segmentation = segment_calls(record.action_calls())
+    segmentation = segment_calls(record.trained_calls())
     samples, stats = build_samples(
         template=Sample(index=0),
         record=record,
@@ -266,15 +274,50 @@ def _check_segments(checks: Checks, record, media, tokenizer) -> None:
         sample.validate()
 
 
+def _write_fixture(root: pathlib.Path, record, media) -> None:
+    """A captured call and its media, for the session-server track to validate against.
+
+    The request keeps its asset ids rather than base64, and the bytes go beside it, so
+    a consumer can process the same pixels with the same processor and compare against
+    the engine's own effective ids.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "media").mkdir(exist_ok=True)
+    for asset_id, payload in record.arena.assets.items():
+        (root / "media" / f"{asset_id.replace(':', '_')}.webp").write_bytes(payload)
+    calls = []
+    for call in record.trained_calls():
+        assets = media.process_all(record.arena, call.media)
+        calls.append(
+            {
+                "index": call.index,
+                "request": call.request,
+                "media": [
+                    {"asset_id": occurrence.asset_id, "media_type": occurrence.media_type, "tokens": asset.token_count}
+                    for occurrence, asset in zip(call.media, assets, strict=True)
+                ],
+                "prompt_token_ids": list(call.prompt_token_ids),
+                "output_token_ids": list(call.output_token_ids),
+                "output_logprobs": list(call.output_logprobs),
+                "finish_reason": call.finish_reason,
+                "meta_info": {k: v for k, v in call.meta_info.items() if k != "output_token_logprobs"},
+            }
+        )
+    (root / "calls.json").write_text(
+        json.dumps({"processor_fingerprint": media.fingerprint(), "calls": calls}, indent=2, default=str)
+    )
+    print(f"fixture written to {root}: {len(calls)} calls, {len(record.arena.assets)} images")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--upstream", default="http://127.0.0.1:30000")
     parser.add_argument("--model", required=True, help="local checkpoint path, for the processor and tokenizer")
     parser.add_argument("--model-name", default=None, help="the name the engine serves, if it differs from --model")
     parser.add_argument("--turns", type=int, default=4)
-    parser.add_argument("--max-pixels", type=int, default=None)
     parser.add_argument("--timeout", type=float, default=600.0)
     parser.add_argument("--json-out", default=None, help="write the full check record here")
+    parser.add_argument("--fixture-out", default=None, help="write a captured call and its media here")
     args = parser.parse_args()
     args.model_name = args.model_name or args.model
     raise SystemExit(asyncio.run(main_async(args)))

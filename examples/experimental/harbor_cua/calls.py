@@ -64,6 +64,9 @@ class RecordedCall:
     finish_reason: str | None = None
     meta_info: dict = field(default_factory=dict)
     model: str | None = None
+    # The request as sent, with image bytes replaced by their asset ids: enough to
+    # replay the call or publish it as a fixture, without the base64.
+    request: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.prompt_token_ids:
@@ -85,8 +88,9 @@ class RolloutRecord:
     calls: list[RecordedCall] = field(default_factory=list)
     rejected: list[str] = field(default_factory=list)
 
-    def action_calls(self) -> list[RecordedCall]:
+    def trained_calls(self) -> list[RecordedCall]:
+        """Every policy call except the compactor's own, which are context, not actions."""
         return [call for call in self.calls if not call.auxiliary]
 
-    def auxiliary_calls(self) -> list[RecordedCall]:
+    def compactor_calls(self) -> list[RecordedCall]:
         return [call for call in self.calls if call.auxiliary]

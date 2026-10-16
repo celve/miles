@@ -1,9 +1,13 @@
 """The run-wide options of a Harbor CUA rollout, in one place.
 
 Each one is fixed for a whole run -- the turn cap, the sandbox cap, the sample
-budget, the image resize settings -- so they are launch args rather than
+budget, where the recorder forwards -- so they are launch args rather than
 per-request fields, and their defaults live here once so the parser and the
 rollout cannot disagree about them.
+
+There is deliberately no image-resize option. The processor settings have to be
+identical on both sides of the exactness gate, and only the checkpoint's own
+config is, since this side cannot configure the engine's processor.
 """
 
 from __future__ import annotations
@@ -29,8 +33,6 @@ class HarborCuaOptions:
     max_sample_tokens: int | None = None
     call_timeout_s: float = 1800.0
     write_off_mode: str = WRITE_OFF_ABORT_GROUP
-    min_pixels: int | None = None
-    max_pixels: int | None = None
     # Measured on the Miles sglang router at sglang 0.5.22: a chat reply comes back
     # without prompt_token_ids, response_token_ids or meta_info, so the recorder has no
     # exact evidence and refuses the call. ``auto`` asks the router for one of its
@@ -48,16 +50,6 @@ class HarborCuaOptions:
     @classmethod
     def from_args(cls, args) -> HarborCuaOptions:
         return cls(**{f.name: getattr(args, f"harbor_cua_{f.name}", f.default) for f in fields(cls)})
-
-    @property
-    def resize_settings(self) -> dict[str, int] | None:
-        """Pinned image-processor settings, recorded with every sample's fingerprint."""
-        settings = {
-            name: value
-            for name, value in (("min_pixels", self.min_pixels), ("max_pixels", self.max_pixels))
-            if value is not None
-        }
-        return settings or None
 
     def router_url(self, args) -> str:
         return f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
@@ -81,5 +73,3 @@ def add_arguments(parser) -> None:
         "--harbor-cua-write-off-mode", choices=list(WRITE_OFF_MODES), default=defaults.write_off_mode
     )
     group.add_argument("--harbor-cua-upstream", type=str, default=defaults.upstream)
-    group.add_argument("--harbor-cua-min-pixels", type=int, default=defaults.min_pixels)
-    group.add_argument("--harbor-cua-max-pixels", type=int, default=defaults.max_pixels)
