@@ -14,6 +14,7 @@ family, rather than by a second implementation of those formats here.
 
 import logging
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -22,25 +23,6 @@ from miles.rollout.session.media import RequestMedia
 
 logger = logging.getLogger(__name__)
 
-# Chat fields that become sampling_params on the native route, under the same name.
-_SAMPLING_PASSTHROUGH = (
-    "temperature",
-    "top_p",
-    "top_k",
-    "min_p",
-    "frequency_penalty",
-    "presence_penalty",
-    "repetition_penalty",
-    "stop",
-    "stop_token_ids",
-    "skip_special_tokens",
-    "no_stop_trim",
-    "json_schema",
-    "regex",
-    "ebnf",
-    "structural_tag",
-)
-_SAMPLING_RENAMES = {"max_tokens": "max_new_tokens", "max_completion_tokens": "max_new_tokens", "seed": "seed"}
 # Request-level fields the native route reads directly rather than through sampling_params.
 _REQUEST_PASSTHROUGH = ("return_sampling_mask", "sampling_logprobs_mode", "lora_path", "extra_key")
 
@@ -63,7 +45,7 @@ class CompletionParsers:
     tokenizer: Any
 
 
-def validate_image_request_features(request_body: dict[str, Any]) -> None:
+def validate_image_request_features(request_body: dict[str, Any], *, parser: str | None = None) -> None:
     """Refuse the chat features the native route would otherwise serve differently."""
     for field, is_set in _UNSUPPORTED_WITH_IMAGES.items():
         if is_set(request_body.get(field)):
@@ -78,6 +60,37 @@ def validate_image_request_features(request_body: dict[str, Any]) -> None:
             f"tool_choice={tool_choice!r} is not supported for an image-bearing request: a forced or "
             "named tool call needs the grammar constraint the chat serving layer builds"
         )
+    if request_body.get("tools") and parser is None:
+        raise MessageValidationError(
+            "tools were supplied but the engine has no --tool-call-parser, so an image turn would return "
+            "raw tool syntax as content while a text turn in the same session returned parsed tool_calls; "
+            "launch the engine with a tool-call parser or send the request without tools"
+        )
+
+
+def build_sampling_params(request_body: dict[str, Any]) -> dict[str, Any]:
+    """Map the chat request onto sampling params using the engine's own converter.
+
+    `ChatCompletionRequest.to_sampling_params` is the one authority for which chat
+    field becomes which sampling field — it is where `max_completion_tokens` beats
+    `max_tokens`, `seed` becomes `sampling_seed`, and `min_tokens`, `ignore_eos`
+    and `stop_regex` are carried. A second copy of that table here would drift.
+
+    The model's generation config is left empty on purpose: the session server has
+    already resolved its own sampling defaults onto this request, so that layer
+    cannot change a value the caller or the session set.
+    """
+    from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
+
+    try:
+        parsed = ChatCompletionRequest.model_validate(request_body)
+    except Exception as exc:
+        raise MessageValidationError(f"request cannot be served on the image path: {exc}") from exc
+    stop = parsed.stop or []
+    params = parsed.to_sampling_params(
+        stop=[stop] if isinstance(stop, str) else list(stop), model_generation_config={}
+    )
+    return {key: value for key, value in params.items() if value is not None}
 
 
 def build_generate_body(
@@ -85,25 +98,21 @@ def build_generate_body(
     *,
     image_data: list[str],
     content_hashes: list[str],
+    client_wants_logprobs: bool = False,
 ) -> dict[str, Any]:
     """Translate a resolved chat request into a native generate request."""
-    sampling_params: dict[str, Any] = {}
-    for field in _SAMPLING_PASSTHROUGH:
-        if (value := request_body.get(field)) is not None:
-            sampling_params[field] = value
-    for field, target in _SAMPLING_RENAMES.items():
-        if (value := request_body.get(field)) is not None:
-            sampling_params.setdefault(target, value)
-
     body: dict[str, Any] = {
         "input_ids": request_body["input_ids"],
-        "sampling_params": sampling_params,
+        "sampling_params": build_sampling_params(request_body),
         "return_logprob": True,
         # The effective ids: what the engine expanded our placeholders into.
         "return_prompt_token_ids": True,
     }
     if (top_logprobs := request_body.get("top_logprobs")) is not None:
         body["top_logprobs_num"] = top_logprobs
+    if client_wants_logprobs:
+        # Per-token text, so the reply can carry the chat logprob shape the client asked for.
+        body["return_text_in_logprobs"] = True
     for field in _REQUEST_PASSTHROUGH:
         if (value := request_body.get(field)) is not None:
             body[field] = value
@@ -147,8 +156,10 @@ def adapt_generate_response(
     *,
     model: str,
     tools: list[dict[str, Any]] | None,
+    tool_choice: Any,
     parsers: CompletionParsers,
     separate_reasoning: bool,
+    client_wants_logprobs: bool = False,
 ) -> dict[str, Any]:
     """Rebuild the chat-completion envelope the session server records and replies with."""
     meta_info = response.get("meta_info")
@@ -163,9 +174,12 @@ def adapt_generate_response(
     if separate_reasoning and parsers.reasoning_parser:
         reasoning_content, text = _split_reasoning(text, parsers)
     tool_calls = None
-    if tools and parsers.tool_call_parser:
+    if tools and parsers.tool_call_parser and tool_choice != "none":
         text, tool_calls = _split_tool_calls(text, tools, parsers)
-        if tool_calls:
+        # Only a natural stop becomes tool_calls: a length cut closes the path for
+        # good and an abort is an error, and relabelling either would let the tree
+        # extend a node that must stay closed.
+        if tool_calls and finish_reason == "stop":
             finish_reason = "tool_calls"
 
     message: dict[str, Any] = {"role": "assistant", "content": text}
@@ -179,6 +193,8 @@ def adapt_generate_response(
         "finish_reason": finish_reason,
         "meta_info": meta_info,
     }
+    if client_wants_logprobs:
+        choice["logprobs"] = _chat_logprobs(meta_info, parsers.tokenizer)
     if matched is not None:
         choice["matched_stop"] = matched
     prompt_tokens = int(meta_info.get("prompt_tokens") or 0)
@@ -235,12 +251,42 @@ def _split_tool_calls(
     if not call_info_list:
         logger.warning("Tool call marker present but no complete call parsed by %s", parsers.tool_call_parser)
         return remaining, None
+    # A fresh id per call, as the chat route does for every non-Kimi parser: the id
+    # is stored with the assistant message and replayed by the harness, so it has to
+    # be unique across the conversation rather than restart at 0 each turn.
     return remaining, [
         {
-            "id": f"call_{index}_{info.name}",
+            "id": f"call_{uuid.uuid4().hex[:24]}",
             "index": index,
             "type": "function",
             "function": {"name": info.name, "arguments": info.parameters},
         }
         for index, info in enumerate(call_info_list)
     ]
+
+
+def _chat_logprobs(meta_info: dict[str, Any], tokenizer: Any) -> dict[str, Any]:
+    """The chat route's `logprobs` shape, for a client that asked for it.
+
+    Byte recovery goes through the engine's own helpers: a fragmentary byte-level
+    token's display text decodes to U+FFFD, so the bytes come from the token id.
+    """
+    from sglang.srt.entrypoints.openai.utils import _is_byte_level_tokenizer, token_id_to_bytes
+
+    byte_level = _is_byte_level_tokenizer(tokenizer)
+
+    def one(logprob: float, token_id: int, token_text: str | None) -> dict[str, Any]:
+        token_bytes = token_id_to_bytes(tokenizer, token_id) if byte_level else None
+        if token_bytes is None:
+            token_bytes = list((token_text or "").encode("utf-8"))
+        return {"token": token_text or "", "logprob": logprob, "bytes": token_bytes}
+
+    tops = meta_info.get("output_top_logprobs") or []
+    content = []
+    for index, item in enumerate(meta_info.get("output_token_logprobs") or []):
+        logprob, token_id, token_text = (list(item) + [None, None])[:3]
+        entry = one(logprob, token_id, token_text)
+        row = tops[index] if index < len(tops) else None
+        entry["top_logprobs"] = [one(*candidate[:3]) for candidate in row] if row else []
+        content.append(entry)
+    return {"content": content}

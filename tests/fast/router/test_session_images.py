@@ -34,9 +34,9 @@ from miles.utils.processing_utils import load_processor, load_tokenizer
 from miles.utils.test_utils.uvicorn_thread_server import UvicornThreadServer
 from miles.utils.types import Sample
 
-# 30.1 s measured for the whole file; each case starts its own server because the
-# flags under test are launch-scoped.
-register_cpu_ci(est_time=40, suite="stage-b-cpu", labels=["rollout"])
+# 52.1 s measured for the whole file on a devbox, not on a CI runner; each case
+# starts its own server because the flags under test are launch-scoped.
+register_cpu_ci(est_time=70, suite="stage-b-cpu", labels=["rollout"])
 
 CHECKPOINT = "Qwen/Qwen3-VL-2B-Instruct"
 IMAGE_TOKEN = "<|image_pad|>"
@@ -81,12 +81,30 @@ def assistant(text: str) -> dict:
 class ScriptedGenerateBackend:
     """A mock SGLang serving ``/generate`` the way the image path uses it."""
 
-    def __init__(self, vlm, replies: list[str], *, count_bias: int = 0):
+    def __init__(
+        self,
+        vlm,
+        replies: list[str],
+        *,
+        count_bias: int = 0,
+        server_info: dict | None = None,
+        finish_reason: str = "stop",
+    ):
         self.vlm = vlm
         self.replies = replies
         # A nonzero bias makes the engine expand differently from the server, which
         # is the failure the exactness gate exists to catch.
         self.count_bias = count_bias
+        self.finish_reason = finish_reason
+        self.server_info = {
+            "model_path": CHECKPOINT,
+            "revision": None,
+            "mm_process_config": {},
+            "image_processor_backend": "auto",
+            "tool_call_parser": None,
+            "reasoning_parser": None,
+            **(server_info or {}),
+        }
         self.calls: list[dict[str, Any]] = []
         self.host = "127.0.0.1"
         self.port = find_available_port(32000)
@@ -96,6 +114,10 @@ class ScriptedGenerateBackend:
         @self.app.get("/health")
         async def health():
             return JSONResponse(content={"status": "ok"})
+
+        @self.app.get("/get_server_info")
+        async def server_info():
+            return JSONResponse(content=self.server_info)
 
         @self.app.post("/generate")
         async def generate(request: Request):
@@ -146,7 +168,7 @@ class ScriptedGenerateBackend:
             "prompt_token_ids": effective,
             "meta_info": {
                 "id": f"gen-{index}",
-                "finish_reason": {"type": "stop", "matched": None},
+                "finish_reason": {"type": self.finish_reason, "matched": None},
                 "prompt_tokens": len(effective),
                 "completion_tokens": len(output_ids),
                 "cached_tokens": 0,
@@ -181,8 +203,18 @@ class ScriptedGenerateBackend:
 
 
 @contextmanager
-def image_router(vlm, replies: list[str], *, count_bias: int = 0, extra_args: dict | None = None):
-    backend = ScriptedGenerateBackend(vlm, replies, count_bias=count_bias)
+def image_router(
+    vlm,
+    replies: list[str],
+    *,
+    count_bias: int = 0,
+    extra_args: dict | None = None,
+    server_info: dict | None = None,
+    finish_reason: str = "stop",
+):
+    backend = ScriptedGenerateBackend(
+        vlm, replies, count_bias=count_bias, server_info=server_info, finish_reason=finish_reason
+    )
     backend.start()
     args_values: dict[str, Any] = {
         "miles_router_timeout": 30,
@@ -458,3 +490,184 @@ class TestRefusals:
             )
             assert response.status_code == 400
             assert b"is not supported for an image-bearing request" in response.content
+
+
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "click",
+            "description": "click a point",
+            "parameters": {"type": "object", "properties": {"x": {"type": "integer"}}},
+        },
+    }
+]
+
+
+class TestEngineAgreement:
+    """Matching ids prove the grid agrees, not that the pixels behind it do."""
+
+    def test_a_preprocessing_override_refuses_to_start(self, vlm):
+        """--mm-process-config changes the engine's pixels while every token id stays identical."""
+        with pytest.raises(ValueError, match="mm-process-config"):
+            with image_router(vlm, ["a"], server_info={"mm_process_config": {"image": {"do_normalize": False}}}):
+                pass
+
+    def test_a_different_served_checkpoint_refuses_to_start(self, vlm):
+        with pytest.raises(ValueError, match="the engine serves"):
+            with image_router(vlm, ["a"], server_info={"model_path": "Qwen/Qwen3-0.6B"}):
+                pass
+
+    def test_a_non_default_image_backend_refuses_to_start(self, vlm):
+        with pytest.raises(ValueError, match="image-processor-backend"):
+            with image_router(vlm, ["a"], server_info={"image_processor_backend": "torchvision"}):
+                pass
+
+    def test_what_bound_the_pixels_is_recorded_on_the_sample(self, vlm):
+        with image_router(vlm, ["a"]) as env:
+            session_id = _create_session(env.url)
+            assert chat(env, session_id, [user_turn(SHOT1, "look")]).status_code == 200
+            provenance = collect(env.url, session_id)[0].metadata["image_provenance"]
+            assert provenance["processor"]["checkpoint"] == CHECKPOINT
+            assert provenance["processor"]["image_token_id"] == vlm.pad_id
+            assert provenance["engine"]["mm_process_config"] == {}
+            assert provenance["engine"]["model_path"] == CHECKPOINT
+
+
+class TestSamplingParameters:
+    """The engine's own converter owns the mapping; these pin the cases that were wrong."""
+
+    @staticmethod
+    def params(env) -> dict:
+        return env.backend.calls[0]["sampling_params"]
+
+    def test_max_completion_tokens_beats_max_tokens(self, vlm):
+        with image_router(vlm, ["a"]) as env:
+            session_id = _create_session(env.url)
+            _post_chat(
+                env.url,
+                session_id,
+                {
+                    "messages": [user_turn(SHOT1, "look")],
+                    "max_tokens": 128,
+                    "max_completion_tokens": 32,
+                    "temperature": 1.0,
+                },
+            )
+            assert self.params(env)["max_new_tokens"] == 32
+
+    def test_seed_becomes_sampling_seed(self, vlm):
+        with image_router(vlm, ["a"]) as env:
+            session_id = _create_session(env.url)
+            _post_chat(
+                env.url,
+                session_id,
+                {"messages": [user_turn(SHOT1, "look")], "max_tokens": 8, "temperature": 1.0, "seed": 42},
+            )
+            params = self.params(env)
+            assert params["sampling_seed"] == 42
+            assert "seed" not in params
+
+    def test_controls_the_chat_route_honours_are_carried(self, vlm):
+        with image_router(vlm, ["a"]) as env:
+            session_id = _create_session(env.url)
+            _post_chat(
+                env.url,
+                session_id,
+                {
+                    "messages": [user_turn(SHOT1, "look")],
+                    "max_tokens": 8,
+                    "temperature": 1.0,
+                    "min_tokens": 2,
+                    "ignore_eos": True,
+                    "stop_regex": "STOP",
+                },
+            )
+            params = self.params(env)
+            assert params["min_new_tokens"] == 2
+            assert params["ignore_eos"] is True
+            assert params["stop_regex"] == "STOP"
+
+
+class TestToolCallsAndFinishReason:
+    def test_tools_without_an_engine_parser_are_refused(self, vlm):
+        """Otherwise an image turn returns raw tool syntax where a text turn returns tool_calls."""
+        with image_router(vlm, ["a"]) as env:
+            session_id = _create_session(env.url)
+            response = _post_chat(
+                env.url, session_id, {"messages": [user_turn(SHOT1, "look")], "max_tokens": 8, "tools": TOOLS}
+            )
+            assert response.status_code == 400
+            assert b"no --tool-call-parser" in response.content
+
+    def test_a_parsed_call_is_served_when_the_engine_has_a_parser(self, vlm):
+        reply = '<tool_call>\n{"name": "click", "arguments": {"x": 3}}\n</tool_call>'
+        with image_router(vlm, [reply], server_info={"tool_call_parser": "qwen25"}) as env:
+            session_id = _create_session(env.url)
+            response = _post_chat(
+                env.url, session_id, {"messages": [user_turn(SHOT1, "look")], "max_tokens": 64, "tools": TOOLS}
+            )
+            assert response.status_code == 200, response.content
+            choice = response.json()["choices"][0]
+            assert choice["finish_reason"] == "tool_calls"
+            calls = choice["message"]["tool_calls"]
+            assert [call["function"]["name"] for call in calls] == ["click"]
+            assert calls[0]["id"].startswith("call_") and len(calls[0]["id"]) > 10
+
+    def test_tool_choice_none_leaves_the_text_alone(self, vlm):
+        reply = '<tool_call>\n{"name": "click", "arguments": {"x": 3}}\n</tool_call>'
+        with image_router(vlm, [reply], server_info={"tool_call_parser": "qwen25"}) as env:
+            session_id = _create_session(env.url)
+            response = _post_chat(
+                env.url,
+                session_id,
+                {
+                    "messages": [user_turn(SHOT1, "look")],
+                    "max_tokens": 64,
+                    "tools": TOOLS,
+                    "tool_choice": "none",
+                },
+            )
+            assert response.status_code == 200, response.content
+            choice = response.json()["choices"][0]
+            assert choice["message"].get("tool_calls") in (None, [])
+            assert choice["finish_reason"] == "stop"
+
+    def test_a_length_cut_is_not_relabelled_as_tool_calls(self, vlm):
+        """Relabelling would clear TrajectoryNode.truncated and let the tree extend a closed path."""
+        reply = '<tool_call>\n{"name": "click", "arguments": {"x": 3}}\n</tool_call>'
+        with image_router(
+            vlm, [reply], server_info={"tool_call_parser": "qwen25"}, finish_reason="length"
+        ) as env:
+            session_id = _create_session(env.url)
+            response = _post_chat(
+                env.url, session_id, {"messages": [user_turn(SHOT1, "look")], "max_tokens": 4, "tools": TOOLS}
+            )
+            assert response.status_code == 200, response.content
+            assert response.json()["choices"][0]["finish_reason"] == "length"
+            tree = requests.get(f"{env.url}/sessions/{session_id}", timeout=10).json()["metadata"]["tree"]
+            assert tree["nodes"][0]["truncated"] is True
+
+
+class TestClientLogprobs:
+    def test_a_client_that_asks_for_logprobs_gets_the_chat_shape(self, vlm):
+        with image_router(vlm, ["clicked"]) as env:
+            session_id = _create_session(env.url)
+            response = _post_chat(
+                env.url,
+                session_id,
+                {"messages": [user_turn(SHOT1, "look")], "max_tokens": 16, "temperature": 1.0, "logprobs": True},
+            )
+            assert response.status_code == 200, response.content
+            content = response.json()["choices"][0]["logprobs"]["content"]
+            assert content, "logprobs content must not be empty"
+            assert {"token", "logprob", "bytes", "top_logprobs"} <= set(content[0])
+            assert env.backend.calls[0]["return_text_in_logprobs"] is True
+
+    def test_a_client_that_does_not_ask_gets_none(self, vlm):
+        with image_router(vlm, ["clicked"]) as env:
+            session_id = _create_session(env.url)
+            response = chat(env, session_id, [user_turn(SHOT1, "look")])
+            assert response.status_code == 200
+            assert "logprobs" not in response.json()["choices"][0]
+            assert "return_text_in_logprobs" not in env.backend.calls[0]

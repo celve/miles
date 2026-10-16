@@ -106,6 +106,7 @@ def build_leaf_material(
         }
         if registry.image_support is not None:
             flat["prompt_media"] = {str(node.seq): list(node.media.asset_ids) for node in path}
+            flat["image_provenance"] = registry.image_support.provenance()
         if computed_mismatch is not None and leaf.seq in computed_mismatch:
             mismatch = computed_mismatch[leaf.seq]
         else:

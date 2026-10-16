@@ -68,6 +68,10 @@ class SessionCoreV2(SessionCore):
         metadata["max_trim_tokens"] = self.registry.tito_tokenizer.max_trim_tokens
         metadata["tree"] = tree_metadata(session)
         metadata["turn_args"] = filter_turn_args(latest.turn_args) if latest is not None else {}
+        if self.registry.image_support is not None:
+            # What bound this run's pixels. Launch-scoped, so one record per session
+            # and per sample says everything a per-request copy would.
+            metadata["image_provenance"] = self.registry.image_support.provenance()
         return metadata
 
     async def get_session(self, session_id: str) -> Response:
@@ -186,13 +190,16 @@ class SessionCoreV2(SessionCore):
             # An image turn goes to the native route, which is the only one that carries pixels
             # alongside pretokenized ids; a text turn keeps the chat route unchanged.
             if prepared.has_media:
-                validate_image_request_features(request_body)
+                validate_image_request_features(
+                    request_body, parser=self.registry.image_support.parsers.tool_call_parser
+                )
                 route = "generate"
                 proxy_body = orjson.dumps(
                     build_generate_body(
                         request_body,
                         image_data=[session.media.arena.get(a).to_data_url() for a in prepared.media.asset_ids],
                         content_hashes=list(prepared.media.asset_ids),
+                        client_wants_logprobs=response_intent.logprobs,
                     )
                 )
             else:
@@ -213,7 +220,7 @@ class SessionCoreV2(SessionCore):
             return proxy_result_to_response(result)
 
         if prepared.has_media:
-            result = self._chat_result_from_generate(result, request_body, prepared)
+            result = self._chat_result_from_generate(result, request_body, prepared, response_intent)
         response, choice, assistant_message, completion_token_ids = extract_completion(result)
         assistant_message = tito_tokenizer.postprocess_completion(
             choice=choice,
@@ -254,7 +261,7 @@ class SessionCoreV2(SessionCore):
 
         return _chat_client_response(result, response, response_intent)
 
-    def _chat_result_from_generate(self, result: dict, request_body: dict, prepared) -> dict:
+    def _chat_result_from_generate(self, result: dict, request_body: dict, prepared, response_intent) -> dict:
         """Check the ids inference consumed, then give the native reply the chat shape.
 
         The rest of this method, the record, and every sample consumer then see
@@ -274,8 +281,10 @@ class SessionCoreV2(SessionCore):
             generated,
             model=request_body.get("model") or self.config.tito_model,
             tools=request_body.get("tools"),
+            tool_choice=request_body.get("tool_choice"),
             parsers=self.registry.image_support.parsers,
             separate_reasoning=request_body.get("separate_reasoning", True),
+            client_wants_logprobs=response_intent.logprobs,
         )
         return {**result, "response_body": _render_json(envelope)}
 
