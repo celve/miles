@@ -65,6 +65,10 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     train_per_family: int = 4
     eval_per_family: int = 2
     max_turns: int = 10
+    # flash_attention_3 is the house default, but the trainer resolves it by downloading
+    # kernels-community/vllm-flash-attn3, which needs a writable HF cache and an image
+    # that can reach it; flash_attention_2 keeps the recipe runnable where it cannot.
+    attn_implementation: str = "flash_attention_3"
     max_sandboxes: int = 8
     max_pixels: int = 1_204_224
     desktop_width: int = 1024
@@ -162,7 +166,7 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
         "--train-backend fsdp "
         "--gradient-checkpointing "
         "--update-weight-buffer-size 536870912 "
-        "--attn-implementation flash_attention_3 "
+        f"--attn-implementation {args.attn_implementation} "
         # A rollout batch of screenshot episodes is gigabytes of pixel tensors, and
         # dispatching it keeps rank 0 past the default NCCL watchdog while the other
         # ranks sit in their first collective (miles#2406).
@@ -208,6 +212,9 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
 def _worker_env(args: ScriptArgs, harbor_env: dict[str, str]) -> dict:
     env = {
         "PYTHONPATH": str(command_utils.repo_base_dir),
+        # The trainer actors resolve the attention kernel through the hub cache, which is
+        # read-only on some images unless this is forwarded.
+        **({"HF_HOME": os.environ["HF_HOME"]} if os.environ.get("HF_HOME") else {}),
         "HARBOR_CUA_DESKTOP_WIDTH": str(args.desktop_width),
         "HARBOR_CUA_DESKTOP_HEIGHT": str(args.desktop_height),
         "AGENT_MAX_INPUT_TOKENS": os.environ.get("AGENT_MAX_INPUT_TOKENS", "32768"),
