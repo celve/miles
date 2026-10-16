@@ -54,9 +54,9 @@ def test_mask_and_logprobs_cover_only_sampled_tokens(episode):
     assert len(segment.loss_mask) == segment.response_length
     assert len(segment.logprobs) == segment.response_length
     assert segment.sampled_token_count == sum(len(call.output_token_ids) for call in record.calls)
-    sampled = [token for token, mask in zip(segment.tokens[segment.response_start :], segment.loss_mask) if mask]
+    sampled = [token for token, mask in zip(segment.tokens[segment.response_start :], segment.loss_mask, strict=True) if mask]
     assert sampled == [token for call in record.calls for token in call.output_token_ids]
-    assert all(logprob == 0.0 for logprob, mask in zip(segment.logprobs, segment.loss_mask) if not mask)
+    assert all(logprob == 0.0 for logprob, mask in zip(segment.logprobs, segment.loss_mask, strict=True) if not mask)
 
 
 def test_prompt_is_the_masked_context_of_its_segment(episode):

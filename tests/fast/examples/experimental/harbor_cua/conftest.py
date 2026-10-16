@@ -1,13 +1,42 @@
 """Synthetic recorded calls, built the way Harbor's generic loop builds prompts."""
 
 import io
+import sys
+import types
+from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
 from PIL import Image
 
 from examples.experimental.harbor_cua.calls import AssetArena, RecordedCall, RolloutRecord
+
+
+def _stand_in_for_base_types() -> None:
+    """Let the offline suite call ``generate`` where sglang cannot be installed.
+
+    ``miles.rollout.base_types`` reaches the chat-template registry, which needs the
+    sglang build only a training node has. The generate function constructs exactly
+    one type from it, so a stand-in is enough here; ``test_generate_fn_output_contract``
+    checks the real one wherever it does import.
+    """
+    try:
+        import miles.rollout.base_types  # noqa: F401
+    except ImportError:
+        module = types.ModuleType("miles.rollout.base_types")
+
+        @dataclass(frozen=True)
+        class GenerateFnOutput:
+            samples: Any
+
+        module.GenerateFnOutput = GenerateFnOutput
+        module.GenerateFnInput = object
+        sys.modules["miles.rollout.base_types"] = module
+
+
+_stand_in_for_base_types()
 
 IMAGE_PAD_ID = 777
 VISION_START_ID = 775

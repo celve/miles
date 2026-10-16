@@ -127,6 +127,25 @@ def build_train_inputs(assets: Sequence[ProcessedAsset]) -> dict[str, torch.Tens
     }
 
 
+def placeholder_vision_sample(processor) -> tuple[list[int], dict[str, torch.Tensor]]:
+    """One minimal image's tokens and tensors, for a sample that trains on nothing.
+
+    It exists only to keep a write-off on the same vision-tower collective
+    schedule as its siblings; it is never added to a real sampled context.
+    """
+    image_processor = processor.image_processor
+    processed = image_processor(images=[Image.new("RGB", (64, 64))], return_tensors="pt")
+    merge = int(getattr(image_processor, "merge_size", 2))
+    token_count = int(torch.prod(processed["image_grid_thw"], dim=-1).sum().item()) // (merge * merge)
+    convert = processor.tokenizer.convert_tokens_to_ids
+    tokens = [
+        convert(VISION_START_TOKEN),
+        *([convert(IMAGE_PAD_TOKEN)] * token_count),
+        convert(VISION_END_TOKEN),
+    ]
+    return tokens, {"pixel_values": processed["pixel_values"], "image_grid_thw": processed["image_grid_thw"]}
+
+
 def render_prompt_ids(processor, messages: list[dict], images: Sequence[Image.Image]) -> list[int]:
     """The prompt ids this machine would render for ``messages``.
 
@@ -147,7 +166,7 @@ def render_prompt_ids(processor, messages: list[dict], images: Sequence[Image.Im
 
 
 def first_difference(left: Sequence[int], right: Sequence[int]) -> int | None:
-    for index, (a, b) in enumerate(zip(left, right)):
+    for index, (a, b) in enumerate(zip(left, right, strict=False)):
         if a != b:
             return index
     return None if len(left) == len(right) else min(len(left), len(right))

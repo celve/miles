@@ -176,7 +176,7 @@ def _shared_media_prefix(current: Segment | None, call: RecordedCall) -> int:
     if current is None:
         return 0
     shared = 0
-    for held, incoming in zip(current.media, call.media):
+    for held, incoming in zip(current.media, call.media, strict=False):
         if held != incoming:
             break
         shared += 1

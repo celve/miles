@@ -14,7 +14,7 @@ def data_url(payload: bytes, media_type: str = "image/webp") -> str:
 
 
 def chat_response(*, prompt_ids, output_ids, logprobs=None):
-    triples = [(logprob, token, "") for logprob, token in zip(logprobs or [-0.5] * len(output_ids), output_ids)]
+    triples = [(logprob, token, "") for logprob, token in zip(logprobs or [-0.5] * len(output_ids), output_ids, strict=True)]
     return {
         "model": "test-model",
         "choices": [
