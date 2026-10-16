@@ -13,6 +13,8 @@ Needs, before ``execute``:
   for E2B Cloud or an E2B-compatible endpoint, with its key file at
   ``--e2b-api-key-file``; the local ``docker`` backend is refused, since
   ``Trial.run()`` would need a daemon beside it;
+* a Megatron-LM checkout at ``--megatron-path``, because the FSDP log-prob path
+  imports ``megatron.core.fusions.fused_cross_entropy``;
 * ``harbor`` installed in the trainer's environment from the branch Miles pins
   (``uv pip install "harbor[e2b] @ git+https://github.com/harbor-framework/harbor@harbor-miles-v0.20.0"``).
 
@@ -56,6 +58,9 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     rollout_batch_size: int = 4
     n_samples_per_prompt: int = 8
     model_dir: str = "/root/models"
+    # Even the FSDP path imports megatron's fused cross-entropy for log probs, so the
+    # checkout has to be on the workers' PYTHONPATH.
+    megatron_path: str = "/root/Megatron-LM"
     data_dir: str = "/root/datasets/harbor_cua"
     harbor_tasks_dir: str = "/root/harbor_cua_tasks"
     harbor_trials_dir: str = "/tmp/harbor_cua_trials"
@@ -231,6 +236,7 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
         ),
         num_gpus_per_node=args.num_gpus_per_node,
         megatron_model_type=None,
+        megatron_path=args.megatron_path,
         extra_env_vars=_worker_env(args, harbor_env or {}),
     )
 
