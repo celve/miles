@@ -25,7 +25,7 @@ def test_the_split_shares_no_instance(generated):
     train = [json.loads(line) for line in (tmp_path / "data" / "train.jsonl").read_text().splitlines()]
     evaluation = [json.loads(line) for line in (tmp_path / "data" / "eval.jsonl").read_text().splitlines()]
 
-    assert counts == {"train": 20, "eval": 10, "families": 5}
+    assert counts == {"train": 4 * len(FAMILIES), "eval": 2 * len(FAMILIES), "families": len(FAMILIES)}
     assert {row["label"] for row in train} & {row["label"] for row in evaluation} == set()
     assert {row["metadata"]["split"] for row in train} == {"train"}
     assert {row["metadata"]["split"] for row in evaluation} == {"eval"}
