@@ -35,16 +35,19 @@ def test_no_images_is_no_runs():
     assert image_token_runs([1, 2, 3], PAD) == []
 
 
-def test_exact_match_returns_the_image_count():
+def test_exact_correspondence_passes():
     tokens = [1, PAD, PAD, 2, PAD, PAD, PAD]
-    assert verify_image_token_layout(tokens, PAD, [2, 3]) == 2
+    assert verify_image_token_layout(tokens, PAD, [2, 3]) is None
 
 
-def test_trailing_screenshot_that_never_entered_a_prompt_is_allowed():
-    """The last observation of an episode has no model call after it, so the
-    trace legitimately carries one more image than the ids account for."""
+def test_more_screenshots_than_runs_is_rejected():
+    """Cutting the images to whichever prefix the runs total would accept a
+    sequence that lost an occurrence as a shorter correct one. The caller only
+    ever recovers screenshots a prompt referenced, so there is no legitimate
+    extra to tolerate."""
     tokens = [1, PAD, PAD, 2]
-    assert verify_image_token_layout(tokens, PAD, [2, 3, 7]) == 1
+    with pytest.raises(MediaBindingError, match="1 image runs but 3 screenshots"):
+        verify_image_token_layout(tokens, PAD, [2, 3, 7])
 
 
 def test_wrong_per_image_split_with_the_right_total_is_rejected():
@@ -63,7 +66,7 @@ def test_swapped_image_order_is_rejected():
 
 def test_more_runs_than_screenshots_is_rejected():
     tokens = [PAD, 1, PAD, 2, PAD]
-    with pytest.raises(MediaBindingError, match="3 image runs but only 2 screenshots"):
+    with pytest.raises(MediaBindingError, match="3 image runs but 2 screenshots"):
         verify_image_token_layout(tokens, PAD, [1, 1])
 
 

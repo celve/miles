@@ -46,25 +46,26 @@ def verify_image_token_layout(
     tokens: list[int],
     image_token_id: int,
     expected_counts: list[int],
-) -> int:
-    """Check each image's token run positionally and return how many ids account for.
+) -> None:
+    """Check each image's token run positionally, one run per image, in order.
 
-    ``expected_counts`` may be longer than the ids: an agent's trace can carry a
-    screenshot captured after the last model call, which never entered a prompt.
-    It may not be shorter, and no run may disagree with its image.
+    Correspondence is exact rather than prefix-wise. Cutting the images to
+    whichever prefix the runs happen to total would let a sequence that lost or
+    gained an occurrence pass as a shorter correct one, and would bind the
+    wrong screenshot to every position after the discrepancy.
     """
     runs = image_token_runs(tokens, image_token_id)
-    if len(runs) > len(expected_counts):
+    if len(runs) != len(expected_counts):
         raise MediaBindingError(
-            f"ids hold {len(runs)} image runs but only {len(expected_counts)} screenshots were recovered"
+            f"ids hold {len(runs)} image runs but {len(expected_counts)} screenshots were recovered; "
+            f"runs={[length for _, length in runs]} expected={expected_counts}"
         )
-    for index, ((_, length), expected) in enumerate(zip(runs, expected_counts, strict=False)):
+    for index, ((_, length), expected) in enumerate(zip(runs, expected_counts, strict=True)):
         if length != expected:
             raise MediaBindingError(
                 f"image {index}: ids give it {length} tokens, the processor gives it {expected}; "
                 f"runs={[length for _, length in runs]} expected={expected_counts}"
             )
-    return len(runs)
 
 
 def media_digests(payloads: list[bytes]) -> list[str]:

@@ -37,7 +37,7 @@ Args:
     gym_url: NeMo Gym's agent server, reachable from the train actors.
     samples_per_episode: OSWorld's step cap; fixes each episode's sample count.
     rollout_batch_size, n_samples_per_prompt: the GRPO group geometry.
-    history_policy: recorded for the run report; Gym reads it from its own config.
+    micro_batch_size: must divide each rank's share of the global batch.
     num_rollout: optimizer steps.
     mode: ``normal`` trains; ``smoke`` is two episodes, rollout only.
 
@@ -54,6 +54,9 @@ import typer
 from miles.utils.external_utils import command_utils
 
 HF_REPO = "Qwen/Qwen3-VL-4B-Instruct"
+# Pinned, not floating: a recipe that documents one revision while its own
+# download command fetches whatever HEAD is cannot be reproduced.
+HF_REVISION = "ebb281ec70b05090aa6165b016eac8ec08e71b17"
 
 
 @dataclass
@@ -70,6 +73,7 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     eval_prompt_data: str = ""
     gym_url: str = "http://127.0.0.1:11001"
     samples_per_episode: int = 15
+    micro_batch_size: int = 1
     max_sandboxes: int = 8
     episode_timeout_s: int = 2400
     rollout_batch_size: int = 2
@@ -77,9 +81,36 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     num_rollout: int = 20
     # Recorded so the run report and the checkpoint agree on which screenshot
     # window produced them; Gym itself reads this from its own env.yaml.
-    history_policy: str = "hysteresis:1:5"
     mode: Literal["normal", "smoke"] = "normal"
     extra_args: str = ""
+
+    def __post_init__(self):
+        # A fixed sample count is necessary but not sufficient: the legacy
+        # sample-strided split gives ranks unequal shards when the total does
+        # not divide, and the train side then floor-divides its own shard --
+        # leaving rows without log-probs while they keep their rewards, which
+        # is an IndexError in get_grpo_returns rather than a clear refusal.
+        super_post = getattr(super(), "__post_init__", None)
+        if super_post is not None:
+            super_post()
+        if self.mode == "smoke":
+            # Smoke runs rollout-only, so no optimizer step consumes the batch
+            # and the division below is not a constraint on it.
+            return
+        total = self.global_batch_size
+        dp_size = self.num_nodes * self.num_gpus_per_node
+        if total % dp_size:
+            raise ValueError(
+                f"{self.episodes_per_step} episodes x {self.samples_per_episode} samples = {total} samples "
+                f"does not divide across {dp_size} ranks. Adjust --rollout-batch-size, "
+                "--n-samples-per-prompt or --samples-per-episode until it does."
+            )
+        per_rank = total // dp_size
+        if per_rank < 1 or per_rank % self.micro_batch_size:
+            raise ValueError(
+                f"each rank takes {per_rank} samples, which --micro-batch-size {self.micro_batch_size} "
+                "must divide and which must be at least 1."
+            )
 
     @property
     def model_path(self) -> str:
@@ -114,7 +145,7 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
 def prepare(args: ScriptArgs):
     U = args.create_backend()
     U.exec_command_cpu(f"mkdir -p {args.model_dir}")
-    U.exec_command_cpu(f"hf download {HF_REPO} --local-dir {args.model_path}")
+    U.exec_command_cpu(f"hf download {HF_REPO} --revision {HF_REVISION} --local-dir {args.model_path}")
 
 
 def execute(args: ScriptArgs):
@@ -208,6 +239,10 @@ def execute(args: ScriptArgs):
     misc_args = (
         f"--actor-num-nodes {args.num_nodes} "
         f"--actor-num-gpus-per-node {args.num_gpus_per_node} "
+        # execute_train's num_gpus_per_node only sets ray's resource count; the
+        # train.py flag defaults to 8 and has to be passed as well.
+        f"--num-gpus-per-node {args.num_gpus_per_node} "
+        f"--micro-batch-size {args.micro_batch_size} "
         "--colocate "
         f"--save {args.output_dir}/ckpt "
         "--save-interval 5 "
@@ -241,7 +276,6 @@ def execute(args: ScriptArgs):
             "MILES_SCRIPT_OSWORLD_SAMPLES_PER_EPISODE": str(args.samples_per_episode),
             "MILES_SCRIPT_OSWORLD_MAX_SANDBOXES": str(args.max_sandboxes),
             "MILES_SCRIPT_OSWORLD_EPISODE_TIMEOUT_S": str(args.episode_timeout_s),
-            "MILES_SCRIPT_OSWORLD_HISTORY_POLICY": args.history_policy,
         },
     )
 

@@ -17,6 +17,7 @@ from examples.experimental.osworld.rollout import (
     EpisodeConfig,
     _aborted,
     _calls,
+    _media_occurrences,
     _padding,
     _segments,
     _stitch,
@@ -151,9 +152,44 @@ def test_vision_inputs_verify_each_image_against_its_own_run():
     """The fake processor gives image i 1*2*2(i+1)/4 = (i+1) tokens."""
     state = _state()
     tokens = [1, IMAGE_PAD, 2, IMAGE_PAD, IMAGE_PAD, 3]
-    inputs, kept = _vision_inputs(state, [object(), object()], tokens)
-    assert kept == 2
+    inputs = _vision_inputs(state, [object(), object()], tokens)
     assert inputs["image_grid_thw"].shape[0] == 2
+
+
+def test_vision_inputs_reject_a_sequence_missing_one_image_run():
+    """Cutting the images to whichever prefix the runs total would accept this
+    as a correct one-image segment and bind the wrong pixels everywhere after."""
+    state = _state()
+    with pytest.raises(MediaBindingError, match="1 image runs but 2 screenshots"):
+        _vision_inputs(state, [object(), object()], [1, IMAGE_PAD, 2])
+
+
+def test_media_occurrences_take_the_final_prompt_and_check_the_earlier_ones():
+    segment = [
+        _call([1], [10], media_ids=["a"]),
+        _call([1, 10, 2], [11], media_ids=["a", "b"]),
+    ]
+    assert _media_occurrences(segment) == ["a", "b"]
+
+
+def test_media_occurrences_reject_a_screenshot_swapped_inside_a_segment():
+    """Two calls can swap one screenshot for another of the same size without
+    disturbing the token prefix at all, and both digests stay valid -- so only
+    the media prefix catches it."""
+    segment = [
+        _call([1], [10], media_ids=["a"]),
+        _call([1, 10, 2], [11], media_ids=["b"]),
+    ]
+    with pytest.raises(MediaBindingError, match="not an ordered prefix"):
+        _media_occurrences(segment)
+
+
+def test_media_occurrences_keep_a_screenshot_referenced_twice():
+    """The arena is content-addressed, so one prompt showing the same
+    screenshot twice lists its id twice and owes two token runs. Collapsing
+    them rejected a legitimate episode, and then aborted it as an
+    infrastructure failure."""
+    assert _media_occurrences([_call([1], [10], media_ids=["a", "a"])]) == ["a", "a"]
 
 
 def test_vision_inputs_reject_a_swapped_image_order():
