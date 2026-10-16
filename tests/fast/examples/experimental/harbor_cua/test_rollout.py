@@ -189,3 +189,19 @@ def test_generate_fn_output_contract():
         "miles.rollout.base_types", reason="needs the sglang build a training node has"
     )
     assert set(base_types.GenerateFnOutput.__dataclass_fields__) == {"samples"}
+
+
+async def test_an_explicit_upstream_is_used_verbatim():
+    from examples.experimental.harbor_cua.options import HarborCuaOptions
+
+    options = HarborCuaOptions(upstream="http://10.0.0.9:20035")
+
+    assert await harbor_cua._resolve_upstream(args(), options) == "http://10.0.0.9:20035"
+
+
+async def test_asking_for_the_router_forwards_there_despite_the_evidence_gap():
+    from examples.experimental.harbor_cua.options import HarborCuaOptions
+
+    options = HarborCuaOptions(upstream="router")
+
+    assert await harbor_cua._resolve_upstream(args(), options) == "http://127.0.0.1:31000"

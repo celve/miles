@@ -23,11 +23,13 @@ from examples.experimental.harbor_cua.media import (
     placeholder_vision_sample,
 )
 from examples.experimental.harbor_cua.options import (
+    UPSTREAM_AUTO,
+    UPSTREAM_ROUTER,
     WRITE_OFF_ABORT_GROUP,
     HarborCuaOptions,
     add_arguments,
 )
-from examples.experimental.harbor_cua.recorder import CallRecorder
+from examples.experimental.harbor_cua.recorder import CallRecorder, RecorderError
 from examples.experimental.harbor_cua.samples import build_samples
 from examples.experimental.harbor_cua.segments import segment_calls
 from examples.experimental.harbor_cua.trial_driver import TrialOutcome, run_trial
@@ -133,6 +135,30 @@ async def reward_func(args, samples: Sample | list[Sample], **kwargs) -> float |
     return float(samples.metadata.get("reward", 0.0))
 
 
+async def _resolve_upstream(args, options: HarborCuaOptions) -> str:
+    """Where the recorder forwards.
+
+    The Miles router re-serialises a chat reply to the OpenAI schema, so the token
+    evidence the recorder asks for does not survive it; one of its engines answers
+    with the fields intact. ``auto`` asks the router which engines it has, which is
+    the same question the built-in rollout paths ask.
+    """
+    if options.upstream not in (UPSTREAM_AUTO, UPSTREAM_ROUTER):
+        return options.upstream
+    if options.upstream == UPSTREAM_ROUTER:
+        return options.router_url(args)
+
+    from miles.rollout.inference_rollout.inference_rollout_train import get_worker_urls  # noqa: PLC0415
+
+    urls = await get_worker_urls(args)
+    if not urls:
+        raise RecorderError(
+            f"the router at {options.router_url(args)} reports no engines; pass "
+            "--harbor-cua-upstream <engine url> or 'router' to choose explicitly"
+        )
+    return urls[0].rstrip("/")
+
+
 async def _shared_recorder(args, options: HarborCuaOptions) -> CallRecorder:
     """One recorder per rollout process, bound to loopback.
 
@@ -143,7 +169,7 @@ async def _shared_recorder(args, options: HarborCuaOptions) -> CallRecorder:
     global _recorder
     async with _recorder_lock:
         if _recorder is None:
-            upstream = options.engine_url(args)
+            upstream = await _resolve_upstream(args, options)
             recorder = CallRecorder(upstream=upstream, timeout=options.call_timeout_s)
             await recorder.start()
             logger.info("harbor cua recorder listening on 127.0.0.1:%d for %s", recorder.port, upstream)

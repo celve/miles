@@ -17,6 +17,10 @@ WRITE_OFF_ABORT_GROUP = "abort_group"
 WRITE_OFF_MASK_SAMPLE = "mask_sample"
 WRITE_OFF_MODES = (WRITE_OFF_ABORT_GROUP, WRITE_OFF_MASK_SAMPLE)
 
+# Resolve one of the router's engines at startup, rather than forwarding to the router.
+UPSTREAM_AUTO = "auto"
+UPSTREAM_ROUTER = "router"
+
 
 @dataclass(frozen=True)
 class HarborCuaOptions:
@@ -27,10 +31,11 @@ class HarborCuaOptions:
     write_off_mode: str = WRITE_OFF_ABORT_GROUP
     min_pixels: int | None = None
     max_pixels: int | None = None
-    # Measured on the Miles sglang router at 0.5.22: a chat reply comes back without
-    # prompt_token_ids, response_token_ids or meta_info, so the recorder has no exact
-    # evidence and refuses the call. Naming an engine's own URL here restores it.
-    upstream: str = ""
+    # Measured on the Miles sglang router at sglang 0.5.22: a chat reply comes back
+    # without prompt_token_ids, response_token_ids or meta_info, so the recorder has no
+    # exact evidence and refuses the call. ``auto`` asks the router for one of its
+    # engines and forwards there instead; an explicit URL names one directly.
+    upstream: str = UPSTREAM_AUTO
 
     def __post_init__(self) -> None:
         if self.write_off_mode not in WRITE_OFF_MODES:
@@ -54,9 +59,8 @@ class HarborCuaOptions:
         }
         return settings or None
 
-    def engine_url(self, args) -> str:
-        """Where the recorder forwards: an explicit engine, else the router."""
-        return self.upstream or f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
+    def router_url(self, args) -> str:
+        return f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
 
     def sample_token_budget(self, args) -> int | None:
         if self.max_sample_tokens is not None:

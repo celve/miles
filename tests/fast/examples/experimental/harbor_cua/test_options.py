@@ -66,8 +66,11 @@ def test_the_write_off_modes_are_the_two_documented_ones():
     assert WRITE_OFF_MODES == ("abort_group", "mask_sample")
 
 
-def test_the_recorder_forwards_to_the_router_unless_an_engine_is_named():
+def test_the_router_url_comes_from_the_launch_args():
     args = Namespace(sglang_router_ip="10.0.0.1", sglang_router_port=31000)
 
-    assert HarborCuaOptions().engine_url(args) == "http://10.0.0.1:31000"
-    assert HarborCuaOptions(upstream="http://10.0.0.2:20035").engine_url(args) == "http://10.0.0.2:20035"
+    assert HarborCuaOptions().router_url(args) == "http://10.0.0.1:31000"
+
+
+def test_resolving_an_engine_defaults_to_asking_the_router():
+    assert HarborCuaOptions().upstream == "auto"
