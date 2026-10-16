@@ -150,8 +150,8 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
         f"--harbor-cua-max-turns {args.max_turns} "
         f"--harbor-cua-max-sandboxes {args.max_sandboxes} "
         f"--harbor-cua-max-pixels {args.max_pixels} "
-        + (f"--harbor-cua-upstream {args.recorder_upstream} " if args.recorder_upstream else "")
         "--harbor-cua-write-off-mode abort_group "
+        + (f"--harbor-cua-upstream {args.recorder_upstream} " if args.recorder_upstream else "")
         + ("--debug-rollout-only " if args.mode == "rollout" else "")
     )
 
