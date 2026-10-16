@@ -586,27 +586,15 @@ def test_qwen3_vl_position_ids_run_mrope_on_every_packed_document(tiny_qwen3_vl,
         logits = tiny_qwen3_vl(**actor._get_model_inputs_args(batch)).logits
 
     position_ids = batch["position_ids"]
+    packed_len = sum(len(document) for document in documents)
     assert position_ids.shape == (4, 1, batch["tokens"].size(1))
-    assert position_ids[0, 0, : sum(len(d) for d in documents)].tolist() == [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10] * 2 + [
-        0,
-        1,
-        2,
-        3,
-        4,
-    ]
+    assert position_ids[0, 0, :packed_len].tolist() == list(range(11)) * 2 + list(range(5))
     assert not torch.equal(position_ids[1], position_ids[0])  # the image rows carry M-RoPE's own coordinates
 
     start = 0
     for tokens, mm_inputs in zip(documents, [first_mm, second_mm, {}], strict=True):
         reference = _hf_reference_logits(tiny_qwen3_vl, tokens, mm_inputs)
         assert torch.allclose(logits[:, start : start + tokens.numel()], reference, atol=1e-5), f"document at {start}"
-        start += tokens.numel()
-
-    start = 0
-    for tokens, mm_inputs in zip(documents, [first_mm, second_mm, {}], strict=True):
-        reference = _hf_reference_logits(tiny_qwen3_vl, tokens, mm_inputs)
-        packed_slice = logits[:, start : start + tokens.numel()]
-        assert torch.allclose(packed_slice, reference, atol=1e-5), f"document at {start}"
         start += tokens.numel()
 
 
