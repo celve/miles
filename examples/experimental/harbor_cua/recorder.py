@@ -139,7 +139,7 @@ class CallRecorder:
     async def start(self) -> None:
         if self._server is not None:
             return
-        config = uvicorn.Config(self._app, host="127.0.0.1", port=0, log_level="warning", access_log=False)
+        config = uvicorn.Config(self._app, host="127.0.0.1", port=0, log_level="info", access_log=True)
         self._server = uvicorn.Server(config)
         self._task = asyncio.create_task(self._server.serve())
         for _ in range(600):

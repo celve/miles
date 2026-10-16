@@ -142,6 +142,7 @@ async def run_trial(
 ) -> TrialOutcome:
     from harbor.trial.trial import Trial
 
+    logger.info("harbor cua trial %s posting to %s", instance_id, api_base)
     _ensure_provider_key()
     config = build_trial_config(
         instance_id=instance_id,
