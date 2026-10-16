@@ -18,6 +18,7 @@ can use it, and the arithmetic is testable without a GPU, a model or a trace.
 from __future__ import annotations
 
 import hashlib
+from dataclasses import fields as dc_fields, is_dataclass
 from typing import Any
 
 
@@ -102,8 +103,29 @@ def processor_identity(image_processor: Any) -> dict[str, Any]:
     for field in fields:
         value = getattr(image_processor, field, None)
         if value is not None:
-            identity[field] = list(value) if isinstance(value, (list, tuple)) else value
+            identity[field] = _plain(value)
     return identity
+
+
+def _plain(value: Any) -> Any:
+    """Coerce to types msgpack can carry.
+
+    ``size`` comes back as transformers' ``SizeDict``, a dataclass, and image
+    statistics as tuples; Miles serializes ``Sample.metadata`` with msgpack, so
+    leaving either as-is fails the run where the batch is packaged rather than
+    here. A dataclass becomes its fields rather than its repr, so two runs'
+    settings stay comparable across a transformers version that changes how it
+    prints.
+    """
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _plain(item) for key, item in value.items()}
+    if is_dataclass(value) and not isinstance(value, type):
+        return {field.name: _plain(getattr(value, field.name)) for field in dc_fields(value)}
+    if isinstance(value, (list, tuple, set)):
+        return [_plain(item) for item in value]
+    return str(value)
 
 
 def expanded_token_counts(processor: Any, images: list[Any]) -> list[int]:

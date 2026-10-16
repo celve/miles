@@ -54,7 +54,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import copy
+import hashlib
 import io
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -243,6 +245,11 @@ def _images(segment: list[dict], media_assets: dict[str, dict]) -> tuple[list[PI
     prompts within a segment extend one another. A screenshot referenced twice
     in one prompt would collapse here, which ``verify_image_token_layout`` then
     rejects as a run-count disagreement rather than mis-binding it.
+
+    Gym publishes its own ``content_digest`` per asset, so the bytes we decode
+    are checked against the bytes it recorded. That catches a transport or
+    base64 fault between Gym and here, which no amount of checking our own
+    digest against itself would.
     """
     images: list[PILImage.Image] = []
     payloads: list[bytes] = []
@@ -253,7 +260,8 @@ def _images(segment: list[dict], media_assets: dict[str, dict]) -> tuple[list[PI
             if media_id in seen:
                 continue
             seen.add(media_id)
-            source = (media_assets.get(media_id) or {}).get("source_part") or {}
+            asset = media_assets.get(media_id) or {}
+            source = asset.get("source_part") or {}
             # Both OpenAI shapes occur: image_url as the bare data URL, and as
             # the nested {"url": ...} object.
             part = source.get("image_url")
@@ -261,10 +269,35 @@ def _images(segment: list[dict], media_assets: dict[str, dict]) -> tuple[list[PI
             if "base64," not in url:
                 continue
             payload = base64.b64decode(url.split("base64,", 1)[1])
+            _check_against_gyms_digest(str(media_id), source, asset.get("content_digest"))
             images.append(PILImage.open(io.BytesIO(payload)).convert("RGB"))
             payloads.append(payload)
             media_ids.append(str(media_id))
     return images, payloads, media_ids
+
+
+def _check_against_gyms_digest(media_id: str, source: dict, claimed: Any) -> None:
+    """Fail unless this asset is the one Gym committed to when it recorded it.
+
+    Gym's ``content_digest`` is sha256 over the canonically serialized
+    ``source_part`` -- not over the image bytes -- so recomputing it the same
+    way covers the data URL, the detail and the part type together
+    (``osworld_agent/trajectory.py:register_media_asset``). Its ``media_id`` is
+    that digest's first 24 characters, which is also checked, because an id that
+    no longer matches its own content means the asset arena was rebuilt without
+    its digests.
+    """
+    if not isinstance(claimed, str) or not claimed:
+        return
+    canonical = json.dumps(source, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    if digest != claimed:
+        raise MediaBindingError(
+            f"media {media_id} canonicalizes to {digest} but Gym recorded {claimed}: the screenshot that "
+            "reached training is not the one the policy was shown"
+        )
+    if media_id != f"media-{digest[:24]}":
+        raise MediaBindingError(f"media {media_id} does not match its own digest {digest[:24]}")
 
 
 def _vision_inputs(state: Any, images: list[PILImage.Image], tokens: list[int]) -> tuple[dict, int] | None:
