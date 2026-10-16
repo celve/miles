@@ -468,6 +468,162 @@ def test_qwen3_5_vision_tower_never_sees_language_model_packing_kwargs(monkeypat
     assert vision_cu_seqlens == [[0, 4]]  # the image's own patch boundaries, not the packed text rows
 
 
+_TINY_QWEN3_VL_TEXT = dict(
+    vocab_size=64,
+    hidden_size=32,
+    intermediate_size=64,
+    num_hidden_layers=2,
+    num_attention_heads=4,
+    num_key_value_heads=2,
+    head_dim=8,
+    rope_scaling={"rope_type": "default", "mrope_section": [1, 1, 2], "mrope_interleaved": True},
+)
+_TINY_QWEN3_VL_VISION = dict(
+    depth=2,
+    hidden_size=16,
+    intermediate_size=32,
+    num_heads=2,
+    patch_size=2,
+    temporal_patch_size=2,
+    spatial_merge_size=2,
+    in_channels=3,
+    out_hidden_size=32,
+    num_position_embeddings=16,
+    deepstack_visual_indexes=[0],
+)
+_IMAGE_TOKEN_ID = 60
+_IMAGE_GRID = (1, 4, 4)
+
+
+@pytest.fixture(scope="module")
+def tiny_qwen3_vl():
+    from transformers import Qwen3VLConfig
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditionalGeneration
+
+    cfg = Qwen3VLConfig(
+        text_config=_TINY_QWEN3_VL_TEXT,
+        vision_config=_TINY_QWEN3_VL_VISION,
+        image_token_id=_IMAGE_TOKEN_ID,
+        video_token_id=61,
+        vision_start_token_id=62,
+        vision_end_token_id=63,
+    )
+    torch.manual_seed(0)
+    model = Qwen3VLForConditionalGeneration(cfg).eval()
+    model.config.text_config._attn_implementation = "eager"
+    model.config.vision_config._attn_implementation = "eager"
+    return model
+
+
+def _image_document(seed):
+    """One document holding one image, with the processor outputs `extract_multimodal_train_inputs` keeps."""
+    torch.manual_seed(seed)
+    t, h, w = _IMAGE_GRID
+    merge = _TINY_QWEN3_VL_VISION["spatial_merge_size"]
+    placeholders = [_IMAGE_TOKEN_ID] * (t * (h // merge) * (w // merge))
+    tokens = torch.tensor([1, 2, 3, 62, *placeholders, 63, 4, 5])
+    mm_inputs = {
+        "pixel_values": torch.randn(t * h * w, _TINY_QWEN3_VL_VISION["in_channels"] * 2 * 2 * 2),
+        "image_grid_thw": torch.tensor([_IMAGE_GRID]),
+    }
+    return tokens, mm_inputs
+
+
+def _hf_reference_logits(model, tokens, mm_inputs):
+    """What HF computes for this document on its own, from the `mm_token_type_ids` the processor emits."""
+    with torch.no_grad():
+        return model(
+            input_ids=tokens.unsqueeze(0),
+            mm_token_type_ids=(tokens == _IMAGE_TOKEN_ID).long().unsqueeze(0),
+            use_cache=False,
+            **mm_inputs,
+        ).logits
+
+
+def test_qwen3_vl_position_ids_run_mrope_on_every_packed_document(tiny_qwen3_vl):
+    """A supplied 1-D ramp makes HF skip `compute_3d_position_ids`; the four-row tensor reaches its logits."""
+    from miles.backends.training_utils.data.rollout import _build_arch_position_ids
+
+    first_tokens, first_mm = _image_document(seed=1)
+    second_tokens, second_mm = _image_document(seed=2)
+    text_tokens = torch.tensor([7, 8, 9, 10, 11])
+    documents = [first_tokens, second_tokens, text_tokens]
+    pad = 2
+
+    adapter = _adapter("qwen3_vl")
+    position_ids = _build_arch_position_ids(
+        documents,
+        [first_mm, second_mm, None],
+        adapter.position_ids_builder(tiny_qwen3_vl),
+        qkv_format="thd",
+        cp_size=1,
+        pad=pad,
+    )
+
+    actor = object.__new__(FSDPTrainRayActor)
+    actor.arch_adapter = adapter
+    lengths = (*(d.numel() for d in documents), pad)
+    batch = {
+        "tokens": torch.cat([*documents, torch.zeros(pad, dtype=torch.long)]).unsqueeze(0),
+        "position_ids": position_ids,
+        # the per-key concatenation get_batch does over the micro-batch's samples
+        "multimodal_train_inputs": {
+            key: torch.cat([first_mm[key], second_mm[key]]) for key in ("pixel_values", "image_grid_thw")
+        },
+        **_packed_boundaries(*lengths),
+    }
+    with torch.no_grad():
+        logits = tiny_qwen3_vl(**actor._get_model_inputs_args(batch)).logits
+
+    assert position_ids.shape == (4, 1, sum(lengths))
+    assert position_ids[0, 0].tolist() == [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10] * 2 + [0, 1, 2, 3, 4, 0, 0]
+    assert not torch.equal(position_ids[1], position_ids[0])  # the image rows carry M-RoPE's own coordinates
+
+    start = 0
+    for tokens, mm_inputs in zip(documents, [first_mm, second_mm, {}], strict=True):
+        reference = _hf_reference_logits(tiny_qwen3_vl, tokens, mm_inputs)
+        packed_slice = logits[:, start : start + tokens.numel()]
+        assert torch.allclose(packed_slice, reference, atol=1e-5), f"document at {start}"
+        start += tokens.numel()
+
+
+def test_the_linear_ramp_this_replaces_diverges_from_hf(tiny_qwen3_vl):
+    """Without this fix `position_ids` is an arange, which HF accepts in place of the M-RoPE coordinates."""
+    tokens, mm_inputs = _image_document(seed=1)
+
+    with torch.no_grad():
+        ramped = tiny_qwen3_vl(
+            input_ids=tokens.unsqueeze(0),
+            position_ids=torch.arange(tokens.numel()).unsqueeze(0),
+            use_cache=False,
+            **mm_inputs,
+        ).logits
+
+    assert (ramped - _hf_reference_logits(tiny_qwen3_vl, tokens, mm_inputs)).abs().max() > 1e-2
+
+
+def test_a_text_only_qwen3_vl_document_keeps_the_linear_ramp(tiny_qwen3_vl):
+    rows = _adapter("qwen3_vl").position_ids_builder(tiny_qwen3_vl)(torch.arange(5) + 7, None)
+
+    assert torch.equal(rows, torch.arange(5).expand(4, -1))
+
+
+def test_qwen3_vl_rejects_grids_that_disagree_with_the_placeholders(tiny_qwen3_vl):
+    tokens, mm_inputs = _image_document(seed=1)
+    understated = {**mm_inputs, "image_grid_thw": torch.tensor([[1, 2, 2]])}
+
+    with pytest.raises(AssertionError, match="4 image placeholder token"):
+        _adapter("qwen3_vl").position_ids_builder(tiny_qwen3_vl)(tokens, understated)
+
+
+def test_only_qwen3_vl_archs_build_their_own_position_ids():
+    for model_type in ("qwen3_vl", "qwen3_vl_moe"):
+        assert _adapter(model_type).position_ids_builder(SimpleNamespace(model=None)) is not None, model_type
+    # every other arch keeps the 1-D ramp get_batch builds, including remote code with no adapter
+    for model_type in ("qwen3_5", "qwen3_5_moe", "nemotron_h", "qwen3", "qwen3_moe", "glm4_moe_lite", "some_lm"):
+        assert _adapter(model_type).position_ids_builder(SimpleNamespace(model=None)) is None, model_type
+
+
 import transformers
 from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 from miles.backends.fsdp_utils.actor import FSDPTrainRayActor
