@@ -52,6 +52,7 @@ from typing import Literal
 import typer
 
 from miles.utils.external_utils import command_utils
+from miles.utils.external_utils.command_utils.common import ArgvManipulator
 
 HF_REPO = "Qwen/Qwen3-VL-4B-Instruct"
 # Pinned, not floating: a recipe that documents one revision while its own
@@ -158,25 +159,47 @@ _PROTECTED_FLAGS = (
 _PROTECTED_ENV = ("MILES_SCRIPT_OSWORLD_SAMPLES_PER_EPISODE",)
 
 
-def _refuse_geometry_overrides(train_args: str, extra_env_vars: str) -> None:
-    """Check the final effective argv and environment, not the fields.
+def _refuse_geometry_overrides(train_args: str, args: ScriptArgs, launcher_env: dict[str, str]) -> None:
+    """Check the final effective argv and environment with their consumers' own semantics.
 
     ``__post_init__`` sees the dataclass before ``--extra-args`` is appended to
     the argv and before ``--extra-env-vars`` is merged over the launcher's own
     environment, and both of those win last. So a geometry the constructor
     accepted can still reach the trainer changed, and the first sign of it is
     an unscored tail in every shard.
+
+    Matching spellings by hand is not enough, which is why this borrows the
+    code the values actually pass through: ``ArgvManipulator`` counts
+    ``--flag value`` and ``--flag=value`` alike, ``resolve_extra_env_vars``
+    performs the real merge so the *effective* value is what gets compared --
+    covering the JSON form as well as ``NAME=value`` -- and an abbreviation is
+    refused outright, because ``argparse`` resolves any unambiguous prefix to
+    the same destination.
     """
+    argv = train_args.split()
     for flag in _PROTECTED_FLAGS:
-        if train_args.split().count(flag) > 1:
+        if len(ArgvManipulator.get(argv, flag)) > 1:
             raise ValueError(
-                f"{flag} is set more than once in the final command line. It fixes this recipe's batch "
-                "geometry, which --extra-args may not override; change the matching field instead."
+                f"{flag} is declared more than once in the final command line. It fixes this recipe's "
+                "batch geometry, which --extra-args may not override; change the matching field instead."
             )
+    for token in argv:
+        name = token.split("=", maxsplit=1)[0]
+        if not name.startswith("--") or name in _PROTECTED_FLAGS:
+            continue
+        for flag in _PROTECTED_FLAGS:
+            if flag.startswith(name):
+                raise ValueError(
+                    f"{token} abbreviates {flag}, which argparse resolves to the same destination. "
+                    f"{flag} fixes this recipe's batch geometry; change the matching field instead."
+                )
+
+    effective = command_utils.resolve_extra_env_vars(launcher_env, args)
     for name in _PROTECTED_ENV:
-        if f"{name}=" in extra_env_vars:
+        if effective.get(name) != launcher_env.get(name):
             raise ValueError(
-                f"{name} is set through --extra-env-vars, which is merged over the launcher's own "
+                f"{name} resolves to {effective.get(name)!r} rather than the launcher's "
+                f"{launcher_env.get(name)!r}, because --extra-env-vars is merged over the launcher's own "
                 "environment. It fixes each episode's sample count, from which --global-batch-size is "
                 "derived; change --samples-per-episode instead."
             )
@@ -295,6 +318,10 @@ def execute(args: ScriptArgs):
         f"--save {args.output_dir}/ckpt "
         "--save-interval 5 "
         f"--dump-details {args.output_dir}/dump "
+        # Infrastructure exclusions must not land in the task-score denominator:
+        # the default logger turns a null reward into a zero, so one aborted
+        # sandbox would halve a two-task held-out score.
+        "--custom-eval-rollout-log-function-path examples.experimental.osworld.rollout.log_eval_rollout_data "
         + ("--debug-rollout-only " if smoke else "")
     )
 
@@ -312,23 +339,24 @@ def execute(args: ScriptArgs):
             f"{misc_args} "
             f"{args.extra_args} "
     )
+    # The converter's knobs reach the train actors here rather than as flags,
+    # because Miles's training entry parses argv strictly and each of them is a
+    # launch constraint rather than a per-request one.
+    launcher_env = {
+        "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+        "MILES_SCRIPT_GYM_URL": args.gym_url,
+        "MILES_SCRIPT_OSWORLD_SAMPLES_PER_EPISODE": str(args.samples_per_episode),
+        "MILES_SCRIPT_OSWORLD_MAX_SANDBOXES": str(args.max_sandboxes),
+        "MILES_SCRIPT_OSWORLD_EPISODE_TIMEOUT_S": str(args.episode_timeout_s),
+    }
     if not smoke:
-        _refuse_geometry_overrides(train_args, args.extra_env_vars)
+        _refuse_geometry_overrides(train_args, args, launcher_env)
 
     U.execute_train(
         train_args=train_args,
         num_gpus_per_node=args.num_gpus_per_node,
         megatron_model_type=None,
-        extra_env_vars={
-            "CUDA_DEVICE_MAX_CONNECTIONS": "1",
-            # The converter's knobs reach the train actors here rather than as
-            # flags, because Miles's training entry parses argv strictly and
-            # each of them is a launch constraint rather than a per-request one.
-            "MILES_SCRIPT_GYM_URL": args.gym_url,
-            "MILES_SCRIPT_OSWORLD_SAMPLES_PER_EPISODE": str(args.samples_per_episode),
-            "MILES_SCRIPT_OSWORLD_MAX_SANDBOXES": str(args.max_sandboxes),
-            "MILES_SCRIPT_OSWORLD_EPISODE_TIMEOUT_S": str(args.episode_timeout_s),
-        },
+        extra_env_vars=launcher_env,
     )
 
 

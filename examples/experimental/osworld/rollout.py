@@ -431,6 +431,23 @@ def _aborted(sample: Sample, reason: str, state: Any, counters: dict) -> list[Sa
     return [sample]
 
 
+def _admitted_reward(envelope: dict) -> float | None:
+    """The grade, only if Gym positively says it admitted and scored the episode.
+
+    Checked positively rather than by rejecting the two failure values: a
+    missing ``runtime_eligible`` or ``mask_sample`` passes a negative test, and
+    a missing reward then defaults to zero, so a malformed or empty reply would
+    reach training as a genuine task failure instead of as the protocol fault
+    it is.
+    """
+    if envelope.get("runtime_eligible") is not True or envelope.get("mask_sample") is not False:
+        return None
+    reward = envelope.get("reward")
+    if isinstance(reward, bool) or not isinstance(reward, (int, float)):
+        return None
+    return float(reward)
+
+
 def _graded_only(sample: Sample, reason: str, state: Any, counters: dict, reward: float) -> list[Sample]:
     """An episode Gym graded but this converter cannot train on.
 
@@ -526,14 +543,16 @@ async def generate(input: "GenerateFnInput") -> "GenerateFnOutput":
             return GenerateFnOutput(samples=_aborted(sample, f"transport: {type(e).__name__}: {e}", state, counters))
 
     # Gym puts the grade and the admission decision on the row, not inside the
-    # response envelope that carries the trace.
+    # response envelope that carries the trace. Admission is required
+    # *positively*: an envelope that does not say it was admitted, or that
+    # carries no numeric grade, is a protocol fault, and defaulting its reward
+    # to zero would manufacture a task failure out of a malformed reply.
     response = envelope.get("response") or {}
-    reward = float(envelope.get("reward") or 0.0)
-    if envelope.get("mask_sample") is True or envelope.get("runtime_eligible") is False:
-        # Gym's own verdict that the episode was never validly evaluated, which
-        # is an environment fault and not a score the policy earned.
-        reason = envelope.get("runtime_admission_reason") or "unknown"
+    graded = _admitted_reward(envelope)
+    if graded is None:
+        reason = envelope.get("runtime_admission_reason") or "no valid admission or reward"
         return GenerateFnOutput(samples=_aborted(sample, f"not runtime-eligible: {reason}", state, counters))
+    reward = graded
 
     # Past this point Gym has graded the episode, so an unusable trace is this
     # converter's limitation rather than an environment fault: training drops
@@ -669,3 +688,46 @@ async def reward_func(args, samples: Sample | list[Sample], **kwargs) -> float |
     if isinstance(samples, list):
         return [s.metadata.get("reward", 0.0) for s in samples]
     return samples.metadata.get("reward", 0.0)
+
+
+def log_eval_rollout_data(rollout_id, args, data, extra_metrics: dict | None = None) -> bool:
+    """Score the held-out set over the episodes the environment actually graded.
+
+    Miles's default logger turns a null reward into a zero before averaging, so
+    one sandbox that never ran would lower the reported task score rather than
+    leave the denominator. This recipe aborts an episode precisely when its
+    grade is not the policy's fault, so those rows are excluded from the score
+    and reported as their own counts instead. Returning True suppresses the
+    default logging for this dataset.
+
+    Wire with --custom-eval-rollout-log-function-path.
+    """
+    from miles.ray.rollout.metrics import compute_rollout_step  # noqa: PLC0415
+    from miles.utils import tracking  # noqa: PLC0415
+
+    log_dict = dict(extra_metrics or {})
+    for key, rows in data.items():
+        rewards = rows.get("rewards") or []
+        graded = [reward for reward in rewards if reward is not None]
+        excluded = len(rewards) - len(graded)
+        log_dict[f"eval/{key}-attempted"] = len(rewards)
+        log_dict[f"eval/{key}-graded"] = len(graded)
+        log_dict[f"eval/{key}-infrastructure_excluded"] = excluded
+        if graded:
+            log_dict[f"eval/{key}"] = sum(graded) / len(graded)
+        else:
+            # No score at all is not a score of zero; leave the mean out so a
+            # wholly failed evaluation cannot read as a perfect failure.
+            logger.warning("eval/%s: all %d attempts were excluded as infrastructure faults", key, len(rewards))
+        if excluded:
+            logger.warning(
+                "eval/%s: %d of %d attempts excluded as infrastructure faults, not scored as zero",
+                key,
+                excluded,
+                len(rewards),
+            )
+
+    logger.info("eval %s: %s", rollout_id, log_dict)
+    log_dict["eval/step"] = compute_rollout_step(args, rollout_id)
+    tracking.log(args, log_dict, step_key="eval/step")
+    return True

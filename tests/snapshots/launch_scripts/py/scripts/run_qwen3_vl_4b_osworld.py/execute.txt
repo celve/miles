@@ -78,5 +78,6 @@ export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && ray job submit
   --colocate
   --save /root/shared_data/ckpt
   --save-interval 5
-  --dump-details /root/shared_data/dump   
+  --dump-details /root/shared_data/dump
+  --custom-eval-rollout-log-function-path examples.experimental.osworld.rollout.log_eval_rollout_data   
   --deploy-component all

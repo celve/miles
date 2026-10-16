@@ -46,20 +46,53 @@ def test_smoke_mode_is_exempt_because_it_runs_no_optimizer_step():
     assert args.global_batch_size == 30
 
 
-def test_an_extra_arg_overriding_the_geometry_is_refused():
+LAUNCHER_ENV = {"MILES_SCRIPT_OSWORLD_SAMPLES_PER_EPISODE": "15", "MILES_SCRIPT_GYM_URL": "http://x:11001"}
+
+
+def _args(extra_env_vars=""):
+    return ScriptArgs(samples_per_episode=15, num_gpus_per_node=4, extra_env_vars=extra_env_vars)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        # Space-separated, the obvious spelling.
+        "--micro-batch-size 1 --global-batch-size 120 --micro-batch-size 7",
+        # `=`, which argparse accepts identically.
+        "--micro-batch-size 1 --micro-batch-size=7",
+    ],
+)
+def test_an_extra_arg_redeclaring_the_geometry_is_refused(argv):
     """__post_init__ sees the fields; --extra-args is appended to the argv
     afterwards and wins last, so the geometry the constructor accepted can
     still reach the trainer changed."""
-    with pytest.raises(ValueError, match="--micro-batch-size is set more than once"):
-        _refuse_geometry_overrides("--micro-batch-size 1 --global-batch-size 120 --micro-batch-size 7", "")
+    with pytest.raises(ValueError, match="--micro-batch-size is declared more than once"):
+        _refuse_geometry_overrides(argv, _args(), LAUNCHER_ENV)
 
 
-def test_an_extra_env_var_overriding_the_sample_count_is_refused():
-    """--extra-env-vars is merged over the launcher's own environment, so it
-    can change the count --global-batch-size was derived from."""
+@pytest.mark.parametrize("argv", ["--micro-batch-size 1 --micro-batch=7", "--micro-batch-size 1 --global-batch 8"])
+def test_an_abbreviated_geometry_flag_is_refused(argv):
+    """Miles's parser leaves argparse's abbreviation matching on, so an
+    unambiguous prefix reaches the same destination under another spelling."""
+    with pytest.raises(ValueError, match="abbreviates"):
+        _refuse_geometry_overrides(argv, _args(), LAUNCHER_ENV)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "MILES_SCRIPT_OSWORLD_SAMPLES_PER_EPISODE=16",
+        '{"MILES_SCRIPT_OSWORLD_SAMPLES_PER_EPISODE":"16"}',
+    ],
+)
+def test_an_extra_env_var_overriding_the_sample_count_is_refused(extra):
+    """--extra-env-vars is merged over the launcher's own environment in both
+    its JSON and NAME=value forms, so either can change the count
+    --global-batch-size was derived from."""
     with pytest.raises(ValueError, match="MILES_SCRIPT_OSWORLD_SAMPLES_PER_EPISODE"):
-        _refuse_geometry_overrides("--micro-batch-size 1", "MILES_SCRIPT_OSWORLD_SAMPLES_PER_EPISODE=16")
+        _refuse_geometry_overrides("--micro-batch-size 1", _args(extra), LAUNCHER_ENV)
 
 
-def test_an_unrelated_extra_arg_is_left_alone():
-    assert _refuse_geometry_overrides("--micro-batch-size 1 --log-passrate --seed 7", "WANDB_MODE=offline") is None
+def test_unrelated_extras_are_left_alone():
+    argv = "--micro-batch-size 1 --log-passrate --seed 7 --num-rollout=3"
+    assert _refuse_geometry_overrides(argv, _args("WANDB_MODE=offline"), LAUNCHER_ENV) is None

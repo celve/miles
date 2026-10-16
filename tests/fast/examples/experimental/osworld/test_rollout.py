@@ -16,13 +16,15 @@ import pytest
 from examples.experimental.osworld.rollout import (
     EpisodeConfig,
     _aborted,
+    _admitted_reward,
     _calls,
     _media_occurrences,
     _padding,
-    _verify_each_call,
     _segments,
     _stitch,
+    _verify_each_call,
     _vision_inputs,
+    log_eval_rollout_data,
 )
 from examples.experimental.osworld.media_binding import MediaBindingError
 from miles.utils.types import Sample
@@ -282,3 +284,55 @@ def test_episode_config_reads_the_environment_and_strips_the_gym_url(monkeypatch
     config = EpisodeConfig.read(SimpleNamespace())
     assert config.samples_per_episode == 15
     assert config.gym_url == "http://10.0.0.1:11001"
+
+
+def test_an_envelope_without_a_positive_admission_is_not_a_grade():
+    """A missing runtime_eligible or mask_sample passes a negative test, and a
+    missing reward then defaults to zero -- so an empty reply would reach
+    training as a genuine task failure instead of a protocol fault."""
+    assert _admitted_reward({}) is None
+    assert _admitted_reward({"runtime_eligible": True, "mask_sample": False}) is None
+    assert _admitted_reward({"runtime_eligible": True, "mask_sample": False, "reward": True}) is None
+    assert _admitted_reward({"mask_sample": False, "reward": 1.0}) is None
+    assert _admitted_reward({"runtime_eligible": True, "mask_sample": True, "reward": 0.0}) is None
+    assert _admitted_reward({"runtime_eligible": True, "mask_sample": False, "reward": 0.0}) == 0.0
+    assert _admitted_reward({"runtime_eligible": True, "mask_sample": False, "reward": 1}) == 1.0
+
+
+def test_the_eval_logger_excludes_infrastructure_faults_from_the_denominator(monkeypatch):
+    """The default logger turns a null reward into a zero before averaging, so
+    one sandbox that never ran would halve a two-task score."""
+    logged = {}
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "miles.utils.tracking",
+        SimpleNamespace(log=lambda args, d, step_key=None: logged.update(d)),
+    )
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "miles.ray.rollout.metrics",
+        SimpleNamespace(compute_rollout_step=lambda args, rollout_id: 1),
+    )
+    assert log_eval_rollout_data(1, SimpleNamespace(), {"heldout": {"rewards": [1.0, None]}}) is True
+    assert logged["eval/heldout"] == 1.0
+    assert logged["eval/heldout-attempted"] == 2
+    assert logged["eval/heldout-graded"] == 1
+    assert logged["eval/heldout-infrastructure_excluded"] == 1
+
+
+def test_the_eval_logger_reports_no_mean_when_nothing_was_graded(monkeypatch):
+    """No score at all is not a score of zero."""
+    logged = {}
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "miles.utils.tracking",
+        SimpleNamespace(log=lambda args, d, step_key=None: logged.update(d)),
+    )
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "miles.ray.rollout.metrics",
+        SimpleNamespace(compute_rollout_step=lambda args, rollout_id: 1),
+    )
+    log_eval_rollout_data(1, SimpleNamespace(), {"heldout": {"rewards": [None, None]}})
+    assert "eval/heldout" not in logged
+    assert logged["eval/heldout-infrastructure_excluded"] == 2
