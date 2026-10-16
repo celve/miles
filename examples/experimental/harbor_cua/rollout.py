@@ -22,6 +22,11 @@ from examples.experimental.harbor_cua.media import (
     MediaProcessor,
     placeholder_vision_sample,
 )
+from examples.experimental.harbor_cua.options import (
+    WRITE_OFF_ABORT_GROUP,
+    HarborCuaOptions,
+    add_arguments,
+)
 from examples.experimental.harbor_cua.recorder import CallRecorder
 from examples.experimental.harbor_cua.samples import build_samples
 from examples.experimental.harbor_cua.segments import segment_calls
@@ -35,11 +40,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SANDBOX_LIMIT_NAME = "harbor_cua_sandbox"
-# A sandbox or conversion failure is not a task failure. Aborting drops the whole GRPO
-# group, which is correct statistics; masking keeps the group but lets a zero reward the
-# policy never earned move its baseline.
-WRITE_OFF_ABORT_GROUP = "abort_group"
-WRITE_OFF_MASK_SAMPLE = "mask_sample"
 
 _recorder: CallRecorder | None = None
 _recorder_lock = asyncio.Lock()
@@ -60,25 +60,26 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
     if not instance_id:
         raise ValueError("no Harbor task: expected sample.metadata['instance_id'] to name a task directory")
 
-    recorder = await _shared_recorder(args)
+    options = HarborCuaOptions.from_args(args)
+    recorder = await _shared_recorder(args, options)
     token = recorder.open_rollout()
     try:
-        async with rollout_semaphore(SANDBOX_LIMIT_NAME, int(getattr(args, "harbor_cua_max_sandboxes", 16))):
+        async with rollout_semaphore(SANDBOX_LIMIT_NAME, options.max_sandboxes):
             outcome = await run_trial(
                 instance_id=str(instance_id),
                 api_base=recorder.base_url(token),
                 session_id=token,
                 sampling_params=input.sampling_params,
-                max_turns=int(getattr(args, "harbor_cua_max_turns", 12)),
+                max_turns=options.max_turns,
             )
     finally:
         record = recorder.take(token)
 
     sample.metadata = {**metadata, **outcome.metadata, "trial_dir": outcome.trial_dir}
-    media = MediaProcessor(state.processor, resize_settings=getattr(args, "harbor_cua_resize", None))
+    media = MediaProcessor(state.processor, resize_settings=options.resize_settings)
     sample.metadata["processor_fingerprint"] = media.fingerprint()
 
-    write_off_mode = str(getattr(args, "harbor_cua_write_off_mode", WRITE_OFF_ABORT_GROUP))
+    write_off_mode = options.write_off_mode
     if outcome.infrastructure_failure:
         return GenerateFnOutput(
             samples=[_write_off(sample, state, f"trial failed: {outcome.exit_status}", write_off_mode)]
@@ -88,7 +89,7 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
         _check_call_accounting(record, outcome, sample.metadata)
         segmentation = segment_calls(
             record.action_calls(),
-            max_sample_tokens=_sample_token_budget(args),
+            max_sample_tokens=options.sample_token_budget(args),
         )
         samples, stats = build_samples(
             template=sample,
@@ -132,7 +133,7 @@ async def reward_func(args, samples: Sample | list[Sample], **kwargs) -> float |
     return float(samples.metadata.get("reward", 0.0))
 
 
-async def _shared_recorder(args) -> CallRecorder:
+async def _shared_recorder(args, options: HarborCuaOptions) -> CallRecorder:
     """One recorder per rollout process, bound to loopback.
 
     ``computer-1`` makes its model calls from this process rather than from the
@@ -143,18 +144,11 @@ async def _shared_recorder(args) -> CallRecorder:
     async with _recorder_lock:
         if _recorder is None:
             upstream = f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
-            recorder = CallRecorder(upstream=upstream, timeout=float(getattr(args, "harbor_cua_call_timeout_s", 1800)))
+            recorder = CallRecorder(upstream=upstream, timeout=options.call_timeout_s)
             await recorder.start()
             logger.info("harbor cua recorder listening on 127.0.0.1:%d for %s", recorder.port, upstream)
             _recorder = recorder
         return _recorder
-
-
-def _sample_token_budget(args) -> int | None:
-    explicit = getattr(args, "harbor_cua_max_sample_tokens", None)
-    if explicit is not None:
-        return int(explicit)
-    return int(args.rollout_max_context_len) if getattr(args, "rollout_max_context_len", None) else None
 
 
 def _rollout_id(sample: Sample) -> int:
@@ -189,11 +183,6 @@ def _write_off(sample: Sample, state, reason: str, mode: str) -> Sample:
     all-gathers are collectives: a text-only sample skips them and the ranks that
     issued them block until some other phase happens to post a matching call.
     """
-    if mode not in (WRITE_OFF_ABORT_GROUP, WRITE_OFF_MASK_SAMPLE):
-        raise ValueError(
-            f"--harbor-cua-write-off-mode must be {WRITE_OFF_ABORT_GROUP!r} or "
-            f"{WRITE_OFF_MASK_SAMPLE!r}, got {mode!r}"
-        )
     logger.warning("harbor cua write-off (%s): %s", mode, reason)
     tokens, train_inputs = placeholder_vision_sample(state.processor)
     sample.status = Sample.Status.ABORTED if mode == WRITE_OFF_ABORT_GROUP else Sample.Status.FAILED
@@ -211,3 +200,6 @@ def _write_off(sample: Sample, state, reason: str, mode: str) -> Sample:
     sample.metadata.setdefault("reward", 0.0)
     sample.metadata["write_off_reason"] = reason
     return sample
+
+
+generate.add_arguments = add_arguments

@@ -56,7 +56,7 @@ def stub(monkeypatch, episode):
         def take(self, token):
             return holder.record
 
-    async def shared_recorder(_args):
+    async def shared_recorder(_args, _options):
         return Recorder()
 
     async def run_trial(**kwargs):
@@ -132,6 +132,18 @@ async def test_an_unknown_write_off_mode_is_refused(stub, state):
 
     with pytest.raises(ValueError, match="harbor-cua-write-off-mode"):
         await harbor_cua.generate(fn_input(task_sample(2), state))
+
+
+async def test_the_options_defaults_reach_the_run(stub, state, episode):
+    """Every flag has one default, in HarborCuaOptions, and the rollout reads it there."""
+    episode.turn(image=png_bytes((6, 0, 0)))
+    stub.outcome = outcome(episodes=1)
+    bare = Namespace(partial_rollout=False, sglang_router_ip="127.0.0.1", sglang_router_port=31000)
+    state.args = bare
+
+    output = await harbor_cua.generate(fn_input(task_sample(9), state))
+
+    assert len(output.samples) == 1
 
 
 async def test_fewer_action_calls_than_episodes_is_a_write_off(stub, state, episode):

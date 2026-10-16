@@ -1,0 +1,233 @@
+"""GRPO on Qwen3-VL-4B through Harbor's ``computer-1`` CUA agent, one node.
+
+Each episode runs one Harbor trial in the rollout worker, pointed at a recording
+proxy in front of Miles's sglang router; the recorded calls become one training
+sample per screenshot segment, sharing the episode's rollout id and reward. The
+task set is the five browser families under
+``examples/experimental/harbor_cua/tasks``, generated here with a disclosed
+train/evaluation split.
+
+Needs, before ``execute``:
+
+* a sandbox backend the rollout worker can reach -- ``--harbor-env-type e2b``
+  for E2B Cloud or an E2B-compatible endpoint, with its key file at
+  ``--e2b-api-key-file``; the local ``docker`` backend is refused, since
+  ``Trial.run()`` would need a daemon beside it;
+* ``harbor`` installed in the trainer's environment from the branch Miles pins
+  (``uv pip install "harbor[e2b] @ git+https://github.com/harbor-framework/harbor@harbor-miles-v0.20.0"``).
+
+Args:
+    --harbor-env-type: Harbor ``EnvironmentType`` for the trials (required).
+    --harbor-tasks-dir: where ``prepare`` writes the generated task directories.
+    --harbor-trials-dir: where Harbor writes trial directories on the worker.
+    --mode: ``rollout`` converts rollouts and stops before any optimizer step,
+        ``eval`` scores the evaluation split only, ``train`` does the GRPO run --
+        which evaluates once before the first update and every
+        ``--eval-interval`` rollouts after it, so a before/after pair comes out
+        of one run.
+
+Usage:
+    python3 scripts/run_qwen3_vl_4b_harbor_cua.py --harbor-env-type e2b
+    python3 scripts/run_qwen3_vl_4b_harbor_cua.py --harbor-env-type e2b --mode rollout
+    python3 scripts/run_qwen3_vl_4b_harbor_cua.py --harbor-env-type e2b --mode eval
+"""
+
+import os
+from dataclasses import dataclass
+from typing import Literal
+
+import typer
+
+from examples.experimental.harbor.launch_common import harbor_env_vars
+from miles.utils.external_utils import command_utils
+
+HF_REPO = "Qwen/Qwen3-VL-4B-Instruct"
+MODEL_NAME = "Qwen3-VL-4B-Instruct"
+WANDB_GROUP = "qwen3-vl-4b-harbor-cua"
+GENERATE_FN = "examples.experimental.harbor_cua.rollout.generate"
+
+
+@dataclass
+class ScriptArgs(command_utils.ExecuteTrainConfig):
+    num_gpus_per_node: int = 2
+    num_rollout: int = 30
+    rollout_batch_size: int = 4
+    n_samples_per_prompt: int = 8
+    model_dir: str = "/root/models"
+    data_dir: str = "/root/datasets/harbor_cua"
+    harbor_tasks_dir: str = "/root/harbor_cua_tasks"
+    harbor_trials_dir: str = "/tmp/harbor_cua_trials"
+    harbor_env_type: str = ""
+    harbor_env_kwargs: str = ""
+    e2b_api_key_file: str = ""
+    agent_model_name: str = MODEL_NAME
+    agent_timeout: int = 600
+    train_per_family: int = 4
+    eval_per_family: int = 2
+    max_turns: int = 10
+    max_sandboxes: int = 8
+    max_pixels: int = 1_204_224
+    desktop_width: int = 1024
+    desktop_height: int = 900
+    mode: Literal["train", "rollout", "eval"] = "train"
+    eval_interval: int = 5
+    wandb_project: str = "miles-harbor-cua"
+    extra_args: str = ""
+
+    @property
+    def model_path(self) -> str:
+        return f"{self.model_dir}/{MODEL_NAME}"
+
+    @property
+    def global_batch_size(self) -> int:
+        return self.rollout_batch_size * self.n_samples_per_prompt
+
+    @property
+    def rollouts(self) -> int:
+        """``--num-rollout 0`` with an eval interval is Miles's eval-only mode."""
+        return {"train": self.num_rollout, "rollout": 1, "eval": 0}[self.mode]
+
+
+def prepare(args: ScriptArgs):
+    U = args.create_backend()
+    U.exec_command_cpu(f"mkdir -p {args.model_dir}")
+    U.exec_command_cpu(f"hf download {HF_REPO} --local-dir {args.model_path}")
+    U.exec_command_cpu(
+        f"cd {command_utils.repo_base_dir} && python -m examples.experimental.harbor_cua.make_harbor_cua_tasks "
+        f"--tasks-dir {args.harbor_tasks_dir} --data-dir {args.data_dir} "
+        f"--train-per-family {args.train_per_family} --eval-per-family {args.eval_per_family}"
+    )
+
+
+def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
+    """``harbor_env`` comes from ``main``, which preflights it before any GPU is held."""
+    U = args.create_backend()
+
+    ckpt_args = f"--hf-checkpoint {args.model_path} --ref-load {args.model_path} "
+
+    rollout_args = (
+        f"--prompt-data {args.data_dir}/train.jsonl "
+        "--input-key prompt "
+        "--label-key label "
+        # carries instance_id, family, variant and split onto Sample.metadata
+        "--metadata-key metadata "
+        "--apply-chat-template "
+        "--rollout-shuffle "
+        f"--num-rollout {args.rollouts} "
+        f"--rollout-batch-size {args.rollout_batch_size} "
+        f"--n-samples-per-prompt {args.n_samples_per_prompt} "
+        "--rollout-max-response-len 4096 "
+        "--rollout-max-context-len 32768 "
+        "--rollout-temperature 1.0 "
+        f"--global-batch-size {args.global_batch_size} "
+    )
+
+    cua_args = (
+        f"--custom-generate-function-path {GENERATE_FN} "
+        f"--harbor-cua-max-turns {args.max_turns} "
+        f"--harbor-cua-max-sandboxes {args.max_sandboxes} "
+        f"--harbor-cua-max-pixels {args.max_pixels} "
+        "--harbor-cua-write-off-mode abort_group "
+        + ("--debug-rollout-only " if args.mode == "rollout" else "")
+    )
+
+    eval_args = (
+        f"--eval-prompt-data harbor_cua {args.data_dir}/eval.jsonl "
+        f"--eval-interval {args.eval_interval} "
+        "--n-samples-per-eval-prompt 4 "
+        "--eval-max-response-len 4096 "
+        "--eval-top-p 1 "
+    )
+
+    grpo_args = (
+        "--advantage-estimator grpo "
+        "--kl-loss-coef 0.00 "
+        "--kl-loss-type low_var_kl "
+        "--kl-coef 0.00 "
+        "--entropy-coef 0.00 "
+        "--eps-clip 0.2 "
+        "--eps-clip-high 0.28 "
+    )
+
+    optimizer_args = (
+        "--optimizer adam --lr 1e-6 --lr-decay-style constant --weight-decay 0.1 "
+        "--adam-beta1 0.9 --adam-beta2 0.98 "
+    )
+
+    # An episode's segment count is data-dependent, so static micro-batching cannot
+    # guarantee dp_size alignment; arguments.py requires the dynamic pair together.
+    perf_args = "--use-dynamic-batch-size --use-dynamic-global-batch-size --max-tokens-per-gpu 16384 "
+
+    train_backend_args = (
+        "--train-backend fsdp "
+        "--gradient-checkpointing "
+        "--update-weight-buffer-size 536870912 "
+        "--attn-implementation flash_attention_3 "
+        # A rollout batch of screenshot episodes is gigabytes of pixel tensors, and
+        # dispatching it keeps rank 0 past the default NCCL watchdog while the other
+        # ranks sit in their first collective (miles#2406).
+        "--distributed-timeout-minutes 60 "
+        """--train-env-vars '{"PYTORCH_CUDA_ALLOC_CONF":"expandable_segments:True"}' """
+    )
+
+    sglang_args = (
+        "--rollout-num-gpus-per-engine 1 "
+        "--sglang-mem-fraction-static 0.6 "
+        "--sglang-decode-log-interval 1000 "
+        "--sglang-enable-metrics "
+        "--sglang-attention-backend fa3 "
+    )
+
+    wandb_args = (
+        f"--use-wandb --wandb-project {args.wandb_project} --wandb-group {WANDB_GROUP} "
+        if os.environ.get("WANDB_API_KEY")
+        else ""
+    )
+
+    misc_args = (
+        f"--actor-num-nodes {args.num_nodes} "
+        f"--actor-num-gpus-per-node {args.num_gpus_per_node} "
+        "--colocate "
+        f"--save {args.output_dir}/ckpt "
+        "--save-interval 5 "
+        f"--dump-details {args.output_dir}/dump "
+    )
+
+    U.execute_train(
+        train_args=(
+            f"{ckpt_args} {rollout_args} {cua_args} {eval_args} {grpo_args} "
+            f"{optimizer_args} {perf_args} {train_backend_args} {sglang_args} "
+            f"{wandb_args} {misc_args} {args.extra_args} "
+        ),
+        num_gpus_per_node=args.num_gpus_per_node,
+        megatron_model_type=None,
+        extra_env_vars=_worker_env(args, harbor_env or {}),
+    )
+
+
+def _worker_env(args: ScriptArgs, harbor_env: dict[str, str]) -> dict:
+    env = {
+        "PYTHONPATH": str(command_utils.repo_base_dir),
+        "HARBOR_CUA_DESKTOP_WIDTH": str(args.desktop_width),
+        "HARBOR_CUA_DESKTOP_HEIGHT": str(args.desktop_height),
+        "AGENT_MAX_INPUT_TOKENS": os.environ.get("AGENT_MAX_INPUT_TOKENS", "32768"),
+        "AGENT_MAX_OUTPUT_TOKENS": os.environ.get("AGENT_MAX_OUTPUT_TOKENS", "2048"),
+    }
+    env.update(harbor_env)
+    return env
+
+
+@command_utils.dataclass_cli
+def main(args: ScriptArgs):
+    if not args.harbor_env_type:
+        raise typer.BadParameter(
+            "--harbor-env-type is required: in-process trials need a sandbox backend the "
+            "rollout worker can reach, such as e2b"
+        )
+    harbor_env = harbor_env_vars(args)
+    prepare(args)
+    execute(args, harbor_env=harbor_env)
+
+
+if __name__ == "__main__":
+    typer.run(main)
