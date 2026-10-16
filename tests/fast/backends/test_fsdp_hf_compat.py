@@ -543,44 +543,64 @@ def _hf_reference_logits(model, tokens, mm_inputs):
         ).logits
 
 
-def test_qwen3_vl_position_ids_run_mrope_on_every_packed_document(tiny_qwen3_vl):
-    """A supplied 1-D ramp makes HF skip `compute_3d_position_ids`; the four-row tensor reaches its logits."""
-    from miles.backends.training_utils.data.rollout import _build_arch_position_ids
+def _on_cpu(monkeypatch):
+    """`get_batch` allocates `cu_seqlens` on the training device; mirrors test_get_batch_cu_seqlens.py."""
+    from miles.backends.training_utils.data import context_parallel
+    from miles.backends.training_utils.data import rollout as data_utils
+
+    state = SimpleNamespace(cp=SimpleNamespace(rank=0, size=1), tp=SimpleNamespace(rank=0, size=1))
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: torch.device("cpu"))
+    monkeypatch.setattr(torch.Tensor, "cuda", lambda self, *_args, **_kwargs: self)
+    monkeypatch.setattr(data_utils, "get_parallel_state", lambda: state)
+    monkeypatch.setattr(context_parallel, "get_parallel_state", lambda: state)
+    return data_utils
+
+
+def test_qwen3_vl_position_ids_run_mrope_on_every_packed_document(tiny_qwen3_vl, monkeypatch):
+    """A supplied 1-D ramp makes HF skip `compute_3d_position_ids`; the four-row tensor reaches its logits.
+
+    Driven through the real `_fetch_batches` and `get_batch`, so dropping either half of the wiring fails here.
+    """
+    data_utils = _on_cpu(monkeypatch)
 
     first_tokens, first_mm = _image_document(seed=1)
     second_tokens, second_mm = _image_document(seed=2)
     text_tokens = torch.tensor([7, 8, 9, 10, 11])
     documents = [first_tokens, second_tokens, text_tokens]
-    pad = 2
-
-    adapter = _adapter("qwen3_vl")
-    position_ids = _build_arch_position_ids(
-        documents,
-        [first_mm, second_mm, None],
-        adapter.position_ids_builder(tiny_qwen3_vl),
-        qkv_format="thd",
-        cp_size=1,
-        pad=pad,
-    )
+    rollout = {
+        "tokens": documents,
+        "loss_masks": [torch.ones(2, dtype=torch.int) for _ in documents],
+        "total_lengths": [d.numel() for d in documents],
+        "response_lengths": [2] * len(documents),
+        "multimodal_train_inputs": [first_mm, second_mm, None],
+    }
 
     actor = object.__new__(FSDPTrainRayActor)
-    actor.arch_adapter = adapter
-    lengths = (*(d.numel() for d in documents), pad)
-    batch = {
-        "tokens": torch.cat([*documents, torch.zeros(pad, dtype=torch.long)]).unsqueeze(0),
-        "position_ids": position_ids,
-        # the per-key concatenation get_batch does over the micro-batch's samples
-        "multimodal_train_inputs": {
-            key: torch.cat([first_mm[key], second_mm[key]]) for key in ("pixel_values", "image_grid_thw")
-        },
-        **_packed_boundaries(*lengths),
-    }
+    actor.args = SimpleNamespace(data_pad_size_multiplier=8, qkv_format="thd")
+    actor.arch_adapter = _adapter("qwen3_vl")
+    actor.position_ids_builder = actor.arch_adapter.position_ids_builder(tiny_qwen3_vl)
+
+    iterator = data_utils.DataIterator(rollout, micro_batch_size=len(documents))
+    (batch,) = actor._fetch_batches(range(1), iterator, list(rollout))
     with torch.no_grad():
         logits = tiny_qwen3_vl(**actor._get_model_inputs_args(batch)).logits
 
-    assert position_ids.shape == (4, 1, sum(lengths))
-    assert position_ids[0, 0].tolist() == [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10] * 2 + [0, 1, 2, 3, 4, 0, 0]
+    position_ids = batch["position_ids"]
+    assert position_ids.shape == (4, 1, batch["tokens"].size(1))
+    assert position_ids[0, 0, : sum(len(d) for d in documents)].tolist() == [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10] * 2 + [
+        0,
+        1,
+        2,
+        3,
+        4,
+    ]
     assert not torch.equal(position_ids[1], position_ids[0])  # the image rows carry M-RoPE's own coordinates
+
+    start = 0
+    for tokens, mm_inputs in zip(documents, [first_mm, second_mm, {}], strict=True):
+        reference = _hf_reference_logits(tiny_qwen3_vl, tokens, mm_inputs)
+        assert torch.allclose(logits[:, start : start + tokens.numel()], reference, atol=1e-5), f"document at {start}"
+        start += tokens.numel()
 
     start = 0
     for tokens, mm_inputs in zip(documents, [first_mm, second_mm, {}], strict=True):
