@@ -99,6 +99,13 @@ def _asarray_wire(field: str, value, dtype: np.dtype) -> np.ndarray:
 # safetensors dtype names of every wire dtype in SAMPLES_VALUE_SPEC_V2 (incl. sampling-mask ids/offsets).
 # TODO: add "I16": np.int16 for #4035's int16 routed experts (past 256 experts), whichever lands second.
 _WIRE_DTYPES = {"I64": np.int64, "I32": np.int32, "U8": np.uint8, "F64": np.float64, "F32": np.float32}
+_TORCH_WIRE_DTYPES = {
+    torch.int64: np.dtype(np.int64),
+    torch.int32: np.dtype(np.int32),
+    torch.uint8: np.dtype(np.uint8),
+    torch.float64: np.dtype(np.float64),
+    torch.float32: np.dtype(np.float32),
+}
 
 
 def _load_tensor_views(payload: bytes | np.ndarray) -> dict[str, np.ndarray]:
@@ -138,16 +145,22 @@ def _encode_tensor_dict(
     for key in keys:
         entry = value[key]
         if isinstance(entry, torch.Tensor):
+            # Checked before .numpy(), which raises its own opaque TypeError on bf16/fp16.
+            _assert_wire_dtype(field, key, _TORCH_WIRE_DTYPES.get(entry.dtype))
             # The trainer concatenates these along dim 0, so a non-contiguous view must be realized.
             entry = entry.detach().cpu().numpy()
         arr = np.ascontiguousarray(entry)
-        if arr.dtype not in _WIRE_DTYPES.values():
-            raise ValueError(
-                f"{field}[{key!r}] has dtype {arr.dtype}, which the samples wire cannot carry "
-                f"(supported: {sorted(str(dtype) for dtype in _WIRE_DTYPES.values())})"
-            )
+        _assert_wire_dtype(field, key, arr.dtype if arr.dtype in _WIRE_DTYPES.values() else None)
         tensors[f"{field}.{key}.{sample_index}"] = arr
     return keys
+
+
+def _assert_wire_dtype(field: str, key: str, dtype: object) -> None:
+    if dtype is None:
+        raise ValueError(
+            f"{field}[{key!r}] has a dtype the samples wire cannot carry "
+            f"(supported: {sorted(_WIRE_DTYPES)})"
+        )
 
 
 def _decode_tensor_dict(
