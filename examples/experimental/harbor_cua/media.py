@@ -160,8 +160,17 @@ def render_prompt_ids(processor, messages: list[dict], images: Sequence[Image.Im
         add_generation_prompt=True,
         return_dict=True,
     )
-    ids = rendered["input_ids"]
-    return ids[0].tolist() if hasattr(ids, "tolist") and getattr(ids, "ndim", 1) > 1 else list(ids)
+    return _flatten_batch(rendered["input_ids"])
+
+
+def _flatten_batch(ids) -> list[int]:
+    """One row of ids, whether the processor returned a tensor, a list or a batch of one."""
+    if hasattr(ids, "tolist"):
+        ids = ids.tolist()
+    ids = list(ids)
+    if ids and isinstance(ids[0], (list, tuple)):
+        return list(ids[0])
+    return ids
 
 
 def _hf_content(messages: list[dict], images: Sequence[Image.Image]) -> list[dict]:
