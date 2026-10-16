@@ -190,9 +190,12 @@ class SessionCoreV2(SessionCore):
             # An image turn goes to the native route, which is the only one that carries pixels
             # alongside pretokenized ids; a text turn keeps the chat route unchanged.
             if prepared.has_media:
-                validate_image_request_features(
-                    request_body, parser=self.registry.image_support.parsers.tool_call_parser
-                )
+                # Resolved on first use, not at construction: Miles waits for this
+                # listener before it launches any engine, so there is nothing to ask
+                # until a request arrives. Cached, so the lock holds one GET per process.
+                support = self.registry.image_support
+                engine = await support.engine(self.backend)
+                validate_image_request_features(request_body, parser=engine.tool_call_parser)
                 route = "generate"
                 proxy_body = orjson.dumps(
                     build_generate_body(
@@ -200,6 +203,7 @@ class SessionCoreV2(SessionCore):
                         image_data=[session.media.arena.get(a).to_data_url() for a in prepared.media.asset_ids],
                         content_hashes=list(prepared.media.asset_ids),
                         client_wants_logprobs=response_intent.logprobs,
+                        model_generation_config=support.sampling_defaults(engine),
                     )
                 )
             else:
@@ -220,7 +224,7 @@ class SessionCoreV2(SessionCore):
             return proxy_result_to_response(result)
 
         if prepared.has_media:
-            result = self._chat_result_from_generate(result, request_body, prepared, response_intent)
+            result = self._chat_result_from_generate(result, request_body, prepared, response_intent, engine)
         response, choice, assistant_message, completion_token_ids = extract_completion(result)
         assistant_message = tito_tokenizer.postprocess_completion(
             choice=choice,
@@ -261,7 +265,9 @@ class SessionCoreV2(SessionCore):
 
         return _chat_client_response(result, response, response_intent)
 
-    def _chat_result_from_generate(self, result: dict, request_body: dict, prepared, response_intent) -> dict:
+    def _chat_result_from_generate(
+        self, result: dict, request_body: dict, prepared, response_intent, engine
+    ) -> dict:
         """Check the ids inference consumed, then give the native reply the chat shape.
 
         The rest of this method, the record, and every sample consumer then see
@@ -282,7 +288,7 @@ class SessionCoreV2(SessionCore):
             model=request_body.get("model") or self.config.tito_model,
             tools=request_body.get("tools"),
             tool_choice=request_body.get("tool_choice"),
-            parsers=self.registry.image_support.parsers,
+            parsers=self.registry.image_support.parsers(engine),
             separate_reasoning=request_body.get("separate_reasoning", True),
             client_wants_logprobs=response_intent.logprobs,
         )

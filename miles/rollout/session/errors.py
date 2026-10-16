@@ -8,7 +8,9 @@ SessionError (base)
 ├── TruncatedGenerationError   → 409  extending a length-truncated generation (v2)
 ├── TokenizationError          → 500  TITO tokenizer / prefix mismatch
 ├── UpstreamResponseError      → 502  SGLang response invalid or unexpected
-└── UpstreamGenerationAbortedError → 503  SGLang aborted the generation
+├── UpstreamGenerationAbortedError → 503  SGLang aborted the generation
+├── EngineNotReadyError        → 503  the engine cannot yet state its image configuration
+└── EngineUnsupportedError     → 500  the engine's image configuration is not supported
 """
 
 
@@ -65,3 +67,24 @@ class UpstreamGenerationAbortedError(SessionError):
     """Raised when upstream aborts a generation without an HTTP error."""
 
     status_code: int = 503
+
+
+class EngineNotReadyError(SessionError):
+    """Raised when the engine cannot yet state the image configuration this run must bind.
+
+    Retryable by definition: Miles waits for this server's listener before it
+    launches any engine, so the first image request can legitimately arrive before
+    one has registered.
+    """
+
+    status_code: int = 503
+
+
+class EngineUnsupportedError(SessionError):
+    """Raised when the engine's image configuration is one this path has not verified.
+
+    Not retryable: it is set by the engine's launch flags, so the same answer
+    returns every time.
+    """
+
+    status_code: int = 500

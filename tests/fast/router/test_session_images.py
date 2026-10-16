@@ -34,9 +34,9 @@ from miles.utils.processing_utils import load_processor, load_tokenizer
 from miles.utils.test_utils.uvicorn_thread_server import UvicornThreadServer
 from miles.utils.types import Sample
 
-# 52.1 s measured for the whole file on a devbox, not on a CI runner; each case
+# 75.0 s measured for the whole file on a devbox, not on a CI runner; each case
 # starts its own server because the flags under test are launch-scoped.
-register_cpu_ci(est_time=70, suite="stage-b-cpu", labels=["rollout"])
+register_cpu_ci(est_time=100, suite="stage-b-cpu", labels=["rollout"])
 
 CHECKPOINT = "Qwen/Qwen3-VL-2B-Instruct"
 IMAGE_TOKEN = "<|image_pad|>"
@@ -89,6 +89,9 @@ class ScriptedGenerateBackend:
         count_bias: int = 0,
         server_info: dict | None = None,
         finish_reason: str = "stop",
+        server_info_status: int = 200,
+        server_info_body: dict | None = None,
+        unready_calls: int = 0,
     ):
         self.vlm = vlm
         self.replies = replies
@@ -101,11 +104,16 @@ class ScriptedGenerateBackend:
             "revision": None,
             "mm_process_config": {},
             "image_processor_backend": "auto",
+            "sampling_defaults": "model",
             "tool_call_parser": None,
             "reasoning_parser": None,
             **(server_info or {}),
         }
         self.calls: list[dict[str, Any]] = []
+        self.server_info_calls = 0
+        self.server_info_status = server_info_status
+        self.server_info_body = server_info_body
+        self.unready_calls = unready_calls
         self.host = "127.0.0.1"
         self.port = find_available_port(32000)
         self.app = FastAPI()
@@ -117,7 +125,13 @@ class ScriptedGenerateBackend:
 
         @self.app.get("/get_server_info")
         async def server_info():
-            return JSONResponse(content=self.server_info)
+            self.server_info_calls += 1
+            if self.server_info_status != 200:
+                return JSONResponse(content=self.server_info_body, status_code=self.server_info_status)
+            if self.unready_calls >= self.server_info_calls:
+                # A real engine does not exist yet when the session server starts.
+                return JSONResponse(content={"error": "no healthy worker"}, status_code=503)
+            return JSONResponse(content=self.server_info if self.server_info_body is None else self.server_info_body)
 
         @self.app.post("/generate")
         async def generate(request: Request):
@@ -211,9 +225,19 @@ def image_router(
     extra_args: dict | None = None,
     server_info: dict | None = None,
     finish_reason: str = "stop",
+    server_info_status: int = 200,
+    server_info_body: dict | None = None,
+    unready_calls: int = 0,
 ):
     backend = ScriptedGenerateBackend(
-        vlm, replies, count_bias=count_bias, server_info=server_info, finish_reason=finish_reason
+        vlm,
+        replies,
+        count_bias=count_bias,
+        server_info=server_info,
+        finish_reason=finish_reason,
+        server_info_status=server_info_status,
+        server_info_body=server_info_body,
+        unready_calls=unready_calls,
     )
     backend.start()
     args_values: dict[str, Any] = {
@@ -505,23 +529,82 @@ TOOLS = [
 
 
 class TestEngineAgreement:
-    """Matching ids prove the grid agrees, not that the pixels behind it do."""
+    """Matching ids prove the grid agrees, not that the pixels behind it do.
 
-    def test_a_preprocessing_override_refuses_to_start(self, vlm):
+    The binding is checked on the first image request, never at construction: Miles
+    waits for this server's listener before it launches any engine, so a
+    constructor-time lookup has nothing to ask and deadlocks the run.
+    """
+
+    @staticmethod
+    def refusal(vlm, **router_kwargs) -> bytes:
+        with image_router(vlm, ["a"], **router_kwargs) as env:
+            session_id = _create_session(env.url)
+            response = chat(env, session_id, [user_turn(SHOT1, "look")])
+            assert response.status_code >= 400, response.content
+            return response.content
+
+    def test_a_preprocessing_override_is_refused(self, vlm):
         """--mm-process-config changes the engine's pixels while every token id stays identical."""
-        with pytest.raises(ValueError, match="mm-process-config"):
-            with image_router(vlm, ["a"], server_info={"mm_process_config": {"image": {"do_normalize": False}}}):
-                pass
+        assert b"mm-process-config" in self.refusal(
+            vlm, server_info={"mm_process_config": {"image": {"do_normalize": False}}}
+        )
 
-    def test_a_different_served_checkpoint_refuses_to_start(self, vlm):
-        with pytest.raises(ValueError, match="the engine serves"):
-            with image_router(vlm, ["a"], server_info={"model_path": "Qwen/Qwen3-0.6B"}):
-                pass
+    def test_a_different_served_checkpoint_is_refused(self, vlm):
+        assert b"the engine serves" in self.refusal(vlm, server_info={"model_path": "Qwen/Qwen3-0.6B"})
 
-    def test_a_non_default_image_backend_refuses_to_start(self, vlm):
-        with pytest.raises(ValueError, match="image-processor-backend"):
-            with image_router(vlm, ["a"], server_info={"image_processor_backend": "torchvision"}):
-                pass
+    def test_a_non_default_image_backend_is_refused(self, vlm):
+        assert b"image-processor-backend" in self.refusal(
+            vlm, server_info={"image_processor_backend": "torchvision"}
+        )
+
+    def test_a_pinned_engine_revision_is_refused(self, vlm):
+        """The server loads the processor unpinned, so a pinned engine could differ."""
+        assert b"pins revision" in self.refusal(vlm, server_info={"revision": "abc123"})
+
+    def test_an_empty_model_path_is_refused_not_defaulted(self, vlm):
+        assert b"empty model_path" in self.refusal(vlm, server_info={"model_path": ""})
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {},
+            {"error": "no healthy worker"},
+            # What a router manager actually answers, which states nothing about any engine.
+            {"router_manager": True, "routers_count": 1, "workers_count": 1},
+        ],
+        ids=["empty", "error-body", "router-manager"],
+    )
+    def test_a_reply_that_states_nothing_is_refused_not_defaulted(self, vlm, body):
+        """Each of these used to read as 'no override', i.e. supported."""
+        assert b"does not state" in self.refusal(vlm, server_info_body=body)
+
+    def test_a_non_2xx_reply_is_refused(self, vlm):
+        assert b"answered 503" in self.refusal(vlm, server_info_status=503, server_info_body={"error": "down"})
+
+    def test_an_unready_engine_is_retried_rather_than_cached(self, vlm):
+        """The first request can land before any engine registers; the next must still work."""
+        with image_router(vlm, ["a", "b"], unready_calls=1) as env:
+            session_id = _create_session(env.url)
+            first = chat(env, session_id, [user_turn(SHOT1, "look")])
+            assert first.status_code == 503, first.content
+            second = chat(env, session_id, [user_turn(SHOT1, "look")])
+            assert second.status_code == 200, second.content
+
+    def test_an_unsupported_configuration_is_not_retried(self, vlm):
+        with image_router(vlm, ["a", "b"], server_info={"image_processor_backend": "torchvision"}) as env:
+            session_id = _create_session(env.url)
+            for _ in range(2):
+                assert chat(env, session_id, [user_turn(SHOT1, "look")]).status_code >= 400
+            # One lookup, then the cached refusal: retrying cannot change a launch flag.
+            assert env.backend.server_info_calls == 1
+
+    def test_a_text_only_session_never_needs_the_engine_lookup(self, vlm):
+        """Binding gates image inference, so a text turn must not depend on it."""
+        with image_router(vlm, ["a"], server_info_body={"router_manager": True}) as env:
+            session_id = _create_session(env.url)
+            assert chat(env, session_id, [user_turn(None, "no pictures")]).status_code == 200
+            assert env.backend.server_info_calls == 0
 
     def test_what_bound_the_pixels_is_recorded_on_the_sample(self, vlm):
         with image_router(vlm, ["a"]) as env:
@@ -671,3 +754,68 @@ class TestClientLogprobs:
             assert response.status_code == 200
             assert "logprobs" not in response.json()["choices"][0]
             assert "return_text_in_logprobs" not in env.backend.calls[0]
+
+
+class TestModelSamplingDefaults:
+    """An omitted field must take the same default on both of a session's routes."""
+
+    def test_omitted_fields_take_the_checkpoints_generation_config(self, vlm):
+        with image_router(vlm, ["a"]) as env:
+            session_id = _create_session(env.url)
+            # No temperature/top_p/top_k: the engine declares sampling_defaults="model",
+            # so the checkpoint's generation config supplies them, as on the chat route.
+            response = _post_chat(env.url, session_id, {"messages": [user_turn(SHOT1, "look")], "max_tokens": 8})
+            assert response.status_code == 200, response.content
+            params = env.backend.calls[-1]["sampling_params"]
+            assert (params["temperature"], params["top_p"], params["top_k"]) == (0.7, 0.8, 20)
+
+    def test_an_engine_that_does_not_use_model_defaults_gets_none(self, vlm):
+        with image_router(vlm, ["a"], server_info={"sampling_defaults": "openai"}) as env:
+            session_id = _create_session(env.url)
+            response = _post_chat(env.url, session_id, {"messages": [user_turn(SHOT1, "look")], "max_tokens": 8})
+            assert response.status_code == 200, response.content
+            params = env.backend.calls[-1]["sampling_params"]
+            assert params["temperature"] == 1.0 and params["top_p"] == 1.0
+
+    def test_an_explicit_value_still_wins(self, vlm):
+        """`repetition_penalty`, because narrowing top_p trips the session's own sampling guard."""
+        with image_router(vlm, ["a"]) as env:
+            session_id = _create_session(env.url)
+            response = _post_chat(
+                env.url,
+                session_id,
+                {
+                    "messages": [user_turn(SHOT1, "look")],
+                    "max_tokens": 8,
+                    "temperature": 1.0,
+                    "repetition_penalty": 1.3,
+                },
+            )
+            assert response.status_code == 200, response.content
+            params = env.backend.calls[-1]["sampling_params"]
+            assert params["repetition_penalty"] == 1.3
+            assert params["temperature"] == 1.0
+
+
+class TestColdStart:
+    """The server must come up with no engine behind it at all.
+
+    Miles waits for this listener at `placement_group.wait_session_server_ready`
+    *before* `init_or_reset_inference_controller` launches any engine, so a server
+    that needs an engine to start deadlocks the run: the driver never reaches engine
+    initialization because the listener it is waiting for never binds.
+    """
+
+    def test_the_listener_binds_and_serves_with_no_engine(self, vlm):
+        with image_router(vlm, ["a"], server_info_status=503, server_info_body={"error": "no worker"}) as env:
+            assert requests.get(f"{env.url}/health", timeout=10).status_code == 200
+            session_id = _create_session(env.url)
+            assert session_id
+            # Nothing asked the engine anything just to get here.
+            assert env.backend.server_info_calls == 0
+
+    def test_only_an_image_request_is_refused_while_the_engine_is_absent(self, vlm):
+        with image_router(vlm, ["a"], server_info_status=503, server_info_body={"error": "no worker"}) as env:
+            session_id = _create_session(env.url)
+            assert chat(env, session_id, [user_turn(None, "text only")]).status_code == 200
+            assert chat(env, session_id, [user_turn(SHOT1, "look")]).status_code == 503

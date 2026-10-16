@@ -68,7 +68,9 @@ def validate_image_request_features(request_body: dict[str, Any], *, parser: str
         )
 
 
-def build_sampling_params(request_body: dict[str, Any]) -> dict[str, Any]:
+def build_sampling_params(
+    request_body: dict[str, Any], *, model_generation_config: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Map the chat request onto sampling params using the engine's own converter.
 
     `ChatCompletionRequest.to_sampling_params` is the one authority for which chat
@@ -76,9 +78,11 @@ def build_sampling_params(request_body: dict[str, Any]) -> dict[str, Any]:
     `max_tokens`, `seed` becomes `sampling_seed`, and `min_tokens`, `ignore_eos`
     and `stop_regex` are carried. A second copy of that table here would drift.
 
-    The model's generation config is left empty on purpose: the session server has
-    already resolved its own sampling defaults onto this request, so that layer
-    cannot change a value the caller or the session set.
+    `model_generation_config` carries the defaults the engine applies to a field the
+    request omits. Passing it empty would let an omitted `temperature` take SGLang's
+    own fallback here and the checkpoint's on the chat route, so one session's two
+    routes would sample differently; an explicit request or session value still wins
+    either way, because the converter gives it priority.
     """
     from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
 
@@ -88,7 +92,8 @@ def build_sampling_params(request_body: dict[str, Any]) -> dict[str, Any]:
         raise MessageValidationError(f"request cannot be served on the image path: {exc}") from exc
     stop = parsed.stop or []
     params = parsed.to_sampling_params(
-        stop=[stop] if isinstance(stop, str) else list(stop), model_generation_config={}
+        stop=[stop] if isinstance(stop, str) else list(stop),
+        model_generation_config=dict(model_generation_config or {}),
     )
     return {key: value for key, value in params.items() if value is not None}
 
@@ -99,11 +104,14 @@ def build_generate_body(
     image_data: list[str],
     content_hashes: list[str],
     client_wants_logprobs: bool = False,
+    model_generation_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Translate a resolved chat request into a native generate request."""
     body: dict[str, Any] = {
         "input_ids": request_body["input_ids"],
-        "sampling_params": build_sampling_params(request_body),
+        "sampling_params": build_sampling_params(
+            request_body, model_generation_config=model_generation_config
+        ),
         "return_logprob": True,
         # The effective ids: what the engine expanded our placeholders into.
         "return_prompt_token_ids": True,
@@ -127,8 +135,11 @@ def assert_effective_prompt_ids(
 ) -> None:
     """Compare the ids inference consumed against the ids we meant it to consume.
 
-    An image-token count can match while pixels, order, or resize settings do not;
-    comparing the sequences settles all of them at once.
+    This settles the token layout, and with it the grid and the image order, since
+    the expanded length derives from the grid. It does **not** settle the pixel
+    values behind those tokens: a decode or normalization override changes them
+    while every id stays identical, which is why the engine's own image
+    configuration is bound separately.
     """
     effective = response.get("prompt_token_ids")
     if effective is None:
