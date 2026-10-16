@@ -2791,12 +2791,15 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "--session-image-engine-url",
                 type=str,
                 default=None,
-                help="v2 only, with --session-image-support. The one inference engine image turns are "
-                "sent to, bypassing the router. The router picks a worker per request, so the engine "
-                "whose image preprocessing was checked need not be the one that serves a turn, and the "
-                "session server can neither pin nor observe that choice. Omit it when the backend is a "
-                "single engine, or when the router fronts exactly one; a router fronting several refuses "
-                "image support until this names one. Text turns always use the router.",
+                help="v2 only, with --session-image-support. Declares the one inference engine image "
+                "turns are sent to, bypassing the router. The router picks a worker per request, so the "
+                "engine whose image preprocessing was checked need not be the one that serves a turn, "
+                "and nothing reachable through the backend proves which one will: a proxy forwards a "
+                "healthy worker's own metadata and may share its port. Required unless the backend "
+                "answers a recognized worker API (/list_workers or /workers) reporting exactly one "
+                "worker, which is then used directly. A backend with no recognized worker API, several "
+                "workers, or an unrecognized reply refuses image support until this names an engine; "
+                "point it at an engine, not a load balancer. Text turns always use the router.",
             )
             parser.add_argument(
                 "--session-image-text-only-leaf",
