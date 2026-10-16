@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.run_qwen3_vl_4b_osworld import ScriptArgs
+from scripts.run_qwen3_vl_4b_osworld import ScriptArgs, _refuse_geometry_overrides
 
 
 def test_global_batch_size_is_derived_from_the_episode_sample_count():
@@ -44,3 +44,22 @@ def test_smoke_mode_is_exempt_because_it_runs_no_optimizer_step():
     args = ScriptArgs(mode="smoke", samples_per_episode=15, num_gpus_per_node=4)
     assert args.episodes_per_step == 2
     assert args.global_batch_size == 30
+
+
+def test_an_extra_arg_overriding_the_geometry_is_refused():
+    """__post_init__ sees the fields; --extra-args is appended to the argv
+    afterwards and wins last, so the geometry the constructor accepted can
+    still reach the trainer changed."""
+    with pytest.raises(ValueError, match="--micro-batch-size is set more than once"):
+        _refuse_geometry_overrides("--micro-batch-size 1 --global-batch-size 120 --micro-batch-size 7", "")
+
+
+def test_an_extra_env_var_overriding_the_sample_count_is_refused():
+    """--extra-env-vars is merged over the launcher's own environment, so it
+    can change the count --global-batch-size was derived from."""
+    with pytest.raises(ValueError, match="MILES_SCRIPT_OSWORLD_SAMPLES_PER_EPISODE"):
+        _refuse_geometry_overrides("--micro-batch-size 1", "MILES_SCRIPT_OSWORLD_SAMPLES_PER_EPISODE=16")
+
+
+def test_an_unrelated_extra_arg_is_left_alone():
+    assert _refuse_geometry_overrides("--micro-batch-size 1 --log-passrate --seed 7", "WANDB_MODE=offline") is None

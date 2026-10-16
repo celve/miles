@@ -19,6 +19,7 @@ from examples.experimental.osworld.rollout import (
     _calls,
     _media_occurrences,
     _padding,
+    _verify_each_call,
     _segments,
     _stitch,
     _vision_inputs,
@@ -182,6 +183,48 @@ def test_media_occurrences_reject_a_screenshot_swapped_inside_a_segment():
     ]
     with pytest.raises(MediaBindingError, match="not an ordered prefix"):
         _media_occurrences(segment)
+
+
+def test_media_occurrences_reject_an_intermediate_shrink():
+    """[A,B] -> [A] -> [A,B,C]: every list is an ordered prefix of the final
+    one, so comparing only against the final list passes it, while the middle
+    call's prompt accounts for two images and claims one."""
+    segment = [
+        _call([1], [10], media_ids=["a", "b"]),
+        _call([1, 10, 2], [11], media_ids=["a"]),
+        _call([1, 10, 2, 11, 3], [12], media_ids=["a", "b", "c"]),
+    ]
+    with pytest.raises(MediaBindingError, match="not an ordered prefix of call 1"):
+        _media_occurrences(segment)
+
+
+def test_media_occurrences_reject_a_screenshot_appearing_only_later():
+    segment = [_call([1], [10], media_ids=["a", "b"]), _call([1, 10, 2], [11], media_ids=["a"])]
+    with pytest.raises(MediaBindingError, match="not an ordered prefix"):
+        _media_occurrences(segment)
+
+
+def test_each_call_is_checked_against_its_own_claimed_media():
+    """The stitched sequence only exposes the final prompt's layout, so a
+    middle call holding an image its metadata does not claim is invisible
+    there -- yet its sampled tokens would be trained from that context."""
+    state = _state()
+    segment = [
+        # Claims one image but its prompt holds two runs: 1 token then 2.
+        _call([IMAGE_PAD, 1, IMAGE_PAD, IMAGE_PAD], [10], media_ids=["a"]),
+        _call([IMAGE_PAD, 1, IMAGE_PAD, IMAGE_PAD, 10, 2], [11], media_ids=["a", "b"]),
+    ]
+    with pytest.raises(MediaBindingError, match="call 0"):
+        _verify_each_call(state, segment, ["a", "b"], [object(), object()])
+
+
+def test_each_call_passes_when_its_prompt_matches_its_claim():
+    state = _state()
+    segment = [
+        _call([IMAGE_PAD, 1], [10], media_ids=["a"]),
+        _call([IMAGE_PAD, 1, 10, IMAGE_PAD, IMAGE_PAD], [11], media_ids=["a", "b"]),
+    ]
+    assert _verify_each_call(state, segment, ["a", "b"], [object(), object()]) is None
 
 
 def test_media_occurrences_keep_a_screenshot_referenced_twice():

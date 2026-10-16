@@ -25,12 +25,16 @@ comes back empty and every episode is written off.
 **Every episode returns exactly ``osworld_samples_per_episode`` samples**, the
 real segments first and padding after. The padding trains on nothing and moves
 no reward statistic, because reward normalization takes one reward per
-``rollout_id``; it is **not** loss-neutral, which the recipe document states
-plainly. ``loss_function`` divides by the sample count unless the rollout-side
-schedule supplies ``num_rollouts``, and that schedule is the one switched off
-below, so the gradient is scaled by the padded count rather than the episode
-count. With a fixed cap that is a constant rescale -- equivalent to a smaller
-learning rate -- but it couples the cap to the learning rate, and the core Miles
+``rollout_id``. It is **not** loss-neutral, and the recipe document states the
+consequence plainly. ``loss_function`` divides by the sample count unless the
+rollout-side schedule supplies ``num_rollouts``, and that schedule is the one
+switched off below, while the FSDP backend's ``TRAIN_KEYS`` carries no
+``rollout_mask_sums`` to fall back on. Two things follow. The constant factor
+from the padded count largely cancels through AdamW's moment estimates, so it
+is *not* an effective learning-rate change. What does not cancel is that the
+loss is **segment-weighted rather than rollout-weighted**: an episode that
+produced twelve segments carries about twelve times the weight of one that
+produced a single segment, and a fixed cap does not change that. The core Miles
 change is what removes it. A data-dependent sample count
 cannot be trained on an image batch today: the schedule that counts
 ``--global-batch-size`` in rollouts rather than samples
@@ -285,26 +289,31 @@ def _media_occurrences(segment: list[dict]) -> list[str]:
     """This segment's screenshots in prompt order, one entry per occurrence.
 
     Each call lists its whole prompt's media, so the last call's list is the
-    stitched sequence's media and every earlier call's must be an ordered
-    prefix of it. Checking that is the media half of append-compatibility, which
-    Gym promises within a segment but which this converter has to confirm for
-    itself: two calls can swap one screenshot for another of the same size
-    without disturbing the token prefix at all, and both assets' digests would
-    still be valid.
+    stitched sequence's media. Compatibility is checked between *successive*
+    calls rather than against the final list alone: every list being a prefix
+    of the final one still admits an intermediate shrink -- ``[A,B]``, ``[A]``,
+    ``[A,B,C]`` passes that weaker test while the middle call's prompt accounts
+    for two images and claims one. Successive prefixes forbid the shrink and
+    imply the final-prefix property anyway.
+
+    This is the media half of append-compatibility, which Gym promises within a
+    segment but which this converter has to confirm for itself: two calls can
+    swap one screenshot for another of the same size without disturbing the
+    token prefix at all, and both assets' digests would still be valid.
 
     Occurrences are not deduplicated. The arena is content-addressed, so one
     prompt showing the same screenshot twice lists its id twice and owes two
     token runs; collapsing them would reject a legitimate episode.
     """
     per_call = [[str(media_id) for media_id in call.get("media_ids") or []] for call in segment]
-    final = per_call[-1]
-    for index, earlier in enumerate(per_call[:-1]):
-        if final[: len(earlier)] != earlier:
+    for index, (earlier, later) in enumerate(zip(per_call, per_call[1:], strict=False)):
+        if later[: len(earlier)] != earlier:
             raise MediaBindingError(
-                f"call {index} claims media {earlier} which is not an ordered prefix of the segment's "
-                f"final prompt {final}: a screenshot was rewritten inside a segment Gym declared append-compatible"
+                f"call {index} claims media {earlier} which is not an ordered prefix of call {index + 1}'s "
+                f"{later}: a screenshot was added, dropped or rewritten inside a segment Gym declared "
+                "append-compatible"
             )
-    return final
+    return per_call[-1]
 
 
 def _check_against_gyms_digest(media_id: str, source: dict, claimed: Any) -> None:
@@ -349,6 +358,25 @@ def _vision_inputs(state: Any, images: list[PILImage.Image], tokens: list[int]) 
     verify_image_token_layout(tokens, image_token_id, expanded_token_counts(state.processor, images))
     processed = state.processor.image_processor(images=images, return_tensors="pt")
     return {"pixel_values": processed["pixel_values"], "image_grid_thw": processed["image_grid_thw"]}
+
+
+def _verify_each_call(state: Any, segment: list[dict], media_ids: list[str], images: list[PILImage.Image]) -> None:
+    """Check every call's own prompt against its own claimed screenshots.
+
+    The stitched sequence only ever exposes the *final* prompt's layout, so a
+    call in the middle whose prompt holds an image its metadata does not claim
+    is invisible there -- its sampled tokens would still be trained, from a
+    context the trace cannot account for. Each call is therefore checked
+    against its own occurrence list, which is a prefix of the segment's.
+    """
+    image_token_id = state.processor.tokenizer.convert_tokens_to_ids("<|image_pad|>")
+    counts = dict(zip(media_ids, expanded_token_counts(state.processor, images), strict=True))
+    for index, call in enumerate(segment):
+        claimed = [str(media_id) for media_id in call.get("media_ids") or []]
+        try:
+            verify_image_token_layout(call.get("prompt_token_ids") or [], image_token_id, [counts[m] for m in claimed])
+        except MediaBindingError as e:
+            raise MediaBindingError(f"call {index}: {e}") from e
 
 
 def _inert(sample: Sample, state: Any) -> Sample:
@@ -401,6 +429,25 @@ def _aborted(sample: Sample, reason: str, state: Any, counters: dict) -> list[Sa
     sample.metadata["osworld_abort_reason"] = reason
     sample.metadata["osworld_rejections"] = dict(counters)
     return [sample]
+
+
+def _graded_only(sample: Sample, reason: str, state: Any, counters: dict, reward: float) -> list[Sample]:
+    """An episode Gym graded but this converter cannot train on.
+
+    Only evaluation takes this path. Gym admitted the episode and its evaluator
+    produced a score, so that score is the measurement whether or not the trace
+    is trainable -- aborting it would drop a real grade for a training-only
+    reason, and the aborted row is then scored as a zero by the evaluation
+    metrics rather than excluded.
+    """
+    logger.info("osworld episode graded but not trainable: %s", reason)
+    graded = _inert(sample, state)
+    graded.status = Sample.Status.COMPLETED
+    graded.metadata = dict(graded.metadata or {})
+    graded.metadata["reward"] = reward
+    graded.metadata["osworld_untrainable_reason"] = reason
+    graded.metadata["osworld_rejections"] = dict(counters)
+    return [graded]
 
 
 def _padding(template: Sample, reward: float, rollout_id: int, index: int, state: Any) -> Sample:
@@ -488,15 +535,23 @@ async def generate(input: "GenerateFnInput") -> "GenerateFnOutput":
         reason = envelope.get("runtime_admission_reason") or "unknown"
         return GenerateFnOutput(samples=_aborted(sample, f"not runtime-eligible: {reason}", state, counters))
 
+    # Past this point Gym has graded the episode, so an unusable trace is this
+    # converter's limitation rather than an environment fault: training drops
+    # the group, evaluation keeps the grade.
+    def unusable(reason: str) -> GenerateFnOutput:
+        if input.evaluation:
+            return GenerateFnOutput(samples=_graded_only(sample, reason, state, counters, reward))
+        return GenerateFnOutput(samples=_aborted(sample, reason, state, counters))
+
     media_assets = response.get("media_assets") or {}
     try:
         calls = _calls(response)
     except ValueError as e:
-        return GenerateFnOutput(samples=_aborted(sample, f"inconsistent exact trace: {e}", state, counters))
+        return unusable(f"inconsistent exact trace: {e}")
     segments = _segments(calls)
     if not segments:
         counters["no_exact_evidence"] += 1
-        return GenerateFnOutput(samples=_aborted(sample, "carried no exact model-call evidence", state, counters))
+        return unusable("carried no exact model-call evidence")
 
     context_limit = int(getattr(args, "rollout_max_context_len", 0) or 0)
     processor = processor_identity(state.processor.image_processor)
@@ -522,6 +577,8 @@ async def generate(input: "GenerateFnInput") -> "GenerateFnOutput":
         try:
             images, payloads, media_ids = _images(segment, media_assets)
             vision_inputs = _vision_inputs(state, images, tokens)
+            if vision_inputs is not None:
+                _verify_each_call(state, segment, media_ids, images)
         except MediaBindingError as e:
             counters["image_mismatch"] += 1
             logger.warning("osworld segment %d dropped: %s", index, e)
@@ -560,7 +617,7 @@ async def generate(input: "GenerateFnInput") -> "GenerateFnOutput":
         siblings.append(child)
 
     if not siblings:
-        return GenerateFnOutput(samples=_aborted(sample, f"kept no segment of {len(segments)}", state, counters))
+        return unusable(f"kept no segment of {len(segments)}")
     if len(siblings) > per_episode:
         # Impossible while the cap is OSWorld's step cap, since segments cannot
         # outnumber model calls -- so this means the two were configured apart,

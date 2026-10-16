@@ -50,7 +50,8 @@ export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && ray job submit
   --lr-decay-style constant
   --weight-decay 0.1
   --adam-beta1 0.9
-  --adam-beta2 0.98 
+  --adam-beta2 0.98
+  --lr-decay-iters 20 
   --use-wandb
   --wandb-project miles-run_qwen3_vl_4b_osworld
   --wandb-group 260101-000000-000

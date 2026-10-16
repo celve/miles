@@ -142,6 +142,46 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
         return self.eval_prompt_data or f"{self.data_dir}/osworld/held_out.jsonl"
 
 
+# Flags whose value the whole run has to agree on: each fixes the batch
+# geometry or the episode's sample count, and the two cannot be set apart
+# without leaving rows unscored. launch-and-request-args.md calls these launch
+# constraints, which a request may not change.
+_PROTECTED_FLAGS = (
+    "--global-batch-size",
+    "--micro-batch-size",
+    "--rollout-batch-size",
+    "--n-samples-per-prompt",
+    "--actor-num-nodes",
+    "--actor-num-gpus-per-node",
+    "--num-gpus-per-node",
+)
+_PROTECTED_ENV = ("MILES_SCRIPT_OSWORLD_SAMPLES_PER_EPISODE",)
+
+
+def _refuse_geometry_overrides(train_args: str, extra_env_vars: str) -> None:
+    """Check the final effective argv and environment, not the fields.
+
+    ``__post_init__`` sees the dataclass before ``--extra-args`` is appended to
+    the argv and before ``--extra-env-vars`` is merged over the launcher's own
+    environment, and both of those win last. So a geometry the constructor
+    accepted can still reach the trainer changed, and the first sign of it is
+    an unscored tail in every shard.
+    """
+    for flag in _PROTECTED_FLAGS:
+        if train_args.split().count(flag) > 1:
+            raise ValueError(
+                f"{flag} is set more than once in the final command line. It fixes this recipe's batch "
+                "geometry, which --extra-args may not override; change the matching field instead."
+            )
+    for name in _PROTECTED_ENV:
+        if f"{name}=" in extra_env_vars:
+            raise ValueError(
+                f"{name} is set through --extra-env-vars, which is merged over the launcher's own "
+                "environment. It fixes each episode's sample count, from which --global-batch-size is "
+                "derived; change --samples-per-episode instead."
+            )
+
+
 def prepare(args: ScriptArgs):
     U = args.create_backend()
     U.exec_command_cpu(f"mkdir -p {args.model_dir}")
@@ -209,6 +249,14 @@ def execute(args: ScriptArgs):
         "--weight-decay 0.1 "
         "--adam-beta1 0.9 "
         "--adam-beta2 0.98 "
+        # Explicit, because the backend derives train_iters as
+        # num_rollout * rollout_batch_size * n_samples_per_prompt //
+        # global_batch_size, and this recipe's padded global batch makes that
+        # num_rollout // samples_per_episode -- which is 1 at the defaults and
+        # 0 below a cap's worth of rollouts, where the scheduler asserts on a
+        # zero decay horizon before any update runs. The recipe's own invariant
+        # is one update per rollout batch, so that is the horizon.
+        f"--lr-decay-iters {args.num_rollout} "
     )
 
     # A rollout batch of long multi-image episodes is GBs of pixel tensors;
@@ -250,8 +298,7 @@ def execute(args: ScriptArgs):
         + ("--debug-rollout-only " if smoke else "")
     )
 
-    U.execute_train(
-        train_args=(
+    train_args = (
             f"{ckpt_args} "
             f"{rollout_args} "
             f"{eval_args} "
@@ -264,7 +311,12 @@ def execute(args: ScriptArgs):
             f"{telemetry_args} "
             f"{misc_args} "
             f"{args.extra_args} "
-        ),
+    )
+    if not smoke:
+        _refuse_geometry_overrides(train_args, args.extra_env_vars)
+
+    U.execute_train(
+        train_args=train_args,
         num_gpus_per_node=args.num_gpus_per_node,
         megatron_model_type=None,
         extra_env_vars={
