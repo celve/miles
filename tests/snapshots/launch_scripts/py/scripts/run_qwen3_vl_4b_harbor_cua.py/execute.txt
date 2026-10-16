@@ -35,8 +35,8 @@ export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && ray job submit
   --custom-generate-function-path examples.experimental.harbor_cua.rollout.generate
   --harbor-cua-max-turns 10
   --harbor-cua-max-sandboxes 8
-  --harbor-cua-max-pixels 1204224
-  --harbor-cua-write-off-mode abort_group 
+  --harbor-cua-write-off-mode abort_group
+  --harbor-cua-upstream auto 
   --eval-prompt-data harbor_cua /root/datasets/harbor_cua/eval.jsonl
   --eval-interval 5
   --n-samples-per-eval-prompt 4
@@ -56,7 +56,6 @@ export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && ray job submit
   --adam-beta1 0.9
   --adam-beta2 0.98 
   --use-dynamic-batch-size
-  --use-dynamic-global-batch-size
   --max-tokens-per-gpu 16384 
   --train-backend fsdp
   --gradient-checkpointing
