@@ -1,0 +1,19 @@
+### 0
+mkdir -p /root/models
+
+### 1
+hf download Qwen/Qwen3-VL-4B-Instruct
+  --local-dir /root/models/Qwen3-VL-4B-Instruct
+
+### 2
+cd <REPO_ROOT> && python -m examples.experimental.harbor_cua.make_harbor_cua_tasks
+  --tasks-dir /root/harbor_cua_tasks
+  --data-dir /root/datasets/harbor_cua
+  --train-per-family 4
+  --eval-per-family 2
+
+### 3
+cd <REPO_ROOT> && python -m examples.experimental.harbor_cua.warm_templates
+  --tasks-dir /root/harbor_cua_tasks
+  --trials-dir /tmp/harbor_cua_trials
+  --data /root/datasets/harbor_cua/train.jsonl /root/datasets/harbor_cua/eval.jsonl
