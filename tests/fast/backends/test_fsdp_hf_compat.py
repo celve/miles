@@ -531,10 +531,13 @@ def _image_document(seed):
 
 def _hf_reference_logits(model, tokens, mm_inputs):
     """What HF computes for this document on its own, from the `mm_token_type_ids` the processor emits."""
+    mm_token_type_ids = torch.zeros_like(tokens)
+    mm_token_type_ids[tokens == _IMAGE_TOKEN_ID] = 1
+    mm_token_type_ids[tokens == 61] = 2
     with torch.no_grad():
         return model(
             input_ids=tokens.unsqueeze(0),
-            mm_token_type_ids=(tokens == _IMAGE_TOKEN_ID).long().unsqueeze(0),
+            mm_token_type_ids=mm_token_type_ids.unsqueeze(0),
             use_cache=False,
             **mm_inputs,
         ).logits
@@ -600,6 +603,44 @@ def test_the_linear_ramp_this_replaces_diverges_from_hf(tiny_qwen3_vl):
         ).logits
 
     assert (ramped - _hf_reference_logits(tiny_qwen3_vl, tokens, mm_inputs)).abs().max() > 1e-2
+
+
+def _media_document(spec):
+    """A document laying its media out the way the processor does: one vision_start/_end group per grid.
+
+    Qwen3-VL separates video frames with timestamps, so `get_rope_index` consumes one grid per group and a
+    T-frame video occupies T of them.
+    """
+    merge = _TINY_QWEN3_VL_VISION["spatial_merge_size"]
+    patch_dim = _TINY_QWEN3_VL_VISION["in_channels"] * 2 * 2 * 2
+    tokens, mm_inputs = [1, 2], {}
+    for token_id, pixel_key, grid_key, grids in spec:
+        for t, h, w in grids:
+            for _ in range(t):
+                tokens += [62, *([token_id] * ((h // merge) * (w // merge))), 63, 9]
+        mm_inputs[grid_key] = torch.tensor(grids)
+        mm_inputs[pixel_key] = torch.randn(sum(t * h * w for t, h, w in grids), patch_dim)
+    return torch.tensor(tokens), mm_inputs
+
+
+_TWO_IMAGES = [(_IMAGE_TOKEN_ID, "pixel_values", "image_grid_thw", [(1, 4, 4), (1, 2, 4)])]
+_ONE_VIDEO = [(61, "pixel_values_videos", "video_grid_thw", [(2, 4, 4)])]
+
+
+@pytest.mark.parametrize(
+    "spec", [_TWO_IMAGES, _ONE_VIDEO, _TWO_IMAGES + _ONE_VIDEO], ids=["two images", "a video", "both"]
+)
+def test_qwen3_vl_position_ids_match_hf_for_every_media_layout(tiny_qwen3_vl, spec):
+    torch.manual_seed(5)
+    tokens, mm_inputs = _media_document(spec)
+
+    rows = _adapter("qwen3_vl").position_ids_builder(tiny_qwen3_vl)(tokens, mm_inputs)
+    with torch.no_grad():
+        logits = tiny_qwen3_vl(
+            input_ids=tokens.unsqueeze(0), position_ids=rows.unsqueeze(1), use_cache=False, **mm_inputs
+        ).logits
+
+    assert torch.allclose(logits, _hf_reference_logits(tiny_qwen3_vl, tokens, mm_inputs), atol=1e-5)
 
 
 def test_a_text_only_qwen3_vl_document_keeps_the_linear_ramp(tiny_qwen3_vl):
