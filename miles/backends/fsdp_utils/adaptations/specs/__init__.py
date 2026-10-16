@@ -13,7 +13,7 @@ from miles.backends.fsdp_utils.adaptations.specs.nemotron_h import NemotronHAdap
 from miles.backends.fsdp_utils.adaptations.specs.qwen3 import Qwen3Adapter
 from miles.backends.fsdp_utils.adaptations.specs.qwen3_5 import Qwen35Adapter, Qwen35MoeAdapter
 from miles.backends.fsdp_utils.adaptations.specs.qwen3_moe import Qwen3MoeAdapter
-from miles.backends.fsdp_utils.adaptations.specs.qwen3_vl import Qwen3VLAdapter
+from miles.backends.fsdp_utils.adaptations.specs.qwen3_vl import Qwen3VLAdapter, Qwen3VLMoeAdapter
 
 _ADAPTERS: tuple[ArchAdapter, ...] = (
     Glm4MoeLiteAdapter(),
@@ -23,6 +23,7 @@ _ADAPTERS: tuple[ArchAdapter, ...] = (
     Qwen35MoeAdapter(),
     Qwen3MoeAdapter(),
     Qwen3VLAdapter(),
+    Qwen3VLMoeAdapter(),
 )
 _ADAPTER_BY_MODEL_TYPE = MappingProxyType(
     {model_type: adapter for adapter in _ADAPTERS for model_type in adapter.model_types}

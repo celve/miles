@@ -7,7 +7,7 @@ architecture without a spec runs unchanged through ``ArchAdapter()``.
 """
 
 from argparse import Namespace
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 
 import torch
 import torch.nn as nn
@@ -17,6 +17,9 @@ from miles.backends.fsdp_utils.adaptations.routing_replay import RoutingReplayAd
 
 # (name, full unsharded tensor, model) -> the (name, tensor) pairs the rollout engine loads instead
 ParamExpand = Callable[[str, torch.Tensor, nn.Module], Iterable[tuple[str, torch.Tensor]]]
+
+# one document's tokens and its processor outputs -> that document's [rows, seq] position ids
+PositionIdsBuilder = Callable[[torch.Tensor, Mapping[str, torch.Tensor] | None], torch.Tensor]
 
 
 class ArchAdapter:
@@ -43,6 +46,11 @@ class ArchAdapter:
         """Extra forward kwargs that tell this architecture's modeling where the packed documents that
         ``get_batch`` recorded start."""
         return {}
+
+    def position_ids_builder(self, model: nn.Module) -> PositionIdsBuilder | None:
+        """How this architecture lays out one packed document's positions, or None for the 1-D ramp
+        ``get_batch`` builds. Multimodal ropes need coordinates the ramp cannot express."""
+        return None
 
     def param_transform(self, name: str, param: torch.Tensor) -> ParamExpand | None:
         """How to rewrite ``param`` for the rollout engine at weight sync, or None to stream it unchanged."""

@@ -1,6 +1,6 @@
 import logging
 from argparse import Namespace
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 import torch
 import torch.distributed as dist
@@ -165,6 +165,39 @@ def _prepare_loss_masks(
     return loss_mask.unsqueeze(0)
 
 
+def _build_arch_position_ids(
+    unconcat_tokens: Sequence[torch.Tensor],
+    multimodal_train_inputs: Sequence[Mapping | None] | None,
+    position_ids_builder: Callable[[torch.Tensor, Mapping | None], torch.Tensor],
+    *,
+    qkv_format: str,
+    cp_size: int,
+    pad: int,
+) -> torch.Tensor:
+    """Pack each document's ``[rows, seq]`` positions into the ``[rows, 1, T_padded]`` HF reads.
+
+    Per document, not over the packed row: a multimodal rope numbers one sequence at a time, so numbering
+    the whole row would run positions straight through the boundaries the packed mask is derived from.
+    """
+    # Both hold for every caller today -- FSDP is the only one, and it is thd and pure data parallel.
+    assert qkv_format == "thd", f"architecture-specific position ids need thd packing, got {qkv_format}"
+    assert cp_size == 1, "architecture-specific position ids do not support CP yet"
+
+    if multimodal_train_inputs is None:
+        multimodal_train_inputs = [None] * len(unconcat_tokens)
+
+    packed = torch.cat(
+        [
+            position_ids_builder(tokens, mm_inputs)
+            for tokens, mm_inputs in zip(unconcat_tokens, multimodal_train_inputs, strict=True)
+        ],
+        dim=1,
+    )
+    if pad != 0:
+        packed = F.pad(packed, (0, pad), value=0)
+    return packed.unsqueeze(1)
+
+
 def get_batch(
     data_iterator: "DataIterator",
     keys: Sequence[str],
@@ -172,6 +205,7 @@ def get_batch(
     qkv_format: str = "thd",
     get_position_ids: bool = False,
     allgather_cp: bool = False,
+    position_ids_builder: Callable[[torch.Tensor, Mapping | None], torch.Tensor] | None = None,
 ) -> dict[str, torch.Tensor | list[torch.Tensor] | None]:
     """
     Generate a CP-ready micro-batch with packed sequence parameters.
@@ -186,6 +220,8 @@ def get_batch(
         data_iterator: Iterator providing micro-batch data.
         keys: List of keys to fetch from the iterator.
         pad_multiplier: Multiplier for padding size calculation (default: 128).
+        position_ids_builder: Lays out one document's positions when the 1-D ramp cannot express them,
+            as a multimodal rope's coordinates cannot; None keeps the ramp.
 
     Returns a dict including:
     - "tokens": torch.LongTensor of shape [1, T_padded] on the current CUDA device
@@ -330,7 +366,16 @@ def get_batch(
             raise NotImplementedError
         return ids
 
-    if get_position_ids:
+    if get_position_ids and position_ids_builder is not None:
+        batch["position_ids"] = _build_arch_position_ids(
+            batch["unconcat_tokens"],
+            batch.get("multimodal_train_inputs"),
+            position_ids_builder,
+            qkv_format=qkv_format,
+            cp_size=cp_size,
+            pad=pad,
+        )
+    elif get_position_ids:
         position_ids_list = []
         for t in batch["unconcat_tokens"]:
             seq_len = t.size(0)
