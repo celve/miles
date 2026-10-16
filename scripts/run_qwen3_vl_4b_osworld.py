@@ -46,8 +46,7 @@ Usage:
     python3 scripts/run_qwen3_vl_4b_osworld.py --mode smoke --gym-url http://10.0.0.1:11001
 """
 
-import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 import typer
@@ -59,6 +58,10 @@ HF_REPO = "Qwen/Qwen3-VL-4B-Instruct"
 
 @dataclass
 class ScriptArgs(command_utils.ExecuteTrainConfig):
+    # Import-time, not the base's call-time factory: the snapshot harness
+    # freezes `command_utils.create_run_id`, so only a value taken through that
+    # name records deterministically.
+    run_id: str = command_utils.create_run_id()
     num_gpus_per_node: int = 4
     model_name: str = "Qwen3-VL-4B-Instruct"
     model_dir: str = "/root/models"
@@ -76,11 +79,7 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     # window produced them; Gym itself reads this from its own env.yaml.
     history_policy: str = "hysteresis:1:5"
     mode: Literal["normal", "smoke"] = "normal"
-    wandb_project: str = "miles-cua-osworld"
     extra_args: str = ""
-    # Read at call time, never at import: a value captured at import leaks one
-    # developer's export into every snapshot.
-    wandb_enabled: bool = field(default_factory=lambda: bool(os.environ.get("WANDB_API_KEY")))
 
     @property
     def model_path(self) -> str:
@@ -204,14 +203,6 @@ def execute(args: ScriptArgs):
         "--sglang-attention-backend fa3 "
     )
 
-    # No --wandb-key on purpose: the backend prints the full command line, so
-    # the trainer picks WANDB_API_KEY out of its inherited environment.
-    wandb_args = (
-        f"--use-wandb --wandb-project {args.wandb_project} --wandb-group {args.model_name}-osworld "
-        if args.wandb_enabled
-        else ""
-    )
-
     telemetry_args = "--use-miles-dashboard --dashboard-gpu-sample-interval 5 --log-multi-turn --log-passrate "
 
     misc_args = (
@@ -232,7 +223,7 @@ def execute(args: ScriptArgs):
             f"{custom_args} "
             f"{grpo_args} "
             f"{optimizer_args} "
-            f"{wandb_args} "
+            f"{command_utils.get_default_wandb_args(__file__, run_id=args.run_id)} "
             f"{train_backend_args} "
             f"{sglang_args} "
             f"{telemetry_args} "
