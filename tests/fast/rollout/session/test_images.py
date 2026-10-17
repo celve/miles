@@ -112,6 +112,23 @@ class TestExtraction:
             with pytest.raises(MessageValidationError, match="images only"):
                 extract_prompt_images([user({"type": part_type})], ImageStore())
 
+    def test_image_spellings_the_chat_route_does_not_attach_are_refused(self):
+        """SGLang's chat request accepts only image_url, though the chat template renders these too."""
+        for part_type in ("image", "input_image"):
+            with pytest.raises(MessageValidationError, match="as an image_url part"):
+                extract_prompt_images(
+                    [user({"type": part_type, "image_url": data_url(png_bytes(4, 4, (0, 0, 0)))})], ImageStore()
+                )
+
+    def test_a_declared_content_hash_must_be_the_hash_of_the_bytes(self):
+        payload = png_bytes(8, 8, (1, 2, 3))
+        part = image_part(payload)
+        part["image_url"]["content_hash"] = "sha256:" + hashlib.sha256(payload).hexdigest().upper()
+        assert len(extract_prompt_images([user(part)], ImageStore())) == 1
+        part["image_url"]["content_hash"] = "sha256:" + hashlib.sha256(b"other").hexdigest()
+        with pytest.raises(MessageValidationError, match="is not the SHA-256"):
+            extract_prompt_images([user(part)], ImageStore())
+
     def test_undecodable_payload_is_refused(self):
         with pytest.raises(MessageValidationError, match="base64"):
             extract_prompt_images(

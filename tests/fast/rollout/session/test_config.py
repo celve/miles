@@ -241,9 +241,6 @@ def _image_args(tmp_path=None, yaml_text: str | None = None, **overrides) -> Nam
         sglang_mm_process_config=None,
         sglang_image_processor_backend="auto",
         sglang_disable_fast_image_processor=False,
-        sglang_sampling_defaults="model",
-        sglang_tool_call_parser=None,
-        sglang_reasoning_parser=None,
     )
     values.update(overrides)
     return _make_launch_args(**values)
@@ -273,9 +270,6 @@ class TestSessionImageEngine:
             "mm_process_config": None,
             "image_processor_backend": "auto",
             "disable_fast_image_processor": False,
-            "sampling_defaults": "model",
-            "tool_call_parser": None,
-            "reasoning_parser": None,
         }
 
     def test_support_off_resolves_nothing(self):
@@ -288,22 +282,15 @@ class TestSessionImageEngine:
             validate_session_image_args(_image_args(sglang_mm_process_config={"image": {"do_normalize": False}}))
 
     def test_a_group_override_beats_the_base_flag(self, tmp_path):
-        args = _image_args(
-            tmp_path, _groups(_group(4, tool_call_parser="qwen25"), _group(4, tool_call_parser="qwen25"))
-        )
+        yaml_text = _groups(_group(4, tokenizer_path="/ckpt/actor"), _group(4, tokenizer_path="/ckpt/actor"))
+        args = _image_args(tmp_path, yaml_text, sglang_tokenizer_path="/ckpt/renormalized")
         validate_session_image_args(args)
-        assert args.session_image_engine_settings["tool_call_parser"] == "qwen25"
+        assert args.session_image_engine_settings["tokenizer_path"] == "/ckpt/actor"
 
     def test_an_unsupported_group_override_is_refused(self, tmp_path):
         yaml_text = _groups(_group(8, mm_process_config="{image: {do_normalize: false}}"))
         with pytest.raises(ValueError, match="mm_process_config"):
             validate_session_image_args(_image_args(tmp_path, yaml_text))
-
-    def test_groups_that_launch_differently_are_refused(self, tmp_path):
-        with pytest.raises(ValueError, match=r"differ in \['tool_call_parser'\]"):
-            validate_session_image_args(
-                _image_args(tmp_path, _groups(_group(4, tool_call_parser="qwen25"), _group(4)))
-            )
 
     def test_a_placeholder_group_launches_no_engine_and_is_ignored(self, tmp_path):
         args = _image_args(tmp_path, _groups(_group(4), _group(4, worker_type="placeholder")))
@@ -351,6 +338,9 @@ class TestSessionImageEngine:
         with pytest.raises(ValueError, match="disable_fast_image_processor"):
             validate_session_image_args(_image_args(sglang_disable_fast_image_processor=True))
 
-    def test_an_auto_parser_is_refused(self):
-        with pytest.raises(ValueError, match="name the parser explicitly"):
-            validate_session_image_args(_image_args(sglang_reasoning_parser="auto"))
+    def test_parsers_and_sampling_defaults_are_left_to_the_engines(self):
+        args = _image_args(
+            sglang_reasoning_parser="auto", sglang_tool_call_parser="auto", sglang_sampling_defaults="openai"
+        )
+        validate_session_image_args(args)
+        assert "reasoning_parser" not in args.session_image_engine_settings

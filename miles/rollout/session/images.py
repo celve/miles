@@ -20,9 +20,8 @@ from typing import Any
 
 from miles.rollout.session.errors import MessageValidationError
 
-# Content part types that carry a picture. ``image_url`` is the OpenAI spelling;
-# ``image`` is the alias the Qwen and Kimi chat templates also accept.
-IMAGE_PART_TYPES = ("image_url", "image")
+# The one image spelling SGLang's chat request accepts, as OpenAI's does.
+IMAGE_PART_TYPES = ("image_url",)
 
 _DATA_URL = re.compile(r"^data:(?P<mime>image/[a-zA-Z0-9.+-]+);base64,(?P<payload>.*)$", re.DOTALL)
 _SUPPORTED_MIME_TYPES = ("image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp")
@@ -32,7 +31,7 @@ _SUPPORTED_MIME_TYPES = ("image/png", "image/jpeg", "image/webp", "image/gif", "
 class StoredImage:
     """One image's immutable bytes and the identity derived from them."""
 
-    image_id: str  # "sha256:<64 hex>", the spelling SGLang's mm_content_hashes takes
+    image_id: str  # "sha256:<64 hex>", the spelling SGLang's content_hash takes
     data: bytes
     mime_type: str
 
@@ -113,6 +112,7 @@ def extract_prompt_images(messages: list[dict[str, Any]], store: ImageStore) -> 
                 _reject_unsupported_media_part(part_type, message_index, part_index)
                 continue
             stored = store.add(*_resolve_image_part(part, message_index, part_index))
+            _check_declared_hash(part, stored.image_id, message_index, part_index)
             occurrences.append(
                 ImageOccurrence(image_id=stored.image_id, message_index=message_index, part_index=part_index)
             )
@@ -121,21 +121,30 @@ def extract_prompt_images(messages: list[dict[str, Any]], store: ImageStore) -> 
 
 def _reject_unsupported_media_part(part_type: Any, message_index: int, part_index: int) -> None:
     """Refuse the media kinds this path does not carry, rather than dropping them silently."""
+    where = f"messages[{message_index}].content[{part_index}].type={part_type!r}"
+    if part_type in ("image", "input_image"):
+        raise MessageValidationError(f"{where} is not supported: send an image as an image_url part")
     if part_type in ("video_url", "video", "input_audio", "audio_url", "audio"):
+        raise MessageValidationError(f"{where} is not supported: the session server carries images only")
+
+
+def _check_declared_hash(part: dict[str, Any], image_id: str, message_index: int, part_index: int) -> None:
+    # An engine that trusts caller hashes would serve another image's cached features for a wrong one.
+    declared = part["image_url"].get("content_hash")
+    if declared is not None and str(declared).lower() != image_id:
         raise MessageValidationError(
-            f"messages[{message_index}].content[{part_index}].type={part_type!r} is not supported: "
-            "the session server carries images only"
+            f"messages[{message_index}].content[{part_index}].image_url.content_hash={declared!r} is not the "
+            f"SHA-256 of the image's bytes ({image_id})"
         )
 
 
 def _resolve_image_part(part: dict[str, Any], message_index: int, part_index: int) -> tuple[bytes, str]:
     """Decode one image content part to ``(bytes, mime_type)``."""
     where = f"messages[{message_index}].content[{part_index}]"
-    url = part.get("image_url") if part.get("type") == "image_url" else part.get("image")
-    if isinstance(url, dict):
-        url = url.get("url")
+    image_url = part.get("image_url")
+    url = image_url.get("url") if isinstance(image_url, dict) else None
     if not isinstance(url, str) or not url:
-        raise MessageValidationError(f"{where} carries no image url string")
+        raise MessageValidationError(f"{where} carries no image_url object with a url string")
     match = _DATA_URL.match(url)
     if match is None:
         raise MessageValidationError(

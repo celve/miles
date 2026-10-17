@@ -21,7 +21,7 @@ from typing import Any
 import torch
 
 from miles.rollout.session.config import SESSION_IMAGE_SUPPORT_OFF, SessionServerConfig, check_engine_launch_settings
-from miles.rollout.session.generate_transport import CompletionParsers
+from miles.rollout.session.errors import UpstreamResponseError
 from miles.rollout.session.images import NO_IMAGES, ImageStore, PromptImages, StoredImage, extract_prompt_images
 from miles.utils.processing_utils import call_processor, extract_multimodal_train_inputs, load_processor
 
@@ -184,6 +184,30 @@ def expand_input_ids(ids: Sequence[int], counts: Sequence[int], placeholder_id: 
     return expanded
 
 
+def assert_engine_expansion_matches(
+    effective: Sequence[int] | None, expected_ids: list[int], images: PromptImages, counts: list[int]
+) -> None:
+    """Proves the token layout and grid inference consumed, not its pixels, which the startup check covers."""
+    if effective is None:
+        raise UpstreamResponseError(
+            "chat response carries no prompt_token_ids; the session image path needs "
+            "return_prompt_token_ids to prove the ids inference consumed"
+        )
+    if list(effective) == expected_ids:
+        return
+    first_diff = next(
+        (i for i, (a, b) in enumerate(zip(effective, expected_ids, strict=False)) if a != b),
+        min(len(effective), len(expected_ids)),
+    )
+    raise UpstreamResponseError(
+        f"effective prompt ids differ from the rendered expansion: engine has {len(effective)} tokens, "
+        f"the session server expected {len(expected_ids)} (first difference at index {first_diff}); "
+        f"images={list(images.image_ids)} counts={counts} — the engine's processor settings or image "
+        "decoding disagree with this run's pinned processor, or its chat route dropped the images "
+        "(an SGLang whose pretokenized chat branch does not keep message images)"
+    )
+
+
 def placeholder_runs(ids: Sequence[int], placeholder_id: int) -> list[int]:
     """Lengths of the maximal placeholder runs in *ids*, in order."""
     runs: list[int] = []
@@ -261,7 +285,7 @@ def _optional_int(value: Any) -> int | None:
 
 @dataclass(frozen=True)
 class EngineLaunchSettings:
-    """What the policy engines launch with that decides an image's pixels and how a reply is parsed."""
+    """What the policy engines launch with that decides an image's pixels."""
 
     model_path: str
     revision: str | None
@@ -269,22 +293,9 @@ class EngineLaunchSettings:
     mm_process_config: dict[str, Any] | None
     image_processor_backend: str
     disable_fast_image_processor: bool
-    sampling_defaults: str
-    tool_call_parser: str | None
-    reasoning_parser: str | None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
-
-    def parsers(self, tokenizer: Any) -> CompletionParsers:
-        """The parsers the engines apply on the chat route, so both routes in one session agree."""
-        return CompletionParsers(
-            reasoning_parser=self.reasoning_parser, tool_call_parser=self.tool_call_parser, tokenizer=tokenizer
-        )
-
-    def model_generation_config(self, checkpoint_generation_config: dict[str, Any]) -> dict[str, Any]:
-        """Mirrors `ModelConfig.get_default_sampling_params`: the checkpoint's defaults only under `model`."""
-        return dict(checkpoint_generation_config) if self.sampling_defaults == "model" else {}
 
 
 @dataclass(frozen=True)
@@ -294,7 +305,6 @@ class SessionImageProcessor:
     hf_processor: Any
     processor_settings: ImageProcessorSettings
     engine_settings: EngineLaunchSettings
-    checkpoint_generation_config: dict[str, Any]
     text_only_leaf: str  # "drop" | "keep"
 
     @property
@@ -329,10 +339,6 @@ class SessionImages:
 
     def counts_for(self, images: PromptImages) -> list[int]:
         return self.token_counter.count_all([self.store.get(image_id) for image_id in images.image_ids])
-
-
-# The fields SGLang's ModelConfig.get_default_sampling_params reads from a checkpoint.
-_GENERATION_CONFIG_KEYS = ("repetition_penalty", "temperature", "top_k", "top_p", "min_p")
 
 
 def build_session_image_processor(config: SessionServerConfig, tokenizer: Any) -> SessionImageProcessor | None:
@@ -370,22 +376,5 @@ def build_session_image_processor(config: SessionServerConfig, tokenizer: Any) -
         hf_processor=hf_processor,
         processor_settings=processor_settings,
         engine_settings=engine_settings,
-        checkpoint_generation_config=read_checkpoint_generation_config(config.hf_checkpoint),
         text_only_leaf=config.session_image_text_only_leaf,
     )
-
-
-def read_checkpoint_generation_config(checkpoint: str) -> dict[str, Any]:
-    """The checkpoint's own sampling defaults, for a field the request omits."""
-    from transformers import GenerationConfig
-
-    try:
-        config = GenerationConfig.from_pretrained(checkpoint).to_dict()
-    except Exception as exc:
-        logger.warning(
-            "[session] No generation config for %s (%s); omitted sampling fields will take the engine's own fallbacks",
-            checkpoint,
-            exc,
-        )
-        return {}
-    return {key: config[key] for key in _GENERATION_CONFIG_KEYS if config.get(key) is not None}

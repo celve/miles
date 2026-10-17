@@ -7,16 +7,13 @@ from miles.utils.pydantic_utils import FrozenStrictBaseModel
 SESSION_IMAGE_SUPPORT_OFF = "off"
 SESSION_IMAGE_SUPPORT_QWEN3_VL = "qwen3_vl"
 
-# The engine launch settings that decide what an image becomes and how a reply is parsed.
+# The engine launch settings that decide what an image becomes.
 ENGINE_LAUNCH_SETTING_FIELDS = (
     "revision",
     "tokenizer_path",
     "mm_process_config",
     "image_processor_backend",
     "disable_fast_image_processor",
-    "sampling_defaults",
-    "tool_call_parser",
-    "reasoning_parser",
 )
 
 
@@ -104,7 +101,7 @@ def _group_launch_settings(args, overrides: dict[str, Any]) -> dict[str, Any]:
 
 
 def check_engine_launch_settings(settings: dict[str, Any], *, checkpoint: str) -> None:
-    """Require the one engine image configuration whose pixels and parsing this path has verified."""
+    """Require the one engine image configuration whose pixels this path has verified."""
     missing = [key for key in ("model_path", *ENGINE_LAUNCH_SETTING_FIELDS) if key not in settings]
     if missing:
         raise ValueError(f"the session image engine settings do not state {missing}")
@@ -141,15 +138,6 @@ def check_engine_launch_settings(settings: dict[str, Any], *, checkpoint: str) -
         raise ValueError(
             f"the policy engines launch with image_processor_backend {settings['image_processor_backend']!r}; "
             "only the default 'auto' has been verified to match the trainer's pixels"
-        )
-    if settings["sampling_defaults"] not in ("model", "openai"):
-        raise ValueError(f"unknown sampling_defaults {settings['sampling_defaults']!r}")
-    auto = [name for name in ("tool_call_parser", "reasoning_parser") if settings[name] == "auto"]
-    if auto:
-        raise ValueError(
-            f"the policy engines launch with {auto} set to 'auto', which each engine resolves for itself at "
-            "launch, so the session server cannot know which parser an image turn's reply needs; name the "
-            "parser explicitly"
         )
 
 
