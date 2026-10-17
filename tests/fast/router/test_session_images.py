@@ -222,9 +222,9 @@ def image_server_args(engine: dict | None = None, **extra) -> dict[str, Any]:
         "lora_rank": 0,
         "lora_adapter_path": None,
         "use_session_server": "v2",
-        "session_image_support": "qwen3_vl",
+        "use_session_images": True,
         "session_image_engine_settings": {**ENGINE_SETTINGS, **(engine or {})},
-        "session_image_text_only_leaf": "drop",
+        "session_image_text_only_samples": "drop",
         "session_server_instance_id": uuid.uuid4().hex,
         "pause_generation_mode": "retract",
         "session_sample_picker_path": "miles.rollout.session.v2.picker_hub.drop_same_prompt_retries",
@@ -464,7 +464,7 @@ class TestTruncation:
 
 
 class TestMixedTextOnly:
-    def test_a_text_only_leaf_is_dropped_by_default(self, vlm):
+    def test_a_text_only_sample_is_dropped_by_default(self, vlm):
         with image_router(vlm, ["a", "summary"]) as env:
             session_id = _create_session(env.url)
             assert chat(env, session_id, [user_turn(SHOT1, "look")]).status_code == 200
@@ -474,7 +474,7 @@ class TestMixedTextOnly:
             assert samples[0].multimodal_train_inputs is not None
 
     def test_keep_emits_it_without_a_placeholder_image(self, vlm):
-        with image_router(vlm, ["a", "summary"], extra_args={"session_image_text_only_leaf": "keep"}) as env:
+        with image_router(vlm, ["a", "summary"], extra_args={"session_image_text_only_samples": "keep"}) as env:
             session_id = _create_session(env.url)
             assert chat(env, session_id, [user_turn(SHOT1, "look")]).status_code == 200
             assert chat(env, session_id, [user_turn(None, "summarize")]).status_code == 200
@@ -510,11 +510,11 @@ class TestExactnessGate:
 
 class TestRefusals:
     def test_an_image_is_refused_when_support_is_off(self, vlm):
-        with image_router(vlm, ["a"], extra_args={"session_image_support": "off"}) as env:
+        with image_router(vlm, ["a"], extra_args={"use_session_images": False}) as env:
             session_id = _create_session(env.url)
             response = chat(env, session_id, [user_turn(SHOT1, "look")])
             assert response.status_code == 400
-            assert b"--session-image-support" in response.content
+            assert b"--use-session-images" in response.content
 
     def test_a_remote_image_url_is_refused(self, vlm):
         with image_router(vlm, ["a"]) as env:

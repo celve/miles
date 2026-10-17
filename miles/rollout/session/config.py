@@ -2,8 +2,6 @@ from typing import Any
 
 from miles.utils.pydantic_utils import FrozenStrictBaseModel
 
-SESSION_IMAGE_SUPPORT_OFF = "off"
-
 
 class SessionServerConfig(FrozenStrictBaseModel):
     host: str
@@ -26,9 +24,9 @@ class SessionServerConfig(FrozenStrictBaseModel):
     lora_adapter_path: str | None
     lora_train_only: bool
     use_session_server: bool | str | None
-    session_image_support: str
+    use_session_images: bool
     session_image_engine_settings: dict[str, Any] | None
-    session_image_text_only_leaf: str
+    session_image_text_only_samples: str
     session_message_matcher: str
     pause_generation_mode: str | None
     session_sample_picker_path: str | None
@@ -62,9 +60,9 @@ def compute_session_server_config(
         lora_adapter_path=args.lora_adapter_path,
         lora_train_only=getattr(args, "lora_train_only", False),
         use_session_server=getattr(args, "use_session_server", None),
-        session_image_support=getattr(args, "session_image_support", SESSION_IMAGE_SUPPORT_OFF),
+        use_session_images=getattr(args, "use_session_images", False),
         session_image_engine_settings=getattr(args, "session_image_engine_settings", None),
-        session_image_text_only_leaf=getattr(args, "session_image_text_only_leaf", "drop"),
+        session_image_text_only_samples=getattr(args, "session_image_text_only_samples", "drop"),
         session_message_matcher=getattr(args, "session_message_matcher", "strict"),
         pause_generation_mode=getattr(args, "pause_generation_mode", None),
         session_sample_picker_path=getattr(args, "session_sample_picker_path", None),

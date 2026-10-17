@@ -2,7 +2,6 @@ from typing import Any
 
 from miles.backends.sglang_utils.sglang_api_client import WorkerType
 from miles.backends.sglang_utils.sglang_config import resolve_sglang_config
-from miles.rollout.session.config import SESSION_IMAGE_SUPPORT_OFF
 from miles.utils.chat_template_utils.tito_tokenizer import TITOTokenizerType
 
 # The engine launch settings that decide what an image becomes.
@@ -21,18 +20,17 @@ def validate_session_image_args(args) -> None:
     Needs the derived engine topology (``rollout_external``, ``starts_inference_engines``),
     so it runs at the end of ``miles_validate_args``.
     """
-    support = getattr(args, "session_image_support", SESSION_IMAGE_SUPPORT_OFF)
     args.session_image_engine_settings = None
-    if support == SESSION_IMAGE_SUPPORT_OFF:
+    if not getattr(args, "use_session_images", False):
         return
     if args.use_session_server != "v2":
         raise ValueError(
-            f"--session-image-support={support} requires --use-session-server v2; "
+            "--use-session-images requires --use-session-server v2; "
             "image trajectories need the tree server's branch-per-rewrite assembly"
         )
     if not args.hf_checkpoint:
-        raise ValueError(f"--session-image-support={support} requires --hf-checkpoint to load the processor")
-    check_session_tito_model(args.tito_model, support=support)
+        raise ValueError("--use-session-images requires --hf-checkpoint to load the processor")
+    check_session_tito_model(args.tito_model)
     replays = [
         flag
         for enabled, flag in (
@@ -43,17 +41,17 @@ def validate_session_image_args(args) -> None:
     ]
     if replays:
         raise ValueError(
-            f"--session-image-support={support} does not support {', '.join(replays)}: those per-token "
+            f"--use-session-images does not support {', '.join(replays)}: those per-token "
             "rows are sized on the sequence the engine expanded, while the session server's offsets are "
             "computed on the unexpanded render, so the two silently misalign"
         )
     args.session_image_engine_settings = resolve_engine_launch_settings(args)
 
 
-def check_session_tito_model(tito_model: str, *, support: str) -> None:
+def check_session_tito_model(tito_model: str) -> None:
     if tito_model != TITOTokenizerType.QWEN3_VL.value:
         raise ValueError(
-            f"--session-image-support={support} requires --tito-model {TITOTokenizerType.QWEN3_VL.value}, got "
+            f"--use-session-images requires --tito-model {TITOTokenizerType.QWEN3_VL.value}, got "
             f"{tito_model!r}: 'default' drops the newline Qwen3-VL's template puts after every <|im_end|>, and "
             "'qwen3' renders Qwen3's text template, which has no image parts"
         )
@@ -66,10 +64,9 @@ def resolve_engine_launch_settings(args) -> dict[str, Any] | None:
     any engine exists and no request has to ask one. The router may hand an image turn to
     any of them, so every one must carry the settings this path checks.
     """
-    support = args.session_image_support
     if args.rollout_external:
         raise ValueError(
-            f"--session-image-support={support} needs engines Miles launches itself: an external engine's "
+            "--use-session-images needs engines Miles launches itself: an external engine's "
             "image preprocessing is not described by this run's args, so whether its pixels match the "
             "trainer's cannot be checked"
         )
@@ -79,7 +76,7 @@ def resolve_engine_launch_settings(args) -> dict[str, Any] | None:
     policy = models[0]
     if policy.has_pd_disaggregation:
         raise ValueError(
-            f"--session-image-support={support} does not support prefill/decode disaggregation; image turns "
+            "--use-session-images does not support prefill/decode disaggregation; image turns "
             "have only been verified on regular engines"
         )
     settings = [
@@ -90,7 +87,7 @@ def resolve_engine_launch_settings(args) -> dict[str, Any] | None:
     differing = sorted({key for other in settings[1:] for key in other if other[key] != settings[0][key]})
     if differing:
         raise ValueError(
-            f"--session-image-support={support} needs every policy engine group to launch with the same "
+            "--use-session-images needs every policy engine group to launch with the same "
             f"image settings, because the router picks any of them per turn; they differ in {differing}"
         )
     check_engine_launch_settings(settings[0], checkpoint=args.hf_checkpoint)

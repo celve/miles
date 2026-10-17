@@ -177,9 +177,9 @@ def _add_pixels_or_drop(
         else 0
     )
     if retained == 0:
-        if image_processor.text_only_leaf == "drop":
+        if image_processor.text_only_samples == "drop":
             logger.info(
-                "Dropping leaf seq=%d: no image survives in its %d tokens (--session-image-text-only-leaf=drop)",
+                "Dropping leaf seq=%d: no image survives in its %d tokens (--session-image-text-only-samples=drop)",
                 leaf.seq,
                 len(sample.tokens),
             )

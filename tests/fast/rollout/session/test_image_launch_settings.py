@@ -14,7 +14,7 @@ def _image_args(tmp_path=None, yaml_text: str | None = None, **overrides) -> Nam
         (tmp_path / "sglang.yaml").write_text(yaml_text)
         overrides["sglang_config"] = str(tmp_path / "sglang.yaml")
     values = dict(
-        session_image_support="qwen3_vl",
+        use_session_images=True,
         use_session_server="v2",
         tito_model="qwen3_vl",
         use_rollout_routing_replay=False,
@@ -57,7 +57,7 @@ class TestSessionImageEngine:
         }
 
     def test_support_off_resolves_nothing(self):
-        args = _image_args(session_image_support="off", rollout_external=True)
+        args = _image_args(use_session_images=False, rollout_external=True)
         validate_session_image_args(args)
         assert args.session_image_engine_settings is None
 

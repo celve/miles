@@ -2775,29 +2775,28 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "the pretokenized prefix in multi-turn agentic sessions.",
             )
             parser.add_argument(
-                "--session-image-support",
-                type=str,
-                default="off",
-                choices=["off", "qwen3_vl"],
+                "--use-session-images",
+                action="store_true",
+                default=False,
                 help="v2 only. Carry images through the session server so a screenshot harness can "
-                "train through the agent-function interface. 'off' (default) keeps the text-only "
-                "behavior and rejects image content. 'qwen3_vl' loads the checkpoint's processor, "
-                "sends image-bearing turns through the router's chat route like text turns, and "
-                "assembles pixel_values / image_grid_thw per retained leaf. Requires --use-session-server "
-                "v2, --tito-model qwen3_vl, an SGLang whose pretokenized chat branch keeps message images, "
-                "and a checkpoint whose processor produces image grids; incompatible with the routing and "
-                "indexer replay side channels, whose per-token rows are sized on the expanded sequence. Checked at "
-                "startup against the args Miles launches the policy engines with: every engine group "
-                "must serve --hf-checkpoint unpinned, loading its processor from it, with no "
+                "train through the agent-function interface. Off by default, which keeps the text-only "
+                "behavior and rejects image content. On, the session server loads the checkpoint's processor, "
+                "sends image-bearing turns through the router's chat route like text turns, and assembles "
+                "pixel_values / image_grid_thw per retained sample. Requires --use-session-server v2, "
+                "--tito-model qwen3_vl (the model family), an SGLang whose pretokenized chat branch keeps "
+                "message images, and a checkpoint whose processor produces image grids; incompatible with the "
+                "routing and indexer replay side channels, whose per-token rows are sized on the expanded "
+                "sequence. Checked at startup against the args Miles launches the policy engines with: every "
+                "engine group must serve --hf-checkpoint unpinned, loading its processor from it, with no "
                 "mm_process_config and image_processor_backend 'auto'; external engines and "
                 "prefill/decode disaggregation are refused.",
             )
             parser.add_argument(
-                "--session-image-text-only-leaf",
+                "--session-image-text-only-samples",
                 type=str,
                 default="drop",
                 choices=["drop", "keep"],
-                help="v2 only, with --session-image-support. What to do with a training sample whose "
+                help="v2 only, with --use-session-images. What to do with a training sample whose "
                 "retained tokens carry no image, such as one built from a text-only summary call. "
                 "'drop' (default) removes it: under FSDP the vision tower's weight all-gathers are "
                 "collectives, so a text-only sample in an image-bearing batch stalls the ranks that "

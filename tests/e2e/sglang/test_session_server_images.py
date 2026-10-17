@@ -76,7 +76,7 @@ def execute(dump_dir: Path, journal: Path):
         f"--custom-agent-function-path {agent.__name__}.run_agent "
         f"--custom-rm-path {agent.__name__}.reward_by_index "
         "--use-session-server v2 "
-        "--session-image-support qwen3_vl "
+        "--use-session-images "
         "--tito-model qwen3_vl "
         "--session-server-workers 2 "
     )

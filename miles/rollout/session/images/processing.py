@@ -20,7 +20,7 @@ from typing import Any
 
 import torch
 
-from miles.rollout.session.config import SESSION_IMAGE_SUPPORT_OFF, SessionServerConfig
+from miles.rollout.session.config import SessionServerConfig
 from miles.rollout.session.errors import UpstreamResponseError
 from miles.rollout.session.images.launch_settings import check_engine_launch_settings, check_session_tito_model
 from miles.rollout.session.images.store import NO_IMAGES, ImageBlob, ImageOccurrences, ImageStore, intern_images
@@ -306,7 +306,7 @@ class SessionImageProcessor:
     hf_processor: Any
     processor_settings: ImageProcessorSettings
     engine_settings: EngineLaunchSettings
-    text_only_leaf: str  # "drop" | "keep"
+    text_only_samples: str  # "drop" | "keep"
 
     @property
     def placeholder_id(self) -> int:
@@ -344,21 +344,20 @@ class SessionImages:
 
 def build_session_image_processor(config: SessionServerConfig, tokenizer: Any) -> SessionImageProcessor | None:
     """Load the image processor for an image-enabled run, or ``None`` for text."""
-    if config.session_image_support == SESSION_IMAGE_SUPPORT_OFF:
+    if not config.use_session_images:
         return None
     if config.session_image_engine_settings is None:
         raise ValueError(
-            f"--session-image-support={config.session_image_support} needs the policy engines' image "
+            "--use-session-images needs the policy engines' image "
             "settings, which validate_session_image_args reads from the launch args"
         )
     # Checked again here because a config can also be built by hand, as scripts and tests do.
-    check_session_tito_model(config.tito_model, support=config.session_image_support)
+    check_session_tito_model(config.tito_model)
     check_engine_launch_settings(config.session_image_engine_settings, checkpoint=config.hf_checkpoint)
     hf_processor = load_processor(config.hf_checkpoint, trust_remote_code=True)
     if hf_processor is None:
         raise ValueError(
-            f"--session-image-support={config.session_image_support} needs an image processor, but "
-            f"{config.hf_checkpoint!r} provides none"
+            "--use-session-images needs an image processor, but " f"{config.hf_checkpoint!r} provides none"
         )
     if not hasattr(hf_processor, "_get_num_multimodal_tokens"):
         raise ValueError(
@@ -368,15 +367,14 @@ def build_session_image_processor(config: SessionServerConfig, tokenizer: Any) -
     processor_settings = read_processor_settings(hf_processor, tokenizer, checkpoint=config.hf_checkpoint)
     engine_settings = EngineLaunchSettings(**config.session_image_engine_settings)
     logger.info(
-        "[session] Image support=%s processor=%s engine=%s text_only_leaf=%s",
-        config.session_image_support,
+        "[session] Image support on: processor=%s engine=%s text_only_samples=%s",
         processor_settings.to_dict(),
         engine_settings.to_dict(),
-        config.session_image_text_only_leaf,
+        config.session_image_text_only_samples,
     )
     return SessionImageProcessor(
         hf_processor=hf_processor,
         processor_settings=processor_settings,
         engine_settings=engine_settings,
-        text_only_leaf=config.session_image_text_only_leaf,
+        text_only_samples=config.session_image_text_only_samples,
     )

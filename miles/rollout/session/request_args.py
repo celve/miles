@@ -19,7 +19,7 @@ import orjson
 
 from miles.rollout.generate_utils.rollout_topk_logprobs import configure_rollout_topk_logprobs_request
 from miles.rollout.generate_utils.sampling_mask import validate_sampling_support_request
-from miles.rollout.session.config import SESSION_IMAGE_SUPPORT_OFF, SessionServerConfig
+from miles.rollout.session.config import SessionServerConfig
 from miles.rollout.session.errors import MessageValidationError
 from miles.rollout.session.images.store import IMAGE_PART_TYPES, NO_IMAGES, ImageOccurrences
 from miles.utils.chat_template_utils.tito_tokenizer import TITOTokenizer, extract_template_args
@@ -96,7 +96,7 @@ def prepare_chat_request(
     resolves them, and they become the turn's recorded history, so they are shared read-only.
     """
     owned_args = {key: value if key == "messages" else deepcopy(value) for key, value in client_args.items()}
-    if config.session_image_support == SESSION_IMAGE_SUPPORT_OFF:
+    if not config.use_session_images:
         assert_no_image_content(owned_args.get("messages") or [])
     request_args, response_intent = resolve_request_args_by_config(owned_args, config, evaluation=evaluation)
     apply_session_sampling_defaults(request_args, sampling_defaults or {}, evaluation=evaluation)
@@ -139,7 +139,7 @@ def assert_no_image_content(messages: list[dict[str, Any]]) -> None:
             if isinstance(part, dict) and part.get("type") in IMAGE_PART_TYPES:
                 raise MessageValidationError(
                     f"messages[{message_index}].content[{part_index}] carries an image, which this "
-                    "session server does not accept: start it with --session-image-support"
+                    "session server does not accept: start it with --use-session-images"
                 )
 
 
