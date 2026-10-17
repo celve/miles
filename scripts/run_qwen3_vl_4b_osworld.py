@@ -188,6 +188,8 @@ _PROTECTED_FLAGS = (
     "--actor-num-gpus-per-node",
     "--num-gpus-per-node",
     "--tensor-model-parallel-size",
+    "--pipeline-model-parallel-size",
+    "--context-parallel-size",
 )
 _PROTECTED_ENV = ("MILES_SCRIPT_OSWORLD_SAMPLES_PER_EPISODE",)
 
@@ -267,8 +269,15 @@ def execute(args: ScriptArgs):
         f"--actor-num-nodes {args.num_nodes} "
         f"--actor-num-gpus-per-node {args.num_gpus_per_node} "
         f"--num-gpus-per-node {args.num_gpus_per_node} "
-        # On Megatron the data-parallel size, and so each rank's share, follows from it.
-        + (f"--tensor-model-parallel-size {args.tensor_parallel} " if args.train_backend == "megatron" else "")
+        # On Megatron these fix the data-parallel size, and so each rank's share; CP stays 1
+        # because the Qwen3-VL plugin cannot place vision embeddings across CP ranks.
+        + (
+            f"--tensor-model-parallel-size {args.tensor_parallel} "
+            "--pipeline-model-parallel-size 1 "
+            "--context-parallel-size 1 "
+            if args.train_backend == "megatron"
+            else ""
+        )
     )
 
     ckpt_args = f"--hf-checkpoint {args.model_path} --ref-load {args.model_path} "
@@ -340,15 +349,12 @@ def execute(args: ScriptArgs):
     # the other ranks wait in their first collective, and the watchdog then
     # kills the job at the end of step one.
     if args.train_backend == "megatron":
-        # examples/geo3k_vlm's Megatron block. Context parallelism stays 1 because
-        # the Qwen3-VL plugin cannot place vision embeddings across CP ranks.
+        # examples/geo3k_vlm's Megatron block, its parallel sizes in the geometry block above.
         train_backend_args = (
             "--train-backend megatron "
             f"--load {args.model_path} "
             "--megatron-to-hf-mode bridge "
             "--sequence-parallel "
-            "--pipeline-model-parallel-size 1 "
-            "--context-parallel-size 1 "
             "--expert-model-parallel-size 1 "
             "--expert-tensor-parallel-size 1 "
             "--recompute-granularity full "

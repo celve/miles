@@ -139,6 +139,12 @@ GEOMETRY_FLAGS = (
     "--actor-num-gpus-per-node",
     "--num-gpus-per-node",
 )
+MEGATRON_GEOMETRY_FLAGS = (
+    *GEOMETRY_FLAGS,
+    "--tensor-model-parallel-size",
+    "--pipeline-model-parallel-size",
+    "--context-parallel-size",
+)
 
 
 def _emitted(**kwargs):
@@ -169,7 +175,7 @@ def _emitted_argv(**kwargs):
 
 @pytest.mark.parametrize(
     "backend, flags",
-    [("fsdp", GEOMETRY_FLAGS), ("megatron", (*GEOMETRY_FLAGS, "--tensor-model-parallel-size"))],
+    [("fsdp", GEOMETRY_FLAGS), ("megatron", MEGATRON_GEOMETRY_FLAGS)],
 )
 def test_the_geometry_is_declared_once_and_last(backend, flags):
     """This is what makes the guard belt-and-braces rather than load-bearing:
@@ -208,3 +214,11 @@ def test_the_vl_model_definition_fixes_qwen3_vls_rotary_base(monkeypatch):
     vl, text = load_model_args("qwen3-vl-4B").split(), load_model_args("qwen3-4B").split()
     assert vl[vl.index("--rotary-base") + 1] == "5000000"
     assert [token for token in vl if token != "5000000"] == [token for token in text if token != "1000000"]
+
+
+@pytest.mark.parametrize("flag", ["--context-parallel-size", "--pipeline-model-parallel-size"])
+def test_a_megatron_parallel_size_override_is_refused(flag):
+    """Both enter the data-parallel size the batch was divided by, and CP > 1
+    mis-places Qwen3-VL's vision embeddings while the plugin only warns."""
+    with pytest.raises(ValueError, match=f"{flag} is declared more than once"):
+        _emitted_argv(train_backend="megatron", extra_args=f"{flag} 2")
