@@ -21,7 +21,7 @@ from miles.rollout.generate_utils.rollout_topk_logprobs import configure_rollout
 from miles.rollout.generate_utils.sampling_mask import validate_sampling_support_request
 from miles.rollout.session.config import SESSION_IMAGE_SUPPORT_OFF, SessionServerConfig
 from miles.rollout.session.errors import MessageValidationError
-from miles.rollout.session.images.store import IMAGE_PART_TYPES, NO_IMAGES, PromptImages
+from miles.rollout.session.images.store import IMAGE_PART_TYPES, NO_IMAGES, ImageOccurrences
 from miles.utils.chat_template_utils.tito_tokenizer import TITOTokenizer, extract_template_args
 from miles.utils.lora.utils import LORA_ADAPTER_NAME, lora_rollout_enabled
 
@@ -69,12 +69,12 @@ class PreparedChatRequest:
     body: dict[str, Any]
     template_args: dict[str, Any]
     response_intent: ClientResponseIntent
-    images: PromptImages = NO_IMAGES
+    images: ImageOccurrences = NO_IMAGES
     image_token_counts: list[int] = field(default_factory=list)
 
     @property
     def has_images(self) -> bool:
-        return bool(self.images.occurrences)
+        return bool(self.images.image_ids)
 
 
 def prepare_chat_request(

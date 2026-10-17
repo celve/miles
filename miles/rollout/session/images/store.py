@@ -6,7 +6,7 @@ position or URL, is therefore the identity: every image is snapshotted to bytes
 on arrival and stored under the SHA-256 of those bytes, and each *appearance*
 stays a separate ordered occurrence so repeats and reorderings remain visible.
 
-The store lives on the session and dies with it. Extraction reads the OpenAI
+The store lives on the session and dies with it. Interning reads the OpenAI
 chat content parts and never mutates them: ``messages`` is shared read-only with
 the recorded request.
 """
@@ -28,78 +28,57 @@ _SUPPORTED_MIME_TYPES = ("image/png", "image/jpeg", "image/webp", "image/gif", "
 
 
 @dataclass(frozen=True)
-class StoredImage:
+class ImageBlob:
     """One image's immutable bytes and the identity derived from them."""
 
     image_id: str  # "sha256:<64 hex>", the spelling SGLang's content_hash takes
     data: bytes
-    mime_type: str
-
-    def to_data_url(self) -> str:
-        return f"data:{self.mime_type};base64,{base64.b64encode(self.data).decode('ascii')}"
 
 
 @dataclass(frozen=True)
-class ImageOccurrence:
-    """One appearance of a stored image in a request, located for diagnostics."""
+class ImageOccurrences:
+    """A prompt's images in order, by content id; the same image twice is two occurrences."""
 
-    image_id: str
-    message_index: int
-    part_index: int
-
-
-@dataclass(frozen=True)
-class PromptImages:
-    """A request's image occurrences in prompt order."""
-
-    occurrences: tuple[ImageOccurrence, ...] = ()
+    image_ids: tuple[str, ...] = ()
 
     def __len__(self) -> int:
-        return len(self.occurrences)
+        return len(self.image_ids)
 
-    @property
-    def image_ids(self) -> tuple[str, ...]:
-        return tuple(occurrence.image_id for occurrence in self.occurrences)
-
-    def is_prefix_of(self, other: "PromptImages") -> bool:
+    def is_prefix_of(self, other: "ImageOccurrences") -> bool:
         return other.image_ids[: len(self.image_ids)] == self.image_ids
 
 
-NO_IMAGES = PromptImages()
+NO_IMAGES = ImageOccurrences()
 
 
 class ImageStore:
-    """Session-scoped store: one entry per distinct image content."""
+    """Session-scoped store: one blob per distinct image content."""
 
     def __init__(self) -> None:
-        self._images: dict[str, StoredImage] = {}
+        self._blobs: dict[str, ImageBlob] = {}
 
-    def add(self, data: bytes, mime_type: str) -> StoredImage:
+    def add(self, data: bytes) -> ImageBlob:
         image_id = f"sha256:{hashlib.sha256(data).hexdigest()}"
-        existing = self._images.get(image_id)
+        existing = self._blobs.get(image_id)
         if existing is not None:
             return existing
-        stored = StoredImage(image_id=image_id, data=data, mime_type=mime_type)
-        self._images[image_id] = stored
-        return stored
+        blob = ImageBlob(image_id=image_id, data=data)
+        self._blobs[image_id] = blob
+        return blob
 
-    def get(self, image_id: str) -> StoredImage:
-        stored = self._images.get(image_id)
-        if stored is None:
-            raise KeyError(f"no stored image {image_id!r}")
-        return stored
+    def get(self, image_id: str) -> ImageBlob:
+        blob = self._blobs.get(image_id)
+        if blob is None:
+            raise KeyError(f"no image blob {image_id!r}")
+        return blob
 
     def __len__(self) -> int:
-        return len(self._images)
-
-    @property
-    def total_bytes(self) -> int:
-        return sum(len(stored.data) for stored in self._images.values())
+        return len(self._blobs)
 
 
-def extract_prompt_images(messages: list[dict[str, Any]], store: ImageStore) -> PromptImages:
-    """Snapshot every image in *messages* into *store*, in prompt order."""
-    occurrences: list[ImageOccurrence] = []
+def intern_images(messages: list[dict[str, Any]], store: ImageStore) -> ImageOccurrences:
+    """Store every image in *messages* once by content, and return them in prompt order."""
+    image_ids: list[str] = []
     for message_index, message in enumerate(messages):
         content = message.get("content")
         if not isinstance(content, list):
@@ -111,12 +90,10 @@ def extract_prompt_images(messages: list[dict[str, Any]], store: ImageStore) -> 
             if part_type not in IMAGE_PART_TYPES:
                 _reject_unsupported_media_part(part_type, message_index, part_index)
                 continue
-            stored = store.add(*_resolve_image_part(part, message_index, part_index))
-            _check_declared_hash(part, stored.image_id, message_index, part_index)
-            occurrences.append(
-                ImageOccurrence(image_id=stored.image_id, message_index=message_index, part_index=part_index)
-            )
-    return PromptImages(occurrences=tuple(occurrences))
+            blob = store.add(_resolve_image_part(part, message_index, part_index))
+            _check_declared_hash(part, blob.image_id, message_index, part_index)
+            image_ids.append(blob.image_id)
+    return ImageOccurrences(image_ids=tuple(image_ids))
 
 
 def _reject_unsupported_media_part(part_type: Any, message_index: int, part_index: int) -> None:
@@ -138,8 +115,8 @@ def _check_declared_hash(part: dict[str, Any], image_id: str, message_index: int
         )
 
 
-def _resolve_image_part(part: dict[str, Any], message_index: int, part_index: int) -> tuple[bytes, str]:
-    """Decode one image content part to ``(bytes, mime_type)``."""
+def _resolve_image_part(part: dict[str, Any], message_index: int, part_index: int) -> bytes:
+    """Decode one image content part to its bytes."""
     where = f"messages[{message_index}].content[{part_index}]"
     image_url = part.get("image_url")
     url = image_url.get("url") if isinstance(image_url, dict) else None
@@ -163,4 +140,4 @@ def _resolve_image_part(part: dict[str, Any], message_index: int, part_index: in
         raise MessageValidationError(f"{where} has an undecodable base64 payload: {exc}") from exc
     if not data:
         raise MessageValidationError(f"{where} decodes to zero bytes")
-    return data, mime_type
+    return data

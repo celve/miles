@@ -23,7 +23,7 @@ import torch
 from miles.rollout.session.config import SESSION_IMAGE_SUPPORT_OFF, SessionServerConfig
 from miles.rollout.session.errors import UpstreamResponseError
 from miles.rollout.session.images.launch_settings import check_engine_launch_settings
-from miles.rollout.session.images.store import NO_IMAGES, ImageStore, PromptImages, StoredImage, extract_prompt_images
+from miles.rollout.session.images.store import NO_IMAGES, ImageBlob, ImageOccurrences, ImageStore, intern_images
 from miles.utils.processing_utils import call_processor, extract_multimodal_train_inputs, load_processor
 
 logger = logging.getLogger(__name__)
@@ -84,59 +84,59 @@ class ImageTokenCounter:
         self.processor_settings = processor_settings
         self._counts: dict[str, int] = {}
 
-    def count(self, stored: StoredImage) -> int:
-        cached = self._counts.get(stored.image_id)
+    def count(self, blob: ImageBlob) -> int:
+        cached = self._counts.get(blob.image_id)
         if cached is not None:
             return cached
-        count = _count_from_size(self.processor, stored)
-        self._counts[stored.image_id] = count
+        count = _count_from_size(self.processor, blob)
+        self._counts[blob.image_id] = count
         return count
 
-    def count_all(self, stored_images: Sequence[StoredImage]) -> list[int]:
-        return [self.count(stored) for stored in stored_images]
+    def count_all(self, blobs: Sequence[ImageBlob]) -> list[int]:
+        return [self.count(blob) for blob in blobs]
 
 
-def _count_from_size(processor: Any, stored: StoredImage) -> int:
+def _count_from_size(processor: Any, blob: ImageBlob) -> int:
     """How many placeholder tokens this image expands into, read from its header."""
     from io import BytesIO
 
     from PIL import Image
 
-    with Image.open(BytesIO(stored.data)) as handle:
+    with Image.open(BytesIO(blob.data)) as handle:
         size = (handle.height, handle.width)
     counts = processor._get_num_multimodal_tokens(image_sizes=[size]).num_image_tokens
     count = int(counts[0])
     if count <= 0:
-        raise ValueError(f"{stored.image_id} ({size[1]}x{size[0]}) expands into {count} tokens")
+        raise ValueError(f"{blob.image_id} ({size[1]}x{size[0]}) expands into {count} tokens")
     return count
 
 
-def process_image(processor: Any, stored: StoredImage, processor_settings: ImageProcessorSettings) -> ProcessedImage:
+def process_image(processor: Any, blob: ImageBlob, processor_settings: ImageProcessorSettings) -> ProcessedImage:
     """Run the processor over one image's bytes, with its placeholder as the text."""
     from io import BytesIO
 
     from PIL import Image
 
-    with Image.open(BytesIO(stored.data)) as handle:
+    with Image.open(BytesIO(blob.data)) as handle:
         image = handle.convert("RGB")
     output = call_processor(processor, processor_settings.image_token, {"images": [image]})
     train_inputs = extract_multimodal_train_inputs(output)
     if not train_inputs or GRID_KEY not in train_inputs:
         raise ValueError(
-            f"processor produced no {GRID_KEY} for {stored.image_id}; "
+            f"processor produced no {GRID_KEY} for {blob.image_id}; "
             f"keys={sorted(train_inputs or {})} — this model is not supported by the session image path"
         )
-    _assert_tensor_values(train_inputs, stored.image_id)
+    _assert_tensor_values(train_inputs, blob.image_id)
     grid = train_inputs[GRID_KEY]
     if tuple(grid.shape) != (1, 3):
-        raise ValueError(f"expected one {GRID_KEY} row for {stored.image_id}, got shape {tuple(grid.shape)}")
+        raise ValueError(f"expected one {GRID_KEY} row for {blob.image_id}, got shape {tuple(grid.shape)}")
     token_count = int(torch.prod(grid, dim=-1).sum().item()) // (processor_settings.merge_size**2)
     return ProcessedImage(train_inputs=train_inputs, token_count=token_count)
 
 
 def process_images(
     processor: Any,
-    stored_images: Sequence[StoredImage],
+    blobs: Sequence[ImageBlob],
     processor_settings: ImageProcessorSettings,
     expected_counts: Sequence[int],
 ) -> list[ProcessedImage]:
@@ -145,11 +145,11 @@ def process_images(
     A disagreement means the pixels no longer match the token span they are bound
     to, which is the one failure that would silently train on the wrong image.
     """
-    processed = [process_image(processor, stored, processor_settings) for stored in stored_images]
+    processed = [process_image(processor, blob, processor_settings) for blob in blobs]
     for index, (image, expected) in enumerate(zip(processed, expected_counts, strict=True)):
         if image.token_count != expected:
             raise ValueError(
-                f"image {index} ({stored_images[index].image_id}) processes to {image.token_count} tokens but "
+                f"image {index} ({blobs[index].image_id}) processes to {image.token_count} tokens but "
                 f"serving laid out {expected}; grid={image.grid.tolist()}"
             )
     return processed
@@ -186,7 +186,7 @@ def expand_input_ids(ids: Sequence[int], counts: Sequence[int], placeholder_id: 
 
 
 def assert_engine_expansion_matches(
-    effective: Sequence[int] | None, expected_ids: list[int], images: PromptImages, counts: list[int]
+    effective: Sequence[int] | None, expected_ids: list[int], images: ImageOccurrences, counts: list[int]
 ) -> None:
     """Proves the token layout and grid inference consumed, not its pixels, which the startup check covers."""
     if effective is None:
@@ -320,8 +320,8 @@ class SessionImageProcessor:
         return {"processor": self.processor_settings.to_dict(), "engine": self.engine_settings.to_dict()}
 
     def compute_pixels(self, image_ids: list[str], counts: list[int], images: "SessionImages") -> list[ProcessedImage]:
-        stored = [images.store.get(image_id) for image_id in image_ids]
-        return process_images(self.hf_processor, stored, self.processor_settings, counts)
+        blobs = [images.store.get(image_id) for image_id in image_ids]
+        return process_images(self.hf_processor, blobs, self.processor_settings, counts)
 
 
 @dataclass
@@ -331,14 +331,14 @@ class SessionImages:
     token_counter: ImageTokenCounter
     store: ImageStore = field(default_factory=ImageStore)
 
-    def ingest(self, messages: list[dict[str, Any]]) -> tuple[PromptImages, list[int]]:
+    def ingest(self, messages: list[dict[str, Any]]) -> tuple[ImageOccurrences, list[int]]:
         """Store a request's images and say how many tokens each expands into."""
-        images = extract_prompt_images(messages, self.store)
-        if not images.occurrences:
+        images = intern_images(messages, self.store)
+        if not images.image_ids:
             return NO_IMAGES, []
         return images, self.counts_for(images)
 
-    def counts_for(self, images: PromptImages) -> list[int]:
+    def counts_for(self, images: ImageOccurrences) -> list[int]:
         return self.token_counter.count_all([self.store.get(image_id) for image_id in images.image_ids])
 
 

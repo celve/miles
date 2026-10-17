@@ -137,7 +137,7 @@ def _expanded_path(
     weight-version arithmetic describes the real sequence with no index remapping.
     """
     records = [node.record for node in path]
-    if registry.image_processor is None or state.images is None or not leaf.images.occurrences:
+    if registry.image_processor is None or state.session_images is None or not leaf.images.image_ids:
         return records, leaf.token_ids, []
     placeholder_id = registry.image_processor.placeholder_id
     expanded_records = [
@@ -146,14 +146,14 @@ def _expanded_path(
                 "request": {
                     **node.record.request,
                     "input_ids": expand_input_ids(
-                        node.record.request["input_ids"], state.images.counts_for(node.images), placeholder_id
+                        node.record.request["input_ids"], state.session_images.counts_for(node.images), placeholder_id
                     ),
                 }
             }
         )
         for node in path
     ]
-    leaf_counts = state.images.counts_for(leaf.images)
+    leaf_counts = state.session_images.counts_for(leaf.images)
     return expanded_records, expand_input_ids(leaf.token_ids, leaf_counts, placeholder_id), leaf_counts
 
 
@@ -173,7 +173,7 @@ def _add_pixels_or_drop(
     image_processor = registry.image_processor
     retained = (
         retained_image_count(sample.tokens, leaf_counts, image_processor.placeholder_id)
-        if leaf_counts and state.images is not None
+        if leaf_counts and state.session_images is not None
         else 0
     )
     if retained == 0:
@@ -186,7 +186,7 @@ def _add_pixels_or_drop(
             return False
         return True
     processed = image_processor.compute_pixels(
-        list(leaf.images.image_ids[:retained]), leaf_counts[:retained], state.images
+        list(leaf.images.image_ids[:retained]), leaf_counts[:retained], state.session_images
     )
     sample.multimodal_train_inputs = merge_train_inputs(processed)
     return True

@@ -28,7 +28,7 @@ from typing import Any
 from miles.rollout.session.config import SessionServerConfig
 from miles.rollout.session.errors import MessageValidationError, TokenizationError, TruncatedGenerationError
 from miles.rollout.session.images.processing import SessionImageProcessor, SessionImages, placeholder_runs
-from miles.rollout.session.images.store import NO_IMAGES, PromptImages
+from miles.rollout.session.images.store import NO_IMAGES, ImageOccurrences
 from miles.rollout.session.linear_trajectory import SessionRegistry, assert_pretokenized_prefix
 from miles.rollout.session.request_args import PreparedChatRequest, prepare_chat_request
 from miles.rollout.session.types import SessionRecord
@@ -56,7 +56,7 @@ class SessionStateV2:
     sampling_support_replay: bool = False
     extra_key: str | None = None
     # This session's stored image bytes and token counts; None on a text-only run.
-    images: SessionImages | None = None
+    session_images: SessionImages | None = None
 
     def latest(self) -> TrajectoryNode | None:
         """The most recently committed generation (always a leaf), or ``None``
@@ -116,8 +116,8 @@ def prepare_token_ids_and_request_args(
         sampling_defaults=state.sampling_defaults,
         sampling_support_replay=state.sampling_support_replay,
     )
-    if image_processor is not None and state.images is not None:
-        prepared.images, prepared.image_token_counts = state.images.ingest(request_messages)
+    if image_processor is not None and state.session_images is not None:
+        prepared.images, prepared.image_token_counts = state.session_images.ingest(request_messages)
         _validate_images_against_parent(parent, prepared.images)
     prepared.body["input_ids"] = _render_token_ids(
         parent, request_messages, template_args=prepared.template_args, tito_tokenizer=tito_tokenizer
@@ -127,7 +127,7 @@ def prepare_token_ids_and_request_args(
     return prepared, parent
 
 
-def _validate_images_against_parent(parent: TrajectoryNode | None, images: PromptImages) -> None:
+def _validate_images_against_parent(parent: TrajectoryNode | None, images: ImageOccurrences) -> None:
     """A continuation must keep every image its parent's prompt already carried.
 
     The message matcher decided this request extends the parent; if the images
@@ -220,7 +220,7 @@ def commit_generation(
     response_id: str,
     finish_reason: str,
     turn_args: dict[str, Any] | None = None,
-    images: PromptImages = NO_IMAGES,
+    images: ImageOccurrences = NO_IMAGES,
 ) -> TrajectoryNode:
     """Validate and append one generation under *parent* (the request's attach
     node). Prefix validation is byte-identical to the pre-tree checkpoint check.
@@ -287,7 +287,7 @@ class SessionRegistryV2(SessionRegistry):
             sampling_defaults=dict(sampling_defaults or {}),
             sampling_support_replay=sampling_support_replay,
             extra_key=extra_key,
-            images=self.image_processor.new_session_images() if self.image_processor is not None else None,
+            session_images=self.image_processor.new_session_images() if self.image_processor is not None else None,
         )
         return session_id
 

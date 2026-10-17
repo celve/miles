@@ -16,7 +16,7 @@ from miles.rollout.session.images.processing import (
     placeholder_runs,
     retained_image_count,
 )
-from miles.rollout.session.images.store import NO_IMAGES, ImageStore, PromptImages, extract_prompt_images
+from miles.rollout.session.images.store import NO_IMAGES, ImageOccurrences, ImageStore, intern_images
 
 PAD = 151655
 
@@ -39,52 +39,46 @@ def user(*parts) -> dict:
     return {"role": "user", "content": list(parts)}
 
 
-class TestMediaArena:
+class TestImageStore:
     def test_identity_is_the_content_hash(self):
         payload = png_bytes(8, 8, (1, 2, 3))
-        stored = ImageStore().add(payload, "image/png")
-        assert stored.image_id == f"sha256:{hashlib.sha256(payload).hexdigest()}"
+        blob = ImageStore().add(payload)
+        assert blob.image_id == f"sha256:{hashlib.sha256(payload).hexdigest()}"
 
     def test_identical_bytes_intern_once(self):
         store = ImageStore()
         payload = png_bytes(8, 8, (1, 2, 3))
-        assert store.add(payload, "image/png") is store.add(payload, "image/png")
+        assert store.add(payload) is store.add(payload)
         assert len(store) == 1
 
     def test_same_size_different_pixels_are_different_images(self):
         store = ImageStore()
-        first = store.add(png_bytes(40, 40, (0, 0, 0)), "image/png")
-        second = store.add(png_bytes(40, 40, (255, 255, 255)), "image/png")
+        first = store.add(png_bytes(40, 40, (0, 0, 0)))
+        second = store.add(png_bytes(40, 40, (255, 255, 255)))
         assert first.image_id != second.image_id
         assert len(store) == 2
 
-    def test_data_url_round_trips(self):
-        payload = png_bytes(8, 8, (4, 5, 6))
-        stored = ImageStore().add(payload, "image/png")
-        assert stored.to_data_url() == data_url(payload)
 
-
-class TestExtraction:
-    def test_occurrences_keep_prompt_order_and_location(self):
+class TestInterning:
+    def test_occurrences_keep_prompt_order(self):
         store = ImageStore()
         first, second = png_bytes(8, 8, (1, 1, 1)), png_bytes(8, 8, (2, 2, 2))
-        images = extract_prompt_images(
+        images = intern_images(
             [
                 {"role": "system", "content": "be helpful"},
                 user(image_part(first), {"type": "text", "text": "and"}, image_part(second)),
             ],
             store,
         )
-        assert [(o.message_index, o.part_index) for o in images.occurrences] == [(1, 0), (1, 2)]
         assert images.image_ids == (
             f"sha256:{hashlib.sha256(first).hexdigest()}",
             f"sha256:{hashlib.sha256(second).hexdigest()}",
         )
 
-    def test_a_repeated_image_stays_two_occurrences_of_one_asset(self):
+    def test_a_repeated_image_stays_two_occurrences_of_one_blob(self):
         store = ImageStore()
         payload = png_bytes(8, 8, (7, 7, 7))
-        images = extract_prompt_images([user(image_part(payload), image_part(payload))], store)
+        images = intern_images([user(image_part(payload), image_part(payload))], store)
         assert len(images) == 2
         assert images.image_ids[0] == images.image_ids[1]
         assert len(store) == 1
@@ -92,31 +86,31 @@ class TestExtraction:
     def test_reordering_changes_the_occurrence_sequence(self):
         store = ImageStore()
         first, second = png_bytes(8, 8, (1, 1, 1)), png_bytes(8, 8, (2, 2, 2))
-        forward = extract_prompt_images([user(image_part(first), image_part(second))], store)
-        reverse = extract_prompt_images([user(image_part(second), image_part(first))], store)
+        forward = intern_images([user(image_part(first), image_part(second))], store)
+        reverse = intern_images([user(image_part(second), image_part(first))], store)
         assert forward.image_ids != reverse.image_ids
 
-    def test_string_content_and_text_parts_yield_no_media(self):
+    def test_string_content_and_text_parts_yield_no_images(self):
         store = ImageStore()
         messages = [{"role": "user", "content": "plain"}, user({"type": "text", "text": "parts"})]
-        assert extract_prompt_images(messages, store) == NO_IMAGES
+        assert intern_images(messages, store) == NO_IMAGES
 
     def test_a_remote_url_is_refused_because_it_is_not_immutable_content(self):
         with pytest.raises(MessageValidationError, match="inline base64 data URL"):
-            extract_prompt_images(
+            intern_images(
                 [user({"type": "image_url", "image_url": {"url": "https://example.test/a.png"}})], ImageStore()
             )
 
     def test_video_and_audio_parts_are_refused_rather_than_dropped(self):
         for part_type in ("video_url", "input_audio"):
             with pytest.raises(MessageValidationError, match="images only"):
-                extract_prompt_images([user({"type": part_type})], ImageStore())
+                intern_images([user({"type": part_type})], ImageStore())
 
     def test_image_spellings_the_chat_route_does_not_attach_are_refused(self):
         """SGLang's chat request accepts only image_url, though the chat template renders these too."""
         for part_type in ("image", "input_image"):
             with pytest.raises(MessageValidationError, match="as an image_url part"):
-                extract_prompt_images(
+                intern_images(
                     [user({"type": part_type, "image_url": data_url(png_bytes(4, 4, (0, 0, 0)))})], ImageStore()
                 )
 
@@ -124,42 +118,42 @@ class TestExtraction:
         payload = png_bytes(8, 8, (1, 2, 3))
         part = image_part(payload)
         part["image_url"]["content_hash"] = "sha256:" + hashlib.sha256(payload).hexdigest().upper()
-        assert len(extract_prompt_images([user(part)], ImageStore())) == 1
+        assert len(intern_images([user(part)], ImageStore())) == 1
         part["image_url"]["content_hash"] = "sha256:" + hashlib.sha256(b"other").hexdigest()
         with pytest.raises(MessageValidationError, match="is not the SHA-256"):
-            extract_prompt_images([user(part)], ImageStore())
+            intern_images([user(part)], ImageStore())
 
     def test_undecodable_payload_is_refused(self):
         with pytest.raises(MessageValidationError, match="base64"):
-            extract_prompt_images(
+            intern_images(
                 [user({"type": "image_url", "image_url": {"url": "data:image/png;base64,!!!"}})], ImageStore()
             )
 
     def test_unsupported_mime_type_is_refused(self):
         with pytest.raises(MessageValidationError, match="unsupported image type"):
-            extract_prompt_images(
+            intern_images(
                 [user({"type": "image_url", "image_url": {"url": "data:image/svg+xml;base64,AAAA"}})], ImageStore()
             )
 
 
-class TestMediaPrefix:
+class TestOccurrencePrefix:
     def test_a_shorter_identical_sequence_is_a_prefix(self):
-        parent = PromptImages(occurrences=())
-        assert parent.is_prefix_of(PromptImages(occurrences=()))
+        parent = ImageOccurrences()
+        assert parent.is_prefix_of(ImageOccurrences())
 
     def test_appending_keeps_the_prefix_relation(self):
         store = ImageStore()
         first, second = png_bytes(8, 8, (1, 1, 1)), png_bytes(8, 8, (2, 2, 2))
-        parent = extract_prompt_images([user(image_part(first))], store)
-        child = extract_prompt_images([user(image_part(first), image_part(second))], store)
+        parent = intern_images([user(image_part(first))], store)
+        child = intern_images([user(image_part(first), image_part(second))], store)
         assert parent.is_prefix_of(child)
         assert not child.is_prefix_of(parent)
 
     def test_replacing_an_earlier_image_breaks_the_prefix_relation(self):
         store = ImageStore()
         first, second = png_bytes(8, 8, (1, 1, 1)), png_bytes(8, 8, (2, 2, 2))
-        parent = extract_prompt_images([user(image_part(first))], store)
-        rewritten = extract_prompt_images([user(image_part(second))], store)
+        parent = intern_images([user(image_part(first))], store)
+        rewritten = intern_images([user(image_part(second))], store)
         assert not parent.is_prefix_of(rewritten)
 
 
