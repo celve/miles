@@ -2397,6 +2397,12 @@ class TestTitoFixedTemplateConfiguration:
             "enable_thinking": True,
         }
 
+    def test_qwen3_vl_uses_native_template(self):
+        args = self._parse(["--use-session-server", "--tito-model", "qwen3_vl"])
+        miles_validate_args(args)
+        assert args.chat_template_path is None
+        assert args.apply_chat_template_kwargs == {}
+
     def test_glm53_fixed_thinking_overrides_launch_value(self):
         args = self._parse(
             [

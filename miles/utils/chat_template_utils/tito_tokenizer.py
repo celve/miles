@@ -475,6 +475,12 @@ class QwenNextTITOTokenizer(Qwen3TITOTokenizer):
     )
 
 
+class Qwen3VLTITOTokenizer(Qwen3TITOTokenizer):
+    """Qwen3-VL Instruct: the Qwen3 token boundary with the checkpoint's own template, which renders images."""
+
+    FIXED_TEMPLATE = FixedTemplate()
+
+
 # ---------------------------------------------------------------------------
 # GLM family implementation
 # ---------------------------------------------------------------------------
@@ -1077,6 +1083,7 @@ class TITOTokenizerType(StrEnum):
     QWEN38_SMALL = "qwen38small"
     QWEN4_EXP = "qwen4exp"
     QWENNEXT = "qwennext"
+    QWEN3_VL = "qwen3_vl"
     GLM47 = "glm47"
     GLM53 = "glm53"
     NEMOTRON3 = "nemotron3"
@@ -1105,6 +1112,8 @@ class TITOTokenizerType(StrEnum):
                 return Qwen38SmallTITOTokenizer
             case cls.QWENNEXT:
                 return QwenNextTITOTokenizer
+            case cls.QWEN3_VL:
+                return Qwen3VLTITOTokenizer
             case cls.GLM47:
                 return GLM47TITOTokenizer
             case cls.GLM53:
