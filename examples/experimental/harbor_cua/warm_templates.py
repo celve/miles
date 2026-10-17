@@ -35,10 +35,9 @@ def instance_ids(data_files: list[Path]) -> list[str]:
 
 
 async def warm_one(instance_id: str, *, tasks_dir: Path, trials_dir: Path, timeout_s: float) -> str:
+    from examples.experimental.harbor.harbor_agent_function import _environment_config, _task_path
     from harbor.models.trial.config import AgentConfig, TaskConfig, TrialConfig
     from harbor.trial.trial import Trial
-
-    from examples.experimental.harbor.harbor_agent_function import _environment_config, _task_path
 
     config = TrialConfig(
         task=TaskConfig(path=_task_path(tasks_dir, instance_id)),

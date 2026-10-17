@@ -13,9 +13,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
-from PIL import Image
-
 from examples.experimental.harbor_cua.calls import AssetArena, MediaOccurrence
+from PIL import Image
 
 IMAGE_PAD_TOKEN = "<|image_pad|>"
 VISION_START_TOKEN = "<|vision_start|>"

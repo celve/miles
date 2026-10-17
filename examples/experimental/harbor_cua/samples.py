@@ -18,12 +18,9 @@ import copy
 from dataclasses import dataclass, field
 
 from examples.experimental.harbor_cua.calls import RolloutRecord
-from examples.experimental.harbor_cua.media import (
-    MediaProcessor,
-    build_train_inputs,
-    verify_occurrence_runs,
-)
+from examples.experimental.harbor_cua.media import MediaProcessor, build_train_inputs, verify_occurrence_runs
 from examples.experimental.harbor_cua.segments import BoundaryEvent, Segment, Segmentation
+
 from miles.utils.types import Sample, WeightVersionsPerCall
 
 

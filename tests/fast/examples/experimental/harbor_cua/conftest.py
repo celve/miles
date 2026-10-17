@@ -9,9 +9,8 @@ from typing import Any
 
 import pytest
 import torch
-from PIL import Image
-
 from examples.experimental.harbor_cua.calls import AssetArena, RecordedCall, RolloutRecord
+from PIL import Image
 
 
 def _stand_in_for_base_types() -> None:

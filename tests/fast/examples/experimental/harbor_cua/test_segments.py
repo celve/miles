@@ -2,7 +2,6 @@
 
 import pytest
 import torch
-
 from examples.experimental.harbor_cua.calls import CallEvidenceError, RecordedCall
 from examples.experimental.harbor_cua.media import (
     MediaMismatchError,
@@ -13,20 +12,16 @@ from examples.experimental.harbor_cua.media import (
 )
 from examples.experimental.harbor_cua.samples import build_samples
 from examples.experimental.harbor_cua.segments import (
+    BOUNDARY_AFTER_SKIP,
     BOUNDARY_FIRST_CALL,
     BOUNDARY_MEDIA,
-    BOUNDARY_AFTER_SKIP,
     BOUNDARY_RETRY,
     BOUNDARY_TOKENS,
     segment_calls,
 )
+from tests.fast.examples.experimental.harbor_cua.conftest import IMAGE_PAD_ID, TOKENS_PER_IMAGE, image_block, png_bytes
+
 from miles.utils.types import Sample
-from tests.fast.examples.experimental.harbor_cua.conftest import (
-    IMAGE_PAD_ID,
-    TOKENS_PER_IMAGE,
-    image_block,
-    png_bytes,
-)
 
 
 def _append_only(episode, turns=4):
@@ -55,7 +50,9 @@ def test_mask_and_logprobs_cover_only_sampled_tokens(episode):
     assert len(segment.loss_mask) == segment.response_length
     assert len(segment.logprobs) == segment.response_length
     assert segment.sampled_token_count == sum(len(call.output_token_ids) for call in record.calls)
-    sampled = [token for token, mask in zip(segment.tokens[segment.response_start :], segment.loss_mask, strict=True) if mask]
+    sampled = [
+        token for token, mask in zip(segment.tokens[segment.response_start :], segment.loss_mask, strict=True) if mask
+    ]
     assert sampled == [token for call in record.calls for token in call.output_token_ids]
     assert all(logprob == 0.0 for logprob, mask in zip(segment.logprobs, segment.loss_mask, strict=True) if not mask)
 
@@ -327,9 +324,7 @@ def test_weight_versions_land_at_absolute_output_positions(episode):
         record=record,
         segmentation=segment_calls(record.calls),
         media=MediaProcessor(
-            __import__("types").SimpleNamespace(
-                image_processor=_grid_processor(), tokenizer=_decoding_tokenizer()
-            )
+            __import__("types").SimpleNamespace(image_processor=_grid_processor(), tokenizer=_decoding_tokenizer())
         ),
         reward=0.5,
         rollout_id=1,

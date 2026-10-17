@@ -41,7 +41,9 @@ class HarborCuaOptions:
 
     def __post_init__(self) -> None:
         if self.write_off_mode not in WRITE_OFF_MODES:
-            raise ValueError(f"--harbor-cua-write-off-mode must be one of {WRITE_OFF_MODES}, got {self.write_off_mode!r}")
+            raise ValueError(
+                f"--harbor-cua-write-off-mode must be one of {WRITE_OFF_MODES}, got {self.write_off_mode!r}"
+            )
         if self.max_turns < 1:
             raise ValueError(f"--harbor-cua-max-turns must be positive, got {self.max_turns}")
         if self.max_sandboxes < 1:
@@ -69,7 +71,5 @@ def add_arguments(parser) -> None:
     group.add_argument("--harbor-cua-max-sandboxes", type=int, default=defaults.max_sandboxes)
     group.add_argument("--harbor-cua-max-sample-tokens", type=int, default=defaults.max_sample_tokens)
     group.add_argument("--harbor-cua-call-timeout-s", type=float, default=defaults.call_timeout_s)
-    group.add_argument(
-        "--harbor-cua-write-off-mode", choices=list(WRITE_OFF_MODES), default=defaults.write_off_mode
-    )
+    group.add_argument("--harbor-cua-write-off-mode", choices=list(WRITE_OFF_MODES), default=defaults.write_off_mode)
     group.add_argument("--harbor-cua-upstream", type=str, default=defaults.upstream)

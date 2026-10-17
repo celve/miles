@@ -29,8 +29,6 @@ import pathlib
 from dataclasses import dataclass, field
 
 import httpx
-from PIL import Image, ImageDraw
-
 from examples.experimental.harbor_cua.media import (
     MediaProcessor,
     first_difference,
@@ -41,6 +39,8 @@ from examples.experimental.harbor_cua.media import (
 from examples.experimental.harbor_cua.recorder import CallRecorder
 from examples.experimental.harbor_cua.samples import build_samples
 from examples.experimental.harbor_cua.segments import segment_calls
+from PIL import Image, ImageDraw
+
 from miles.utils.processing_utils import load_processor, load_tokenizer
 from miles.utils.types import Sample
 
@@ -65,7 +65,9 @@ def screenshot(index: int, size: tuple[int, int] = (1024, 900)) -> bytes:
     """A distinct frame per turn, so two occurrences never share bytes by accident."""
     image = Image.new("RGB", size, (240, 240 - index * 7, 245))
     draw = ImageDraw.Draw(image)
-    draw.rectangle([40 + index * 30, 60 + index * 20, 240 + index * 30, 210 + index * 20], fill=(200, 40 + index * 20, 40))
+    draw.rectangle(
+        [40 + index * 30, 60 + index * 20, 240 + index * 30, 210 + index * 20], fill=(200, 40 + index * 20, 40)
+    )
     draw.text((60, 760), f"frame {index}", fill=(10, 10, 10))
     buffer = io.BytesIO()
     image.save(buffer, format="WEBP", quality=80)
@@ -265,9 +267,7 @@ def _check_segments(checks: Checks, record, media, tokenizer) -> None:
     )
     checks.record(
         "samples_valid",
-        all(
-            len(s.loss_mask) == s.response_length and len(s.rollout_log_probs) == s.response_length for s in samples
-        ),
+        all(len(s.loss_mask) == s.response_length and len(s.rollout_log_probs) == s.response_length for s in samples),
         {"samples": len(samples), "stats": stats.as_metadata()},
     )
     for sample in samples:
