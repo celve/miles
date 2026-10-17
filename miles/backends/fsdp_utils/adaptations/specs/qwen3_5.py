@@ -2,9 +2,9 @@
 own padding-free kwargs, which the vision tower must not see; Qwen3.5-MoE adds the routing-replay hook."""
 
 from miles.backends.fsdp_utils.adaptations.arch_adapter import ArchAdapter
+from miles.backends.fsdp_utils.adaptations.mrope import MropePositionIds
 from miles.backends.fsdp_utils.adaptations.packing import hf_packing_kwargs
 from miles.backends.fsdp_utils.adaptations.routing_replay import RoutingReplayAdapter
-from miles.backends.fsdp_utils.adaptations.mrope import MropePositionIds
 from miles.backends.fsdp_utils.models.replay_routers import install_qwen3_router_replay
 
 

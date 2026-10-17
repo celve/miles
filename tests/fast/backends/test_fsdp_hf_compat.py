@@ -735,7 +735,6 @@ def test_qwen3_5_takes_the_same_mrope_fix(model_type):
     assert (ramped.logits - reference).abs().max() > 1e-3
 
 
-
 _TINY_VIDEO_VISION = dict(
     depth=1, hidden_size=32, intermediate_size=32, num_heads=4, patch_size=14, temporal_patch_size=2,
     spatial_merge_size=1, in_channels=3, out_hidden_size=32,
