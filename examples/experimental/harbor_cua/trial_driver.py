@@ -180,6 +180,59 @@ async def run_trial(
     )
 
 
+async def run_remote_trial(
+    *,
+    runner_url: str,
+    instance_id: str,
+    api_base: str,
+    sampling_params: dict[str, Any],
+    max_steps: int,
+    history_n: int,
+    timeout_s: float,
+) -> TrialOutcome:
+    """An OSWorld trial run by ``osworld_service.py``, judged by the same function as a local one."""
+    import httpx
+
+    body = {
+        "instance_id": instance_id,
+        "api_base": api_base,
+        "model_name": f"openai/{os.getenv('AGENT_MODEL_NAME', 'model')}",
+        "temperature": float(sampling_params.get("temperature", 1.0)),
+        "top_p": float(sampling_params.get("top_p", 1.0)),
+        "top_k": sampling_params.get("top_k"),
+        "max_tokens": int(sampling_params.get("max_new_tokens") or sampling_params.get("max_tokens") or 2048),
+        "seed": sampling_params.get("sampling_seed", sampling_params.get("seed")),
+        "max_steps": max_steps,
+        "history_n": history_n,
+        "timeout_s": timeout_s,
+    }
+    logger.info("harbor cua osworld trial %s via %s posting to %s", instance_id, runner_url, api_base)
+    try:
+        async with httpx.AsyncClient(timeout=timeout_s + 120) as client:
+            response = await client.post(f"{runner_url.rstrip('/')}/trials", json=body)
+            response.raise_for_status()
+            payload = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.error("harbor cua osworld runner failed for %s: %s", instance_id, exc)
+        return TrialOutcome(reward=0.0, exit_status="AgentError", metadata={"runner_error": str(exc)}, trial_dir=None)
+    if "trial_result" not in payload:
+        return TrialOutcome(
+            reward=0.0,
+            exit_status=str(payload.get("exit_status", "AgentError")),
+            metadata={"runner_error": payload.get("error")},
+            trial_dir=payload.get("trial_dir"),
+        )
+    from harbor.models.trial.result import TrialResult
+
+    verdict = trial_result_to_metadata(TrialResult.model_validate(payload["trial_result"]))
+    return TrialOutcome(
+        reward=float(verdict["reward"]),
+        exit_status=str(verdict["exit_status"]),
+        metadata=verdict,
+        trial_dir=payload.get("trial_dir"),
+    )
+
+
 def _trial_dir(trial) -> str | None:
     paths = getattr(trial, "paths", None)
     return str(paths.trial_dir) if paths is not None else None

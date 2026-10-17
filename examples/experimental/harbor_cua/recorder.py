@@ -174,8 +174,12 @@ def _refuse(record: RolloutRecord, reason: str, *, compactor: bool) -> None:
 class CallRecorder:
     """Keeps one ``RolloutRecord`` per open rollout, keyed by its URL token."""
 
-    def __init__(self, *, upstream: str, timeout: float = 1800.0) -> None:
+    def __init__(
+        self, *, upstream: str, timeout: float = 1800.0, host: str = "127.0.0.1", advertise_host: str = ""
+    ) -> None:
         self._upstream = upstream.rstrip("/")
+        self._host = host
+        self._advertise_host = advertise_host or host
         self._client = httpx.AsyncClient(base_url=self._upstream, timeout=timeout)
         self._records: dict[str, RolloutRecord] = {}
         self._app = self._build_app()
@@ -186,7 +190,7 @@ class CallRecorder:
     async def start(self) -> None:
         if self._server is not None:
             return
-        config = uvicorn.Config(self._app, host="127.0.0.1", port=0, log_level="info", access_log=True)
+        config = uvicorn.Config(self._app, host=self._host, port=0, log_level="info", access_log=True)
         self._server = uvicorn.Server(config)
         self._task = asyncio.create_task(self._server.serve())
         for _ in range(600):
@@ -217,7 +221,7 @@ class CallRecorder:
         return token
 
     def base_url(self, token: str) -> str:
-        return f"http://127.0.0.1:{self.port}/r/{token}/v1"
+        return f"http://{self._advertise_host}:{self.port}/r/{token}/v1"
 
     def take(self, token: str) -> RolloutRecord:
         return self._records.pop(token)

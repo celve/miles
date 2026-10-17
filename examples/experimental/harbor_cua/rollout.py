@@ -28,7 +28,7 @@ from examples.experimental.harbor_cua.options import (
 from examples.experimental.harbor_cua.recorder import CallRecorder, RecorderError
 from examples.experimental.harbor_cua.samples import build_samples
 from examples.experimental.harbor_cua.segments import segment_calls
-from examples.experimental.harbor_cua.trial_driver import TrialOutcome, run_trial
+from examples.experimental.harbor_cua.trial_driver import TrialOutcome, run_remote_trial, run_trial
 
 from miles.rollout.agentic.rollout_limits import rollout_semaphore
 from miles.utils.types import Sample
@@ -64,13 +64,24 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
     token = recorder.open_rollout()
     try:
         async with rollout_semaphore(SANDBOX_LIMIT_NAME, options.max_sandboxes):
-            outcome = await run_trial(
-                instance_id=str(instance_id),
-                api_base=recorder.base_url(token),
-                session_id=token,
-                sampling_params=input.sampling_params,
-                max_turns=options.max_turns,
-            )
+            if options.runner_url:
+                outcome = await run_remote_trial(
+                    runner_url=options.runner_url,
+                    instance_id=str(instance_id),
+                    api_base=recorder.base_url(token),
+                    sampling_params=input.sampling_params,
+                    max_steps=options.max_turns,
+                    history_n=options.history_n,
+                    timeout_s=options.trial_timeout_s,
+                )
+            else:
+                outcome = await run_trial(
+                    instance_id=str(instance_id),
+                    api_base=recorder.base_url(token),
+                    session_id=token,
+                    sampling_params=input.sampling_params,
+                    max_turns=options.max_turns,
+                )
     finally:
         record = recorder.take(token)
 
@@ -162,19 +173,26 @@ async def _resolve_upstream(args, options: HarborCuaOptions) -> str:
 
 
 async def _shared_recorder(args, options: HarborCuaOptions) -> CallRecorder:
-    """One recorder per rollout process, bound to loopback.
+    """One recorder per rollout process, on loopback unless a remote runner's agent must reach it.
 
     ``computer-1`` makes its model calls from this process rather than from the
-    sandbox, so the sandbox needs no route back here and the proxy never has to
-    be reachable from outside.
+    sandbox, so loopback suffices for it; an OSWorld agent calls from the runner's
+    machine.
     """
     global _recorder
     async with _recorder_lock:
         if _recorder is None:
             upstream = await _resolve_upstream(args, options)
-            recorder = CallRecorder(upstream=upstream, timeout=options.call_timeout_s)
+            recorder = CallRecorder(
+                upstream=upstream,
+                timeout=options.call_timeout_s,
+                host=options.recorder_host,
+                advertise_host=options.recorder_advertise_host,
+            )
             await recorder.start()
-            logger.info("harbor cua recorder listening on 127.0.0.1:%d for %s", recorder.port, upstream)
+            logger.info(
+                "harbor cua recorder listening on %s:%d for %s", options.recorder_host, recorder.port, upstream
+            )
             _recorder = recorder
         return _recorder
 

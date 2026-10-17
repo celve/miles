@@ -38,6 +38,14 @@ class HarborCuaOptions:
     # exact evidence and refuses the call. ``auto`` asks the router for one of its
     # engines and forwards there instead; an explicit URL names one directly.
     upstream: str = UPSTREAM_AUTO
+    # Empty runs ``computer-1`` in this process; a URL asks ``osworld_service.py`` on the
+    # machine with /dev/kvm to run each OSWorld trial, whose agent then calls the recorder
+    # from there, so the recorder must bind an address that machine can reach.
+    runner_url: str = ""
+    recorder_host: str = "127.0.0.1"
+    recorder_advertise_host: str = ""
+    history_n: int = 4
+    trial_timeout_s: float = 3600.0
 
     def __post_init__(self) -> None:
         if self.write_off_mode not in WRITE_OFF_MODES:
@@ -48,6 +56,11 @@ class HarborCuaOptions:
             raise ValueError(f"--harbor-cua-max-turns must be positive, got {self.max_turns}")
         if self.max_sandboxes < 1:
             raise ValueError(f"--harbor-cua-max-sandboxes must be positive, got {self.max_sandboxes}")
+        if self.runner_url and (self.recorder_advertise_host or self.recorder_host) in ("127.0.0.1", "localhost"):
+            raise ValueError(
+                "--harbor-cua-runner-url needs a recorder the runner's machine can reach: "
+                "set --harbor-cua-recorder-host and --harbor-cua-recorder-advertise-host"
+            )
 
     @classmethod
     def from_args(cls, args) -> HarborCuaOptions:
@@ -73,3 +86,8 @@ def add_arguments(parser) -> None:
     group.add_argument("--harbor-cua-call-timeout-s", type=float, default=defaults.call_timeout_s)
     group.add_argument("--harbor-cua-write-off-mode", choices=list(WRITE_OFF_MODES), default=defaults.write_off_mode)
     group.add_argument("--harbor-cua-upstream", type=str, default=defaults.upstream)
+    group.add_argument("--harbor-cua-runner-url", type=str, default=defaults.runner_url)
+    group.add_argument("--harbor-cua-recorder-host", type=str, default=defaults.recorder_host)
+    group.add_argument("--harbor-cua-recorder-advertise-host", type=str, default=defaults.recorder_advertise_host)
+    group.add_argument("--harbor-cua-history-n", type=int, default=defaults.history_n)
+    group.add_argument("--harbor-cua-trial-timeout-s", type=float, default=defaults.trial_timeout_s)
