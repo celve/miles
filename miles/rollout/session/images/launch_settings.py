@@ -3,6 +3,7 @@ from typing import Any
 from miles.backends.sglang_utils.sglang_api_client import WorkerType
 from miles.backends.sglang_utils.sglang_config import resolve_sglang_config
 from miles.rollout.session.config import SESSION_IMAGE_SUPPORT_OFF
+from miles.utils.chat_template_utils.tito_tokenizer import TITOTokenizerType
 
 # The engine launch settings that decide what an image becomes.
 ENGINE_LAUNCH_SETTING_FIELDS = (
@@ -31,6 +32,7 @@ def validate_session_image_args(args) -> None:
         )
     if not args.hf_checkpoint:
         raise ValueError(f"--session-image-support={support} requires --hf-checkpoint to load the processor")
+    check_session_tito_model(args.tito_model, support=support)
     replays = [
         flag
         for enabled, flag in (
@@ -46,6 +48,15 @@ def validate_session_image_args(args) -> None:
             "computed on the unexpanded render, so the two silently misalign"
         )
     args.session_image_engine_settings = resolve_engine_launch_settings(args)
+
+
+def check_session_tito_model(tito_model: str, *, support: str) -> None:
+    if tito_model != TITOTokenizerType.QWEN3_VL.value:
+        raise ValueError(
+            f"--session-image-support={support} requires --tito-model {TITOTokenizerType.QWEN3_VL.value}, got "
+            f"{tito_model!r}: 'default' drops the newline Qwen3-VL's template puts after every <|im_end|>, and "
+            "'qwen3' renders Qwen3's text template, which has no image parts"
+        )
 
 
 def resolve_engine_launch_settings(args) -> dict[str, Any] | None:

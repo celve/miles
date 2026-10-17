@@ -168,7 +168,10 @@ class ScriptedChatBackend:
         for choice_index in range(payload.get("n") or 1):
             choice = {
                 "index": choice_index,
-                "message": {"role": "assistant", "content": self.vlm.tokenizer.decode(output_ids)},
+                "message": {
+                    "role": "assistant",
+                    "content": self.vlm.tokenizer.decode(output_ids, skip_special_tokens=True),
+                },
                 "finish_reason": "stop",
                 "meta_info": {
                     "id": f"chat-{index}",
@@ -206,7 +209,7 @@ def image_server_args(engine: dict | None = None, **extra) -> dict[str, Any]:
         "hf_checkpoint": CHECKPOINT,
         "chat_template_path": None,
         "apply_chat_template_kwargs": None,
-        "tito_model": "default",
+        "tito_model": "qwen3_vl",
         "use_rollout_routing_replay": False,
         "use_rollout_indexer_replay": False,
         "use_sampling_support_replay": False,
@@ -342,6 +345,21 @@ class TestAppend:
             own = expected_counts(vlm, [SHOT1, SHOT2])
             per_image = (torch.prod(grid, dim=-1) // (vlm.merge**2)).tolist()
             assert per_image == own
+
+
+class TestTemplate:
+    def test_turns_after_a_model_stop_match_the_checkpoints_template(self, vlm):
+        with image_router(vlm, ["clicked<|im_end|>", "done<|im_end|>"]) as env:
+            session_id = _create_session(env.url)
+            first = [user_turn(SHOT1, "step 1")]
+            assert chat(env, session_id, first).status_code == 200
+            second = first + [assistant("clicked"), user_turn(SHOT2, "step 2")]
+            assert chat(env, session_id, second).status_code == 200
+
+            im_end = vlm.tokenizer.convert_tokens_to_ids("<|im_end|>")
+            accumulated = env.backend.calls[1]["input_ids"]
+            assert vlm.tokenizer.decode(accumulated[accumulated.index(im_end) + 1]) == "\n"
+            assert collect(env.url, session_id)[0].metadata["tito_session_mismatch"] == []
 
 
 class TestRepeatedAndReordered:
@@ -534,6 +552,11 @@ class TestEngineSettings:
     def test_an_unsupported_engine_setting_refuses_to_start(self, vlm, override, message):
         with pytest.raises(ValueError, match=message):
             build_server(image_server_args(override), backend_url="http://127.0.0.1:9")
+
+    @pytest.mark.parametrize("tito_model", ["default", "qwen3"])
+    def test_another_tito_family_refuses_to_start(self, vlm, tito_model):
+        with pytest.raises(ValueError, match="requires --tito-model qwen3_vl"):
+            build_server(image_server_args(tito_model=tito_model), backend_url="http://127.0.0.1:9")
 
     def test_settings_that_state_nothing_refuse_to_start(self, vlm):
         with pytest.raises(ValueError, match="needs the policy engines' image settings"):

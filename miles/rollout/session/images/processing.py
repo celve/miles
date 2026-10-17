@@ -22,7 +22,7 @@ import torch
 
 from miles.rollout.session.config import SESSION_IMAGE_SUPPORT_OFF, SessionServerConfig
 from miles.rollout.session.errors import UpstreamResponseError
-from miles.rollout.session.images.launch_settings import check_engine_launch_settings
+from miles.rollout.session.images.launch_settings import check_engine_launch_settings, check_session_tito_model
 from miles.rollout.session.images.store import NO_IMAGES, ImageBlob, ImageOccurrences, ImageStore, intern_images
 from miles.utils.processing_utils import call_processor, extract_multimodal_train_inputs, load_processor
 
@@ -352,6 +352,7 @@ def build_session_image_processor(config: SessionServerConfig, tokenizer: Any) -
             "settings, which validate_session_image_args reads from the launch args"
         )
     # Checked again here because a config can also be built by hand, as scripts and tests do.
+    check_session_tito_model(config.tito_model, support=config.session_image_support)
     check_engine_launch_settings(config.session_image_engine_settings, checkpoint=config.hf_checkpoint)
     hf_processor = load_processor(config.hf_checkpoint, trust_remote_code=True)
     if hf_processor is None:

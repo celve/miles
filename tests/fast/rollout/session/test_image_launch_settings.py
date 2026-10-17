@@ -16,6 +16,7 @@ def _image_args(tmp_path=None, yaml_text: str | None = None, **overrides) -> Nam
     values = dict(
         session_image_support="qwen3_vl",
         use_session_server="v2",
+        tito_model="qwen3_vl",
         use_rollout_routing_replay=False,
         use_rollout_indexer_replay=False,
         rollout_external=False,
@@ -120,6 +121,11 @@ class TestSessionImageEngine:
         """It forces SGLang's 'pil' backend whatever image_processor_backend says."""
         with pytest.raises(ValueError, match="disable_fast_image_processor"):
             validate_session_image_args(_image_args(sglang_disable_fast_image_processor=True))
+
+    @pytest.mark.parametrize("tito_model", ["default", "qwen3"])
+    def test_another_tito_family_is_refused(self, tito_model):
+        with pytest.raises(ValueError, match="requires --tito-model qwen3_vl"):
+            validate_session_image_args(_image_args(tito_model=tito_model))
 
     def test_parsers_and_sampling_defaults_are_left_to_the_engines(self):
         args = _image_args(
