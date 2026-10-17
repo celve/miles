@@ -415,7 +415,7 @@ def _build_server_config(
         instance_id=f"bench-i{instance_idx}",
         use_session_server=bench_args.use_session_server,
         session_image_support="off",
-        session_image_engine_url=None,
+        session_image_engine=None,
         session_image_text_only_leaf="drop",
         session_message_matcher="strict",
         pause_generation_mode="in_place" if bench_args.incremental_r3 else "retract",

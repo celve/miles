@@ -138,8 +138,8 @@ def assert_effective_prompt_ids(
     This settles the token layout, and with it the grid and the image order, since
     the expanded length derives from the grid. It does **not** settle the pixel
     values behind those tokens: a decode or normalization override changes them
-    while every id stays identical, which is why the engine's own image
-    configuration is bound separately.
+    while every id stays identical, which is why the engines' image launch
+    settings are checked separately, at startup.
     """
     effective = response.get("prompt_token_ids")
     if effective is None:

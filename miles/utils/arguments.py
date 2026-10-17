@@ -2782,24 +2782,14 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="v2 only. Carry images through the session server so a screenshot harness can "
                 "train through the agent-function interface. 'off' (default) keeps the text-only "
                 "behavior and rejects image content. 'qwen3_vl' loads the checkpoint's processor, "
-                "sends image-bearing turns to the engine's native /generate route, and assembles "
+                "sends image-bearing turns to the router's native /generate route, and assembles "
                 "pixel_values / image_grid_thw per retained leaf. Requires --use-session-server v2 and "
                 "a checkpoint whose processor produces image grids; incompatible with the routing and "
-                "indexer replay side channels, whose per-token rows are sized on the expanded sequence.",
-            )
-            parser.add_argument(
-                "--session-image-engine-url",
-                type=str,
-                default=None,
-                help="v2 only, with --session-image-support. Declares the one inference engine image "
-                "turns are sent to, bypassing the router. The router picks a worker per request, so the "
-                "engine whose image preprocessing was checked need not be the one that serves a turn, "
-                "and nothing reachable through the backend proves which one will: a proxy forwards a "
-                "healthy worker's own metadata and may share its port. Required unless the backend "
-                "answers a recognized worker API (/list_workers or /workers) reporting exactly one "
-                "worker, which is then used directly. A backend with no recognized worker API, several "
-                "workers, or an unrecognized reply refuses image support until this names an engine; "
-                "point it at an engine, not a load balancer. Text turns always use the router.",
+                "indexer replay side channels, whose per-token rows are sized on the expanded sequence. "
+                "Checked at startup against the args Miles launches the policy engines with: every "
+                "engine group must serve --hf-checkpoint unpinned, with no mm_process_config, "
+                "image_processor_backend 'auto' and no 'auto' parser; external engines and "
+                "prefill/decode disaggregation are refused.",
             )
             parser.add_argument(
                 "--session-image-text-only-leaf",
@@ -3517,8 +3507,6 @@ def miles_validate_args(args):
                 f"--use-session-server v2 does not support {', '.join(unsupported)}; v2 returns list[Sample]"
             )
 
-    validate_session_image_args(args)
-
     if args.use_session_server and args.use_rollout_routing_replay and args.pause_generation_mode == "retract":
         logger.warning(
             "--use-session-server with --use-rollout-routing-replay and "
@@ -4217,6 +4205,9 @@ def miles_validate_args(args):
         raise ValueError("--mini-ft-controller-enable requires --api-server-port to be set (non-zero)")
 
     _validate_deploy_component(args)
+
+    # Last: it reads the derived engine topology (rollout_external, starts_inference_engines).
+    validate_session_image_args(args)
 
 
 def validate_skip_actor_forward_only(args) -> None:

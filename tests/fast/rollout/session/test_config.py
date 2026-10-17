@@ -4,8 +4,13 @@ from argparse import Namespace
 
 import pytest
 from pydantic import ValidationError
+from tests.fast.backends.sglang_utils.test_sglang_config import _make_args as _make_launch_args
 
-from miles.rollout.session.config import SessionServerConfig, compute_session_server_config
+from miles.rollout.session.config import (
+    SessionServerConfig,
+    compute_session_server_config,
+    validate_session_image_args,
+)
 
 _ARGS_TO_CONFIG_FIELD = {
     "miles_router_timeout": "timeout",
@@ -25,7 +30,7 @@ _ARGS_TO_CONFIG_FIELD = {
     "lora_train_only": "lora_train_only",
     "use_session_server": "use_session_server",
     "session_image_support": "session_image_support",
-    "session_image_engine_url": "session_image_engine_url",
+    "session_image_engine": "session_image_engine",
     "session_image_text_only_leaf": "session_image_text_only_leaf",
     "session_message_matcher": "session_message_matcher",
     "pause_generation_mode": "pause_generation_mode",
@@ -64,7 +69,7 @@ _DISTINCT_ARGS_VALUES = dict(
     lora_train_only=True,
     use_session_server="v2",
     session_image_support="fake_vlm",
-    session_image_engine_url="http://fake-engine:1",
+    session_image_engine={"model_path": "/fake/ckpt", "image_processor_backend": "auto"},
     session_image_text_only_leaf="keep",
     session_message_matcher="fake.matcher",
     pause_generation_mode="in_place",
@@ -158,7 +163,7 @@ _COMPLETE_CONFIG_KWARGS = dict(
     lora_train_only=False,
     use_session_server=None,
     session_image_support="off",
-    session_image_engine_url=None,
+    session_image_engine=None,
     session_image_text_only_leaf="drop",
     session_message_matcher="strict",
     pause_generation_mode=None,
@@ -218,3 +223,98 @@ class TestSessionServerConfig:
         config = SessionServerConfig(**_COMPLETE_CONFIG_KWARGS)
         with pytest.raises(ValidationError):
             config.port = 5002
+
+
+def _image_args(tmp_path=None, yaml_text: str | None = None, **overrides) -> Namespace:
+    """Launch args as `miles_validate_args` leaves them, with SGLang 0.5.22's server defaults."""
+    if yaml_text is not None:
+        (tmp_path / "sglang.yaml").write_text(yaml_text)
+        overrides["sglang_config"] = str(tmp_path / "sglang.yaml")
+    values = dict(
+        session_image_support="qwen3_vl",
+        use_session_server="v2",
+        use_rollout_routing_replay=False,
+        use_rollout_indexer_replay=False,
+        rollout_external=False,
+        sglang_revision=None,
+        sglang_mm_process_config=None,
+        sglang_image_processor_backend="auto",
+        sglang_sampling_defaults="model",
+        sglang_tool_call_parser=None,
+        sglang_reasoning_parser=None,
+    )
+    values.update(overrides)
+    return _make_launch_args(**values)
+
+
+def _groups(*groups: str) -> str:
+    return "sglang:\n  - name: actor\n    server_groups:\n" + "".join(groups)
+
+
+def _group(num_gpus: int, worker_type: str = "regular", **overrides) -> str:
+    text = f"      - worker_type: {worker_type}\n        num_gpus: {num_gpus}\n"
+    if overrides:
+        text += "        overrides:\n" + "".join(f"          {key}: {value}\n" for key, value in overrides.items())
+    return text
+
+
+class TestSessionImageEngine:
+    """The image settings come from the args Miles launches the policy engines with."""
+
+    def test_the_default_launch_args_resolve_to_the_engines_defaults(self):
+        args = _image_args()
+        validate_session_image_args(args)
+        assert args.session_image_engine == {
+            "model_path": "/ckpt/actor",
+            "revision": None,
+            "mm_process_config": None,
+            "image_processor_backend": "auto",
+            "sampling_defaults": "model",
+            "tool_call_parser": None,
+            "reasoning_parser": None,
+        }
+
+    def test_support_off_resolves_nothing(self):
+        args = _image_args(session_image_support="off", rollout_external=True)
+        validate_session_image_args(args)
+        assert args.session_image_engine is None
+
+    def test_a_base_flag_is_checked(self):
+        with pytest.raises(ValueError, match="mm_process_config"):
+            validate_session_image_args(_image_args(sglang_mm_process_config={"image": {"do_normalize": False}}))
+
+    def test_a_group_override_beats_the_base_flag(self, tmp_path):
+        args = _image_args(tmp_path, _groups(_group(4, tool_call_parser="qwen25"), _group(4, tool_call_parser="qwen25")))
+        validate_session_image_args(args)
+        assert args.session_image_engine["tool_call_parser"] == "qwen25"
+
+    def test_an_unsupported_group_override_is_refused(self, tmp_path):
+        yaml_text = _groups(_group(8, mm_process_config="{image: {do_normalize: false}}"))
+        with pytest.raises(ValueError, match="mm_process_config"):
+            validate_session_image_args(_image_args(tmp_path, yaml_text))
+
+    def test_groups_that_launch_differently_are_refused(self, tmp_path):
+        with pytest.raises(ValueError, match=r"differ in \['tool_call_parser'\]"):
+            validate_session_image_args(_image_args(tmp_path, _groups(_group(4, tool_call_parser="qwen25"), _group(4))))
+
+    def test_a_placeholder_group_launches_no_engine_and_is_ignored(self, tmp_path):
+        args = _image_args(tmp_path, _groups(_group(4), _group(4, worker_type="placeholder")))
+        validate_session_image_args(args)
+        assert args.session_image_engine["image_processor_backend"] == "auto"
+
+    def test_another_checkpoint_is_refused(self, tmp_path):
+        with pytest.raises(ValueError, match="the two processors would disagree"):
+            validate_session_image_args(_image_args(tmp_path, _groups(_group(8, model_path="/ckpt/other"))))
+
+    def test_external_engines_are_refused(self):
+        with pytest.raises(ValueError, match="engines Miles launches itself"):
+            validate_session_image_args(_image_args(rollout_external=True))
+
+    def test_prefill_decode_disaggregation_is_refused(self, tmp_path):
+        yaml_text = _groups(_group(4, worker_type="prefill"), _group(4, worker_type="decode"))
+        with pytest.raises(ValueError, match="disaggregation"):
+            validate_session_image_args(_image_args(tmp_path, yaml_text))
+
+    def test_an_auto_parser_is_refused(self):
+        with pytest.raises(ValueError, match="name the parser explicitly"):
+            validate_session_image_args(_image_args(sglang_reasoning_parser="auto"))

@@ -79,23 +79,9 @@ def assistant(text: str) -> dict:
 
 
 class ScriptedGenerateBackend:
-    """A mock SGLang serving ``/generate`` the way the image path uses it."""
+    """A mock router in front of SGLang, serving ``/generate`` the way the image path uses it."""
 
-    def __init__(
-        self,
-        vlm,
-        replies: list[str],
-        *,
-        count_bias: int = 0,
-        server_info: dict | None = None,
-        finish_reason: str = "stop",
-        server_info_status: int = 200,
-        server_info_body: dict | None = None,
-        unready_calls: int = 0,
-        worker_urls: list[str] | None = None,
-        worker_api: str = "list_workers",
-        worker_shape: dict | None = None,
-    ):
+    def __init__(self, vlm, replies: list[str], *, count_bias: int = 0, finish_reason: str = "stop"):
         self.vlm = vlm
         self.replies = replies
         # A nonzero bias makes the engine expand differently from the server, which
@@ -103,30 +89,12 @@ class ScriptedGenerateBackend:
         self.count_bias = count_bias
         self.finish_reason = finish_reason
         self.calls: list[dict[str, Any]] = []
-        self.server_info_calls = 0
-        self.server_info_status = server_info_status
-        self.server_info_body = server_info_body
-        self.unready_calls = unready_calls
-        # None => neither worker API answers, i.e. the backend must identify itself.
-        self.worker_urls = worker_urls
-        self.worker_api = worker_api
-        self.worker_shape = worker_shape
+        self.paths: list[str] = []
+        self.routing_keys: list[str | None] = []
+        # Every endpoint a request-time engine lookup would read; none may be hit.
+        self.metadata_calls: list[str] = []
         self.host = "127.0.0.1"
         self.port = find_available_port(32000)
-        self.server_info = {
-            # A direct engine advertises the address it was dialed at; a proxy in
-            # front of one reports that worker's port instead.
-            "host": self.host,
-            "port": self.port,
-            "model_path": CHECKPOINT,
-            "revision": None,
-            "mm_process_config": {},
-            "image_processor_backend": "auto",
-            "sampling_defaults": "model",
-            "tool_call_parser": None,
-            "reasoning_parser": None,
-            **(server_info or {}),
-        }
         self.app = FastAPI()
         self._server = UvicornThreadServer(self.app, host=self.host, port=self.port)
 
@@ -134,42 +102,28 @@ class ScriptedGenerateBackend:
         async def health():
             return JSONResponse(content={"status": "ok"})
 
-        @self.app.get("/list_workers")
-        async def list_workers():
-            if self.worker_shape is not None:
-                return JSONResponse(content=self.worker_shape)
-            if self.worker_urls is None or self.worker_api != "list_workers":
-                return JSONResponse(content={"detail": "Not Found"}, status_code=404)
-            return JSONResponse(content={"urls": self.worker_urls})
-
-        @self.app.get("/workers")
-        async def workers():
-            """sglang-router >= 0.3.0, which 404s /list_workers."""
-            if self.worker_urls is None or self.worker_api != "workers":
-                return JSONResponse(content={"detail": "Not Found"}, status_code=404)
-            return JSONResponse(content={"workers": [{"url": url, "id": i} for i, url in enumerate(self.worker_urls)]})
-
         @self.app.get("/get_server_info")
-        async def server_info():
-            self.server_info_calls += 1
-            if self.server_info_status != 200:
-                return JSONResponse(content=self.server_info_body, status_code=self.server_info_status)
-            if self.unready_calls >= self.server_info_calls:
-                # A real engine does not exist yet when the session server starts.
-                return JSONResponse(content={"error": "no healthy worker"}, status_code=503)
-            return JSONResponse(content=self.server_info if self.server_info_body is None else self.server_info_body)
+        @self.app.get("/list_workers")
+        @self.app.get("/workers")
+        async def metadata(request: Request):
+            self.metadata_calls.append(request.url.path)
+            return JSONResponse(content={"detail": "not expected"}, status_code=500)
 
         @self.app.post("/generate")
         async def generate(request: Request):
-            payload = await request.json()
-            self.calls.append(payload)
+            payload = self._record(request, await request.json())
             return JSONResponse(content=self._reply(payload))
 
         @self.app.post("/v1/chat/completions")
         async def chat(request: Request):
-            payload = await request.json()
-            self.calls.append(payload)
+            payload = self._record(request, await request.json())
             return JSONResponse(content=self._chat_reply(payload))
+
+    def _record(self, request: Request, payload: dict) -> dict:
+        self.calls.append(payload)
+        self.paths.append(request.url.path)
+        self.routing_keys.append(request.headers.get("X-SMG-Routing-Key"))
+        return payload
 
     @property
     def url(self) -> str:
@@ -242,38 +196,20 @@ class ScriptedGenerateBackend:
         }
 
 
-@contextmanager
-def image_router(
-    vlm,
-    replies: list[str],
-    *,
-    count_bias: int = 0,
-    extra_args: dict | None = None,
-    server_info: dict | None = None,
-    finish_reason: str = "stop",
-    server_info_status: int = 200,
-    server_info_body: dict | None = None,
-    unready_calls: int = 0,
-    worker_urls: list[str] | None = None,
-    worker_api: str = "list_workers",
-    worker_shape: dict | None = None,
-    declare_engine: bool = True,
-):
-    backend = ScriptedGenerateBackend(
-        vlm,
-        replies,
-        count_bias=count_bias,
-        server_info=server_info,
-        finish_reason=finish_reason,
-        server_info_status=server_info_status,
-        server_info_body=server_info_body,
-        unready_calls=unready_calls,
-        worker_urls=worker_urls,
-        worker_api=worker_api,
-        worker_shape=worker_shape,
-    )
-    backend.start()
-    args_values: dict[str, Any] = {
+# What `resolve_session_image_engine` reads from SGLang 0.5.22's own launch defaults.
+ENGINE_SETTINGS = {
+    "model_path": CHECKPOINT,
+    "revision": None,
+    "mm_process_config": None,
+    "image_processor_backend": "auto",
+    "sampling_defaults": "model",
+    "tool_call_parser": None,
+    "reasoning_parser": None,
+}
+
+
+def image_server_args(engine: dict | None = None, **extra) -> dict[str, Any]:
+    return {
         "miles_router_timeout": 30,
         "hf_checkpoint": CHECKPOINT,
         "chat_template_path": None,
@@ -292,33 +228,49 @@ def image_router(
         "lora_adapter_path": None,
         "use_session_server": "v2",
         "session_image_support": "qwen3_vl",
+        "session_image_engine": {**ENGINE_SETTINGS, **(engine or {})},
         "session_image_text_only_leaf": "drop",
         "session_server_instance_id": uuid.uuid4().hex,
         "pause_generation_mode": "retract",
         "session_sample_picker_path": "miles.rollout.session.v2.picker_hub.drop_same_prompt_retries",
         "session_sample_postprocessor_path": "miles.rollout.session.v2.postprocessor_hub.default_postprocess",
+        **extra,
     }
-    # A bare engine exposes no worker API and cannot be derived, so the ordinary
-    # fixture declares itself — the supported standalone deployment. Tests that
-    # assert the refusal pass declare_engine=False.
-    if declare_engine and worker_urls is None and worker_shape is None:
-        args_values["session_image_engine_url"] = backend.url
-    args_values.update(extra_args or {})
+
+
+def build_server(args_values: dict[str, Any], *, backend_url: str) -> tuple[SessionServer, int]:
     port = find_available_port(31000)
     config = compute_session_server_config(
         SimpleNamespace(**args_values),
         host="127.0.0.1",
         port=port,
         instance_id=args_values["session_server_instance_id"],
-        backend_url=backend.url,
+        backend_url=backend_url,
     )
-    server_obj = SessionServer(config)
-    server = UvicornThreadServer(server_obj.app, host="127.0.0.1", port=port)
-    server.start()
+    return SessionServer(config), port
+
+
+@contextmanager
+def image_router(
+    vlm,
+    replies: list[str],
+    *,
+    count_bias: int = 0,
+    extra_args: dict | None = None,
+    engine: dict | None = None,
+    finish_reason: str = "stop",
+):
+    backend = ScriptedGenerateBackend(vlm, replies, count_bias=count_bias, finish_reason=finish_reason)
+    backend.start()
     try:
-        yield SimpleNamespace(url=f"http://127.0.0.1:{port}", backend=backend)
+        server_obj, port = build_server(image_server_args(engine, **(extra_args or {})), backend_url=backend.url)
+        server = UvicornThreadServer(server_obj.app, host="127.0.0.1", port=port)
+        server.start()
+        try:
+            yield SimpleNamespace(url=f"http://127.0.0.1:{port}", backend=backend)
+        finally:
+            server.stop()
     finally:
-        server.stop()
         backend.stop()
 
 
@@ -566,95 +518,36 @@ TOOLS = [
 ]
 
 
-class TestEngineAgreement:
+class TestEngineSettings:
     """Matching ids prove the grid agrees, not that the pixels behind it do.
 
-    The binding is checked on the first image request, never at construction: Miles
-    waits for this server's listener before it launches any engine, so a
-    constructor-time lookup has nothing to ask and deadlocks the run.
+    So the engines' own image settings decide whether the server may start. They come
+    from the args Miles launches the engines with, so nothing asks an engine anything.
     """
 
-    @staticmethod
-    def refusal(vlm, **router_kwargs) -> bytes:
-        with image_router(vlm, ["a"], **router_kwargs) as env:
-            session_id = _create_session(env.url)
-            response = chat(env, session_id, [user_turn(SHOT1, "look")])
-            assert response.status_code >= 400, response.content
-            return response.content
-
-    def test_a_preprocessing_override_is_refused(self, vlm):
-        """--mm-process-config changes the engine's pixels while every token id stays identical."""
-        assert b"mm-process-config" in self.refusal(
-            vlm, server_info={"mm_process_config": {"image": {"do_normalize": False}}}
-        )
-
-    def test_a_different_served_checkpoint_is_refused(self, vlm):
-        assert b"but --hf-checkpoint is" in self.refusal(vlm, server_info={"model_path": "Qwen/Qwen3-0.6B"})
-
-    def test_a_non_default_image_backend_is_refused(self, vlm):
-        assert b"image-processor-backend" in self.refusal(
-            vlm, server_info={"image_processor_backend": "torchvision"}
-        )
-
-    def test_a_pinned_engine_revision_is_refused(self, vlm):
-        """The server loads the processor unpinned, so a pinned engine could differ."""
-        assert b"pins revision" in self.refusal(vlm, server_info={"revision": "abc123"})
-
-    def test_an_empty_model_path_is_refused_not_defaulted(self, vlm):
-        assert b"empty model_path" in self.refusal(vlm, server_info={"model_path": ""})
-
     @pytest.mark.parametrize(
-        "body",
+        ("override", "message"),
         [
-            {},
-            {"error": "no healthy worker"},
-            # What a router manager actually answers, which states nothing about any engine.
-            {"router_manager": True, "routers_count": 1, "workers_count": 1},
+            ({"mm_process_config": {"image": {"do_normalize": False}}}, "mm_process_config"),
+            ({"model_path": "Qwen/Qwen3-VL-4B-Instruct"}, "the two processors would disagree"),
+            ({"image_processor_backend": "torchvision"}, "image_processor_backend"),
+            ({"revision": "abc123"}, "pin revision"),
+            ({"tool_call_parser": "auto"}, "name the parser explicitly"),
         ],
-        ids=["empty", "error-body", "router-manager"],
+        ids=["preprocessing-override", "other-checkpoint", "image-backend", "pinned-revision", "auto-parser"],
     )
-    def test_a_reply_that_states_nothing_is_refused_not_defaulted(self, vlm, body):
-        """Each of these used to read as 'no override', i.e. supported."""
-        assert b"does not state model_path" in self.refusal(vlm, server_info_body=body)
+    def test_an_unsupported_engine_setting_refuses_to_start(self, vlm, override, message):
+        with pytest.raises(ValueError, match=message):
+            build_server(image_server_args(override), backend_url="http://127.0.0.1:9")
 
-    def test_a_self_identifying_engine_omitting_a_deciding_field_is_still_refused(self, vlm):
-        """Self-identification comes first, so the field check needs its own case."""
-        with image_router(vlm, ["a"]) as env:
-            info = dict(env.backend.server_info)
-            del info["mm_process_config"]
-            env.backend.server_info = info
-            session_id = _create_session(env.url)
-            response = chat(env, session_id, [user_turn(SHOT1, "look")])
-            assert response.status_code >= 400, response.content
-            assert b"does not state mm_process_config" in response.content
+    def test_settings_that_state_nothing_refuse_to_start(self, vlm):
+        with pytest.raises(ValueError, match="needs the policy engines' image settings"):
+            build_server(image_server_args(session_image_engine=None), backend_url="http://127.0.0.1:9")
 
-    def test_a_non_2xx_reply_is_refused(self, vlm):
-        assert b"answered 503" in self.refusal(vlm, server_info_status=503, server_info_body={"error": "down"})
-
-    def test_an_unready_engine_is_retried_rather_than_cached(self, vlm):
-        """The first request can land before any engine registers; the next must still work."""
-        with image_router(vlm, ["a", "b"], unready_calls=1) as env:
-            session_id = _create_session(env.url)
-            first = chat(env, session_id, [user_turn(SHOT1, "look")])
-            assert first.status_code == 503, first.content
-            second = chat(env, session_id, [user_turn(SHOT1, "look")])
-            assert second.status_code == 200, second.content
-
-    def test_an_unsupported_configuration_is_not_retried(self, vlm):
-        with image_router(vlm, ["a", "b"], server_info={"image_processor_backend": "torchvision"}) as env:
-            session_id = _create_session(env.url)
-            for _ in range(2):
-                assert chat(env, session_id, [user_turn(SHOT1, "look")]).status_code >= 400
-            # One lookup, then the cached refusal: retrying cannot change a launch flag.
-            # Self-identification and the support check share that one reply.
-            assert env.backend.server_info_calls == 1
-
-    def test_a_text_only_session_never_needs_the_engine_lookup(self, vlm):
-        """Binding gates image inference, so a text turn must not depend on it."""
-        with image_router(vlm, ["a"], server_info_body={"router_manager": True}) as env:
-            session_id = _create_session(env.url)
-            assert chat(env, session_id, [user_turn(None, "no pictures")]).status_code == 200
-            assert env.backend.server_info_calls == 0
+    def test_the_server_starts_with_nothing_behind_it(self, vlm):
+        """Miles starts this server before any engine, so building it must contact nothing."""
+        server_obj, _ = build_server(image_server_args(), backend_url="http://127.0.0.1:9")
+        assert server_obj.app is not None
 
     def test_what_bound_the_pixels_is_recorded_on_the_sample(self, vlm):
         with image_router(vlm, ["a"]) as env:
@@ -663,8 +556,28 @@ class TestEngineAgreement:
             provenance = collect(env.url, session_id)[0].metadata["image_provenance"]
             assert provenance["processor"]["checkpoint"] == CHECKPOINT
             assert provenance["processor"]["image_token_id"] == vlm.pad_id
-            assert provenance["engine"]["mm_process_config"] == {}
-            assert provenance["engine"]["model_path"] == CHECKPOINT
+            assert provenance["engine"] == ENGINE_SETTINGS
+
+
+class TestRouting:
+    """An image turn reaches the engines the way a text turn does: through the router."""
+
+    def test_an_image_turn_posts_generate_to_the_router(self, vlm):
+        with image_router(vlm, ["a"]) as env:
+            session_id = _create_session(env.url)
+            assert chat(env, session_id, [user_turn(SHOT1, "look")]).status_code == 200
+            assert env.backend.paths == ["/generate"]
+            assert env.backend.routing_keys == [session_id]
+
+    def test_the_first_image_turn_asks_no_engine_about_itself(self, vlm):
+        with image_router(vlm, ["a", "b", "c"]) as env:
+            session_id = _create_session(env.url)
+            first = [user_turn(SHOT1, "look")]
+            assert chat(env, session_id, first).status_code == 200
+            second = [*first, assistant("a"), user_turn(None, "and now?")]
+            assert chat(env, session_id, second).status_code == 200
+            assert env.backend.paths == ["/generate", "/generate"]
+            assert env.backend.metadata_calls == []
 
 
 class TestSamplingParameters:
@@ -735,7 +648,7 @@ class TestToolCallsAndFinishReason:
 
     def test_a_parsed_call_is_served_when_the_engine_has_a_parser(self, vlm):
         reply = '<tool_call>\n{"name": "click", "arguments": {"x": 3}}\n</tool_call>'
-        with image_router(vlm, [reply], server_info={"tool_call_parser": "qwen25"}) as env:
+        with image_router(vlm, [reply], engine={"tool_call_parser": "qwen25"}) as env:
             session_id = _create_session(env.url)
             response = _post_chat(
                 env.url, session_id, {"messages": [user_turn(SHOT1, "look")], "max_tokens": 64, "tools": TOOLS}
@@ -749,7 +662,7 @@ class TestToolCallsAndFinishReason:
 
     def test_tool_choice_none_leaves_the_text_alone(self, vlm):
         reply = '<tool_call>\n{"name": "click", "arguments": {"x": 3}}\n</tool_call>'
-        with image_router(vlm, [reply], server_info={"tool_call_parser": "qwen25"}) as env:
+        with image_router(vlm, [reply], engine={"tool_call_parser": "qwen25"}) as env:
             session_id = _create_session(env.url)
             response = _post_chat(
                 env.url,
@@ -770,7 +683,7 @@ class TestToolCallsAndFinishReason:
         """Relabelling would clear TrajectoryNode.truncated and let the tree extend a closed path."""
         reply = '<tool_call>\n{"name": "click", "arguments": {"x": 3}}\n</tool_call>'
         with image_router(
-            vlm, [reply], server_info={"tool_call_parser": "qwen25"}, finish_reason="length"
+            vlm, [reply], engine={"tool_call_parser": "qwen25"}, finish_reason="length"
         ) as env:
             session_id = _create_session(env.url)
             response = _post_chat(
@@ -820,7 +733,7 @@ class TestModelSamplingDefaults:
             assert (params["temperature"], params["top_p"], params["top_k"]) == (0.7, 0.8, 20)
 
     def test_an_engine_that_does_not_use_model_defaults_gets_none(self, vlm):
-        with image_router(vlm, ["a"], server_info={"sampling_defaults": "openai"}) as env:
+        with image_router(vlm, ["a"], engine={"sampling_defaults": "openai"}) as env:
             session_id = _create_session(env.url)
             response = _post_chat(env.url, session_id, {"messages": [user_turn(SHOT1, "look")], "max_tokens": 8})
             assert response.status_code == 200, response.content
@@ -845,204 +758,3 @@ class TestModelSamplingDefaults:
             params = env.backend.calls[-1]["sampling_params"]
             assert params["repetition_penalty"] == 1.3
             assert params["temperature"] == 1.0
-
-
-class TestColdStart:
-    """The server must come up with no engine behind it at all.
-
-    Miles waits for this listener at `placement_group.wait_session_server_ready`
-    *before* `init_or_reset_inference_controller` launches any engine, so a server
-    that needs an engine to start deadlocks the run: the driver never reaches engine
-    initialization because the listener it is waiting for never binds.
-    """
-
-    def test_the_listener_binds_and_serves_with_no_engine(self, vlm):
-        with image_router(vlm, ["a"], server_info_status=503, server_info_body={"error": "no worker"}) as env:
-            assert requests.get(f"{env.url}/health", timeout=10).status_code == 200
-            session_id = _create_session(env.url)
-            assert session_id
-            # Nothing asked the engine anything just to get here.
-            assert env.backend.server_info_calls == 0
-
-    def test_only_an_image_request_is_refused_while_the_engine_is_absent(self, vlm):
-        with image_router(vlm, ["a"], server_info_status=503, server_info_body={"error": "no worker"}) as env:
-            session_id = _create_session(env.url)
-            assert chat(env, session_id, [user_turn(None, "text only")]).status_code == 200
-            assert chat(env, session_id, [user_turn(SHOT1, "look")]).status_code == 503
-
-
-class SingleWorker:
-    """One engine behind a router, stating its own image configuration and serving generations."""
-
-    def __init__(self, server_info: dict, vlm=None, replies: list[str] | None = None):
-        self.app = FastAPI()
-        self.host = "127.0.0.1"
-        self.port = find_available_port(33000)
-        self.server_info = {"host": self.host, "port": self.port, **server_info}
-        self.generate_calls = 0
-        self._engine = None
-        if vlm is not None:
-            self._engine = ScriptedGenerateBackend(vlm, replies or ["a"])
-        self._server = UvicornThreadServer(self.app, host=self.host, port=self.port)
-
-        @self.app.get("/get_server_info")
-        async def info():
-            return JSONResponse(content=self.server_info)
-
-        @self.app.post("/generate")
-        async def generate(request: Request):
-            self.generate_calls += 1
-            payload = await request.json()
-            assert self._engine is not None, "this worker was not given a scripted engine"
-            self._engine.calls.append(payload)
-            return JSONResponse(content=self._engine._reply(payload))
-
-    @property
-    def url(self) -> str:
-        return f"http://{self.host}:{self.port}"
-
-    def start(self):
-        self._server.start()
-
-    def stop(self):
-        self._server.stop()
-
-
-def worker_info(**overrides) -> dict:
-    return {
-        "model_path": CHECKPOINT,
-        "revision": None,
-        "mm_process_config": {},
-        "image_processor_backend": "auto",
-        "sampling_defaults": "model",
-        "tool_call_parser": None,
-        "reasoning_parser": None,
-        **overrides,
-    }
-
-
-class TestRoutedTopology:
-    """The router is taken out of the image path rather than reasoned about.
-
-    `specs/inference.py` passes the router's address as the session server's
-    backend, and the router picks a worker per request by least connections. Four
-    review rounds showed that no amount of checking *through* it establishes which
-    worker serves a turn. So exactly one engine is resolved and validated, and image
-    generations go straight to it; text turns keep using the router.
-    """
-
-    @contextmanager
-    def routed(self, vlm, *worker_infos: dict, replies=None, api="list_workers", extra_args=None):
-        workers = [SingleWorker(info, vlm=vlm, replies=replies or ["a", "b"]) for info in worker_infos]
-        for worker in workers:
-            worker.start()
-        try:
-            with image_router(
-                vlm,
-                replies or ["a", "b"],
-                worker_urls=[w.url for w in workers],
-                worker_api=api,
-                extra_args=extra_args,
-            ) as env:
-                env.workers = workers
-                yield env
-        finally:
-            for worker in workers:
-                worker.stop()
-
-    @pytest.mark.parametrize("api", ["list_workers", "workers"], ids=["miles-router", "sglang-router-0.3"])
-    def test_a_router_fronting_several_engines_is_refused(self, vlm, api):
-        """Both router APIs: reading a 404 from only one of them let a gateway through before."""
-        with self.routed(vlm, worker_info(), worker_info(), api=api) as env:
-            session_id = _create_session(env.url)
-            response = chat(env, session_id, [user_turn(SHOT1, "look")])
-            assert response.status_code >= 400, response.content
-            assert b"--session-image-engine-url" in response.content
-            assert b"fronts 2 engines" in response.content
-
-    @pytest.mark.parametrize("api", ["list_workers", "workers"], ids=["miles-router", "sglang-router-0.3"])
-    def test_one_engine_behind_a_router_is_used_directly(self, vlm, api):
-        """The generation must reach the engine that was checked, not the router."""
-        with self.routed(vlm, worker_info(), api=api) as env:
-            session_id = _create_session(env.url)
-            assert chat(env, session_id, [user_turn(SHOT1, "look")]).status_code == 200
-            worker = env.workers[0]
-            assert worker.generate_calls == 1, "the generation did not reach the validated engine"
-            assert env.backend.calls == [], "the generation went through the router"
-            provenance = collect(env.url, session_id)[0].metadata["image_provenance"]
-            assert provenance["engine_url"] == worker.url
-
-    def test_naming_an_engine_pins_a_multi_engine_pool(self, vlm):
-        with self.routed(vlm, worker_info(), worker_info()) as env:
-            pinned = env.workers[1]
-            with image_router(
-                vlm,
-                ["a"],
-                worker_urls=[w.url for w in env.workers],
-                extra_args={"session_image_engine_url": pinned.url},
-            ) as pinned_env:
-                session_id = _create_session(pinned_env.url)
-                assert chat(pinned_env, session_id, [user_turn(SHOT1, "look")]).status_code == 200
-                assert pinned.generate_calls == 1
-                assert env.workers[0].generate_calls == 0
-
-    def test_a_named_engine_is_still_checked(self, vlm):
-        with self.routed(
-            vlm, worker_info(mm_process_config={"image": {"do_normalize": False}})
-        ) as env:
-            bad = env.workers[0]
-            with image_router(
-                vlm, ["a"], worker_urls=[bad.url], extra_args={"session_image_engine_url": bad.url}
-            ) as pinned_env:
-                session_id = _create_session(pinned_env.url)
-                response = chat(pinned_env, session_id, [user_turn(SHOT1, "look")])
-                assert response.status_code >= 400, response.content
-                assert b"mm-process-config" in response.content
-
-    def test_an_empty_worker_list_is_not_ready(self, vlm):
-        with image_router(vlm, ["a"], worker_urls=[]) as env:
-            session_id = _create_session(env.url)
-            response = chat(env, session_id, [user_turn(SHOT1, "look")])
-            assert response.status_code == 503
-            assert b"no registered engines" in response.content
-
-    def test_an_unrecognized_enumeration_shape_is_refused(self, vlm):
-        """A genuinely unrecognized payload, so deleting the shape guard fails this."""
-        with image_router(vlm, ["a"], worker_shape={"nodes": [{"endpoint": "http://x:1"}]}) as env:
-            session_id = _create_session(env.url)
-            response = chat(env, session_id, [user_turn(SHOT1, "look")])
-            assert response.status_code >= 400, response.content
-            assert b"shape this path does not recognize" in response.content
-
-    @pytest.mark.parametrize(
-        "info",
-        [
-            {},
-            # The same port as the proxy, on another host, truthfully reported by a
-            # healthy worker — a wildcard bind reports exactly this.
-            {"host": "0.0.0.0"},
-            # No host at all.
-            {"host": None},
-        ],
-        ids=["as-is", "wildcard-host", "no-host"],
-    )
-    def test_a_backend_with_no_worker_api_is_refused_not_assumed_direct(self, vlm, info):
-        """Host/port cannot prove endpoint identity: a proxy forwards a worker's truthful info.
-
-        Every one of these was accepted before, including the same-port case, which is
-        why the endpoint is now declared with the flag rather than derived.
-        """
-        with image_router(vlm, ["a"], worker_urls=None, server_info=info, declare_engine=False) as env:
-            session_id = _create_session(env.url)
-            response = chat(env, session_id, [user_turn(SHOT1, "look")])
-            assert response.status_code >= 400, response.content
-            assert b"--session-image-engine-url" in response.content
-            assert b"no worker API this path recognizes" in response.content
-
-    def test_a_standalone_engine_declares_itself_with_the_flag(self, vlm):
-        """The replacement for the deleted inference: one line of configuration."""
-        with image_router(vlm, ["a"], worker_urls=None) as env:
-            session_id = _create_session(env.url)
-            assert chat(env, session_id, [user_turn(SHOT1, "look")]).status_code == 200
-            provenance = collect(env.url, session_id)[0].metadata["image_provenance"]
-            assert provenance["engine_url"] == env.backend.url

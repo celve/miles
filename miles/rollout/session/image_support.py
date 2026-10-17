@@ -7,15 +7,11 @@ per-session half is ``SessionMedia``, which owns that session's interned bytes
 and dies with it.
 """
 
-import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-import orjson
-
-from miles.rollout.session.config import SESSION_IMAGE_SUPPORT_OFF, SessionServerConfig
-from miles.rollout.session.errors import EngineNotReadyError, EngineUnsupportedError, SessionError
+from miles.rollout.session.config import SESSION_IMAGE_SUPPORT_OFF, SessionServerConfig, check_session_image_engine
 from miles.rollout.session.generate_transport import CompletionParsers
 from miles.rollout.session.image_processing import (
     ImageTokenCounter,
@@ -31,27 +27,23 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class EngineImageConfig:
-    """How the engine says it will preprocess images, read from the engine itself.
+    """How the policy engines preprocess images and parse replies, from the args Miles launches them with.
 
     Matching token ids prove the two sides agree on the image *grid*, because the
     expanded length is derived from it — they do not prove they agree on the pixel
     values behind those tokens. A decode or normalization override changes the
-    pixels while leaving the grid, and therefore every token id, identical. So the
-    engine's own configuration decides whether this run may serve images, and a
-    reply that does not state it is refused rather than defaulted.
+    pixels while leaving the grid, and therefore every token id, identical. So these
+    launch settings decide whether this run may serve images at all, and they are
+    checked before the server starts (`check_session_image_engine`).
     """
 
     model_path: str
     revision: str | None
-    mm_process_config: dict[str, Any]
+    mm_process_config: dict[str, Any] | None
     image_processor_backend: str
     sampling_defaults: str
     tool_call_parser: str | None
     reasoning_parser: str | None
-
-    # The fields a reply must actually carry. Absent is refused, never defaulted: a
-    # router-manager reply, an error body and `{}` all used to read as "no override".
-    REQUIRED = ("model_path", "mm_process_config", "image_processor_backend", "sampling_defaults")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -63,10 +55,6 @@ class EngineImageConfig:
             "tool_call_parser": self.tool_call_parser,
             "reasoning_parser": self.reasoning_parser,
         }
-
-    def to_dict_json(self) -> str:
-        """A comparison key: every engine behind the router must agree on all of it."""
-        return orjson.dumps(self.to_dict(), option=orjson.OPT_SORT_KEYS).decode()
 
     def model_sampling_defaults(self, generation_defaults: dict[str, Any]) -> dict[str, Any]:
         """The defaults the engine applies to a field the request omits.
@@ -80,257 +68,15 @@ class EngineImageConfig:
         return dict(generation_defaults) if self.sampling_defaults == "model" else {}
 
 
-class EngineBinding:
-    """Resolves the one engine that will serve this run's image turns, and checks it.
-
-    Not at construction: Miles waits for this server's listener *before* it launches
-    any engine (`placement_group` waits for the session server, then initializes the
-    inference controller), so a constructor-time lookup has nothing to ask.
-
-    And not the backend as a whole: the backend is the router
-    (`specs/inference.py` passes the router's address), which picks a worker per
-    request. Four review rounds showed that no amount of checking *through* the
-    router establishes which worker serves a turn — the session server neither
-    chooses nor observes that choice, so membership polling only narrows a window.
-    So the router is taken out of the image path instead: one engine is resolved and
-    validated, and image generations go straight to it. The validated worker is then
-    the serving worker by construction.
-
-    A readiness or transport failure is retried on the next image request; a
-    topology or configuration this path cannot serve is cached and refused for good.
-    """
-
-    def __init__(self, checkpoint: str, backend_url: str, engine_url: str | None = None) -> None:
-        self.checkpoint = checkpoint
-        self.backend_url = backend_url.rstrip("/")
-        self.configured_engine_url = engine_url.rstrip("/") if engine_url else None
-        self._lock = asyncio.Lock()
-        self._resolved: ResolvedEngine | None = None
-        self._rejected: SessionError | None = None
-
-    @property
-    def resolved(self) -> "ResolvedEngine | None":
-        return self._resolved
-
-    async def get(self, backend: Any) -> "ResolvedEngine":
-        """The engine image turns go to, validated. Raises until one can be."""
-        if self._resolved is not None:
-            return self._resolved
-        if self._rejected is not None:
-            raise self._rejected
-        async with self._lock:
-            if self._resolved is not None:
-                return self._resolved
-            if self._rejected is not None:
-                raise self._rejected
-            try:
-                url, payload = await self._resolve_engine_url(backend)
-                if payload is None:
-                    status, body = await backend.do_get(f"{url}/get_server_info")
-                    payload = _server_info_payload(url, status, body)
-                config = parse_engine_image_config(payload, where=url)
-                assert_engine_preprocessing_supported(config, checkpoint=self.checkpoint, where=url)
-            except SessionError as exc:
-                if isinstance(exc, EngineUnsupportedError):
-                    self._rejected = exc
-                raise
-            logger.info("[session] Image turns pinned to engine %s: %s", url, config.to_dict())
-            self._resolved = ResolvedEngine(url=url, config=config)
-            return self._resolved
-
-    async def _resolve_engine_url(self, backend: Any) -> tuple[str, dict[str, Any] | None]:
-        """Which single engine serves image turns, plus its server info when already read.
-
-        Fail-closed on anything ambiguous.
-        """
-        if self.configured_engine_url:
-            return self.configured_engine_url, None
-        workers = await self._enumerate_workers(backend)
-        if workers is None:
-            # Five review rounds established that nothing reachable through the
-            # backend proves which engine serves a turn: a proxy forwards a healthy
-            # worker's truthful server info, and host/port can coincide. So an
-            # unrecognized or absent worker list is evidence of nothing, and the
-            # endpoint is declared rather than derived.
-            raise EngineUnsupportedError(
-                f"{self.backend_url} exposes no worker API this path recognizes, so the engine that will "
-                "serve an image turn cannot be established — a proxy in front of an engine answers the "
-                "same way one does, and may even share its port. Name the engine image turns must use "
-                "with --session-image-engine-url. A standalone engine sets it to its own address."
-            )
-        if not workers:
-            raise EngineNotReadyError(
-                f"the router at {self.backend_url} reports no registered engines yet, "
-                "so no image turn can be served"
-            )
-        if len(workers) > 1:
-            raise EngineUnsupportedError(
-                f"the router at {self.backend_url} fronts {len(workers)} engines ({sorted(workers)}) and "
-                "picks one per request, so the engine whose image preprocessing was checked need not be "
-                "the one that serves a turn. Name the engine image turns must use with "
-                "--session-image-engine-url. Image turns then bypass the router; text turns are unaffected."
-            )
-        return workers[0], None
-
-    async def _enumerate_workers(self, backend: Any) -> list[str] | None:
-        """The backend's workers, or ``None`` when it exposes no worker list at all.
-
-        Both router APIs are recognized: `/list_workers` on MilesRouter and
-        `/workers` on sglang-router >= 0.3.0, which `sglang_router_api_client` itself
-        uses. Reading a 404 from only one of them as "direct engine" is what let a
-        modern gateway through in round 4.
-        """
-        for path, extract in (("list_workers", _urls_from_list_workers), ("workers", _urls_from_workers)):
-            status, body = await backend.do_get(f"{self.backend_url}/{path}")
-            if status == 0:
-                raise EngineNotReadyError(
-                    f"the backend at {self.backend_url} could not be reached: "
-                    f"{body.decode(errors='replace')[:200]}"
-                )
-            if status == 404:
-                continue
-            if status != 200:
-                raise EngineNotReadyError(
-                    f"the backend's /{path} answered {status}, so the engines behind it are unknown"
-                )
-            try:
-                payload = orjson.loads(body)
-            except orjson.JSONDecodeError as exc:
-                raise EngineNotReadyError(f"the backend's /{path} is not JSON: {exc}") from exc
-            urls = extract(payload)
-            if urls is not None:
-                return urls
-            raise EngineUnsupportedError(
-                f"the backend's /{path} answered a shape this path does not recognize "
-                f"({sorted(payload)[:12] if isinstance(payload, dict) else type(payload).__name__}), so the "
-                "engines behind it cannot be established. Name the engine image turns must use with "
-                "--session-image-engine-url."
-            )
-        return None
-
-
-@dataclass(frozen=True)
-class ResolvedEngine:
-    """The engine image turns are sent to, and what it said about itself."""
-
-    url: str
-    config: EngineImageConfig
-
-
-def _urls_from_list_workers(payload: Any) -> list[str] | None:
-    """MilesRouter: ``{"urls": [...]}``."""
-    if not isinstance(payload, dict):
-        return None
-    urls = payload.get("urls")
-    if isinstance(urls, list) and all(isinstance(url, str) and url for url in urls):
-        return [url.rstrip("/") for url in urls]
-    return None
-
-
-def _urls_from_workers(payload: Any) -> list[str] | None:
-    """sglang-router >= 0.3.0: ``{"workers": [{"url": ...}, ...]}``."""
-    if not isinstance(payload, dict):
-        return None
-    workers = payload.get("workers")
-    if not isinstance(workers, list):
-        return None
-    urls = []
-    for worker in workers:
-        url = worker.get("url") if isinstance(worker, dict) else worker
-        if not isinstance(url, str) or not url:
-            return None
-        urls.append(url.rstrip("/"))
-    return urls
-
-
-def _server_info_payload(url: str, status: int, body: bytes) -> dict[str, Any]:
-    """The engine's own server-info object, or refuse."""
-    if status == 0:
-        raise EngineNotReadyError(
-            f"engine {url} could not be reached for its image configuration: "
-            f"{body.decode(errors='replace')[:200]}"
-        )
-    if status != 200:
-        raise EngineNotReadyError(
-            f"engine {url} answered {status} for /get_server_info, so its image configuration is unknown"
-        )
-    try:
-        payload = orjson.loads(body)
-    except orjson.JSONDecodeError as exc:
-        raise EngineNotReadyError(f"engine {url} did not answer /get_server_info with JSON: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise EngineNotReadyError(
-            f"engine {url} answered /get_server_info with {type(payload).__name__}, not an object"
-        )
-    return payload
-
-
-def parse_engine_image_config(payload: dict[str, Any], *, where: str = "the engine") -> EngineImageConfig:
-    """Read the fields that decide pixel agreement, refusing a reply that omits any."""
-    missing = [key for key in EngineImageConfig.REQUIRED if key not in payload]
-    if missing:
-        raise EngineNotReadyError(
-            f"{where} does not state {', '.join(missing)} in /get_server_info, so it cannot be checked. "
-            f"It answered with keys {sorted(payload)[:12]}. A router or gateway that aggregates workers "
-            "answers for none of them, and a router still electing one can start to."
-        )
-    return EngineImageConfig(
-        model_path=str(payload["model_path"] or ""),
-        revision=payload.get("revision"),
-        mm_process_config=payload["mm_process_config"] or {},
-        image_processor_backend=str(payload["image_processor_backend"] or ""),
-        sampling_defaults=str(payload["sampling_defaults"] or ""),
-        tool_call_parser=payload.get("tool_call_parser"),
-        reasoning_parser=payload.get("reasoning_parser"),
-    )
-
-
-def assert_engine_preprocessing_supported(
-    engine: EngineImageConfig, *, checkpoint: str, where: str = "the engine"
-) -> None:
-    """Require the one engine image configuration whose pixels this slice has verified."""
-    if not engine.model_path:
-        raise EngineUnsupportedError(
-            f"{where} states an empty model_path, so the checkpoint it serves cannot be established"
-        )
-    if engine.model_path != checkpoint:
-        raise EngineUnsupportedError(
-            f"{where} serves {engine.model_path!r} but --hf-checkpoint is {checkpoint!r}; "
-            "the two processors would disagree about every image"
-        )
-    if engine.revision is not None:
-        raise EngineUnsupportedError(
-            f"{where} pins revision {engine.revision!r} while this server loads the processor unpinned, "
-            "so the two could resize or normalize differently with every token id still matching; "
-            "serve the checkpoint's default revision"
-        )
-    if engine.mm_process_config:
-        raise EngineUnsupportedError(
-            f"{where} was launched with --mm-process-config {engine.mm_process_config!r}, which changes "
-            "how it decodes or normalizes images; its pixels would then differ from the trainer's while "
-            "every token id stayed identical. Launch it with the checkpoint's default image preprocessing."
-        )
-    if engine.image_processor_backend != "auto":
-        raise EngineUnsupportedError(
-            f"{where} has --image-processor-backend {engine.image_processor_backend!r}; this path has "
-            "only verified pixel agreement for the default 'auto' backend"
-        )
-
-
 @dataclass(frozen=True)
 class SessionImageSupport:
-    """What every image-bearing turn in this process shares.
-
-    The processor and its fingerprint are known at construction. The engine's
-    configuration is not: it is resolved on first use through ``engine``, because
-    no engine exists when this server is built.
-    """
+    """What every image-bearing turn in this process shares, all of it known at construction."""
 
     processor: Any
     fingerprint: ProcessorFingerprint
     tokenizer: Any
     text_only_leaf: str  # "drop" | "keep"
-    binding: EngineBinding
+    engine: EngineImageConfig
     generation_defaults: dict[str, Any]
 
     @property
@@ -340,32 +86,20 @@ class SessionImageSupport:
     def new_session_media(self) -> "SessionMedia":
         return SessionMedia(counter=ImageTokenCounter(self.processor, self.fingerprint))
 
-    async def engine(self, backend: Any) -> "ResolvedEngine":
-        return await self.binding.get(backend)
-
-    def parsers(self, engine: EngineImageConfig) -> CompletionParsers:
-        """The parsers the engine applies, so both routes in one session agree."""
+    def parsers(self) -> CompletionParsers:
+        """The parsers the engines apply on the chat route, so both routes in one session agree."""
         return CompletionParsers(
-            reasoning_parser=engine.reasoning_parser,
-            tool_call_parser=engine.tool_call_parser,
+            reasoning_parser=self.engine.reasoning_parser,
+            tool_call_parser=self.engine.tool_call_parser,
             tokenizer=self.tokenizer,
         )
 
-    def sampling_defaults(self, engine: EngineImageConfig) -> dict[str, Any]:
-        return engine.model_sampling_defaults(self.generation_defaults)
+    def sampling_defaults(self) -> dict[str, Any]:
+        return self.engine.model_sampling_defaults(self.generation_defaults)
 
     def provenance(self) -> dict[str, Any]:
-        """What bound this run's pixels, recorded with the session and every sample.
-
-        The engine half is present once it has been resolved, which is on the first
-        image request; a text-only session never resolves it and records none.
-        """
-        resolved = self.binding.resolved
-        return {
-            "processor": self.fingerprint.to_dict(),
-            "engine": resolved.config.to_dict() if resolved is not None else None,
-            "engine_url": resolved.url if resolved is not None else None,
-        }
+        """What bound this run's pixels, recorded with the session and every sample."""
+        return {"processor": self.fingerprint.to_dict(), "engine": self.engine.to_dict()}
 
     def process(self, asset_ids: list[str], counts: list[int], media: "SessionMedia") -> list[ProcessedImage]:
         assets = [media.arena.get(asset_id) for asset_id in asset_ids]
@@ -397,10 +131,18 @@ _GENERATION_DEFAULT_KEYS = ("repetition_penalty", "temperature", "top_k", "top_p
 def build_image_support(config: SessionServerConfig, tokenizer: Any) -> SessionImageSupport | None:
     """Load the processor for an image-enabled run, or ``None`` for text.
 
-    Nothing here touches the engine: it does not exist yet when this runs.
+    Nothing here touches an engine: none exists yet when this runs, and the engines'
+    image settings arrive in the config, read from the args Miles launches them with.
     """
     if config.session_image_support == SESSION_IMAGE_SUPPORT_OFF:
         return None
+    if config.session_image_engine is None:
+        raise ValueError(
+            f"--session-image-support={config.session_image_support} needs the policy engines' image "
+            "settings, which validate_session_image_args reads from the launch args"
+        )
+    # Checked again here because a config can also be built by hand, as scripts and tests do.
+    check_session_image_engine(config.session_image_engine, checkpoint=config.hf_checkpoint)
 
     from miles.utils.processing_utils import load_processor
 
@@ -416,11 +158,12 @@ def build_image_support(config: SessionServerConfig, tokenizer: Any) -> SessionI
             "counts cannot be derived without processing every image on every turn"
         )
     fingerprint = build_fingerprint(processor, tokenizer, checkpoint=config.hf_checkpoint)
+    engine = EngineImageConfig(**config.session_image_engine)
     logger.info(
-        "[session] Image support=%s fingerprint=%s text_only_leaf=%s; the engine's own image "
-        "configuration is checked on the first image request",
+        "[session] Image support=%s fingerprint=%s engine=%s text_only_leaf=%s",
         config.session_image_support,
         fingerprint.to_dict(),
+        engine.to_dict(),
         config.session_image_text_only_leaf,
     )
     return SessionImageSupport(
@@ -428,7 +171,7 @@ def build_image_support(config: SessionServerConfig, tokenizer: Any) -> SessionI
         fingerprint=fingerprint,
         tokenizer=tokenizer,
         text_only_leaf=config.session_image_text_only_leaf,
-        binding=EngineBinding(config.hf_checkpoint, config.backend_url, config.session_image_engine_url),
+        engine=engine,
         generation_defaults=read_generation_defaults(config.hf_checkpoint),
     )
 
