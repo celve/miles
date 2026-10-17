@@ -1,11 +1,3 @@
-"""Offline tests: no GPU, no network, no Gym, no OSWorld VM, no live model.
-
-rollout.py's translation: one NeMo Gym exact-trace envelope -> a fixed number
-of Miles samples per episode, the real segments stitched and bound to their
-screenshots, the rest inert. The Gym side of the seam is faked at exactly the
-boundary the real code touches.
-"""
-
 from __future__ import annotations
 
 import torch
@@ -34,8 +26,6 @@ IMAGE_PAD = 151655
 
 
 class _FakeImageProcessor:
-    """Tokens per image come from the grid, as the real fallback path does."""
-
     merge_size = 2
     patch_size = 16
 
@@ -61,7 +51,6 @@ def _state():
 
 
 def _call(prompt, sampled, segment_id="s0", segment_index=0, media_ids=(), eligible=True):
-    """One call in the shape `_calls` produces, which is what the rest consumes."""
     return {
         "prompt_token_ids": prompt,
         "sampled_token_ids": sampled,
@@ -74,7 +63,6 @@ def _call(prompt, sampled, segment_id="s0", segment_index=0, media_ids=(), eligi
 
 
 def _envelope(calls):
-    """Put calls back into the two arrays Gym's transport v3 splits them across."""
     return {
         "output": [
             {
@@ -141,8 +129,6 @@ def test_stitch_masks_only_the_sampled_tokens():
 
 
 def test_stitch_refuses_a_call_that_does_not_extend_its_predecessor():
-    """Gym promises append-compatibility only inside a segment, so a violation
-    means the trace and this reader disagree and nothing here is trainable."""
     assert _stitch([_call([1, 2], [10]), _call([9, 9, 9], [11])]) is None
 
 
@@ -153,7 +139,6 @@ def test_stitch_refuses_a_call_whose_logprobs_do_not_cover_its_tokens():
 
 
 def test_vision_inputs_verify_each_image_against_its_own_run():
-    """The fake processor gives image i 1*2*2(i+1)/4 = (i+1) tokens."""
     state = _state()
     tokens = [1, IMAGE_PAD, 2, IMAGE_PAD, IMAGE_PAD, 3]
     inputs = _vision_inputs(state, [object(), object()], tokens)
@@ -161,8 +146,6 @@ def test_vision_inputs_verify_each_image_against_its_own_run():
 
 
 def test_vision_inputs_reject_a_sequence_missing_one_image_run():
-    """Cutting the images to whichever prefix the runs total would accept this
-    as a correct one-image segment and bind the wrong pixels everywhere after."""
     state = _state()
     with pytest.raises(MediaBindingError, match="1 image runs but 2 screenshots"):
         _vision_inputs(state, [object(), object()], [1, IMAGE_PAD, 2])
@@ -177,9 +160,6 @@ def test_media_occurrences_take_the_final_prompt_and_check_the_earlier_ones():
 
 
 def test_media_occurrences_reject_a_screenshot_swapped_inside_a_segment():
-    """Two calls can swap one screenshot for another of the same size without
-    disturbing the token prefix at all, and both digests stay valid -- so only
-    the media prefix catches it."""
     segment = [
         _call([1], [10], media_ids=["a"]),
         _call([1, 10, 2], [11], media_ids=["b"]),
@@ -189,9 +169,6 @@ def test_media_occurrences_reject_a_screenshot_swapped_inside_a_segment():
 
 
 def test_media_occurrences_reject_an_intermediate_shrink():
-    """[A,B] -> [A] -> [A,B,C]: every list is an ordered prefix of the final
-    one, so comparing only against the final list passes it, while the middle
-    call's prompt accounts for two images and claims one."""
     segment = [
         _call([1], [10], media_ids=["a", "b"]),
         _call([1, 10, 2], [11], media_ids=["a"]),
@@ -208,9 +185,6 @@ def test_media_occurrences_reject_a_screenshot_appearing_only_later():
 
 
 def test_each_call_is_checked_against_its_own_claimed_media():
-    """The stitched sequence only exposes the final prompt's layout, so a
-    middle call holding an image its metadata does not claim is invisible
-    there -- yet its sampled tokens would be trained from that context."""
     state = _state()
     segment = [
         # Claims one image but its prompt holds two runs: 1 token then 2.
@@ -231,10 +205,6 @@ def test_each_call_passes_when_its_prompt_matches_its_claim():
 
 
 def test_media_occurrences_keep_a_screenshot_referenced_twice():
-    """The arena is content-addressed, so one prompt showing the same
-    screenshot twice lists its id twice and owes two token runs. Collapsing
-    them rejected a legitimate episode, and then aborted it as an
-    infrastructure failure."""
     assert _media_occurrences([_call([1], [10], media_ids=["a", "a"])]) == ["a", "a"]
 
 
@@ -251,9 +221,6 @@ def test_vision_inputs_report_a_text_only_call_as_none():
 
 
 def test_padding_carries_the_episode_reward_so_normalization_accepts_it():
-    """`_normalize_rewards_by_rollout` refuses a rollout whose siblings disagree
-    on a reward, and takes one reward per rollout -- so a pad holding the
-    episode's own reward moves no group statistic."""
     pad = _padding(Sample(index=7), reward=1.0, rollout_id=7, index=3, state=_state())
     assert pad.metadata["reward"] == 1.0
     assert pad.rollout_id == 7
@@ -264,9 +231,6 @@ def test_padding_carries_the_episode_reward_so_normalization_accepts_it():
 
 
 def test_an_infrastructure_failure_aborts_rather_than_scoring_zero():
-    """ABORTED is the only status Miles acts on: `apply_aborted_filter` drops
-    the group before any reward statistic exists. FAILED plus `remove_sample`
-    would keep the row and feed its 0.0 into the group's mean."""
     samples = _aborted(Sample(index=1), "transport: TimeoutError", _state(), dict.fromkeys(("a", "b"), 0))
     assert len(samples) == 1
     assert samples[0].status is Sample.Status.ABORTED
@@ -295,9 +259,6 @@ def _episode_config(**overrides) -> EpisodeConfig:
 
 
 def test_the_per_call_cap_is_not_the_segment_bound():
-    """max_new_tokens is the launcher's 12,288-token bound on a stitched segment,
-    and sending it as Gym's per-call cap let every call run eight times past the
-    1,500 the variance probe measured at."""
     sampling_params = {"max_new_tokens": 12288, "temperature": 1.0}
     body = _request_body(_episode_config(), {"responses_create_params": {}}, sampling_params)
     assert body["responses_create_params"]["max_output_tokens"] == 1500
@@ -315,9 +276,6 @@ def test_a_task_rows_own_request_fields_win_and_the_row_is_not_mutated():
 
 
 def test_an_envelope_without_a_positive_admission_is_not_a_grade():
-    """A missing runtime_eligible or mask_sample passes a negative test, and a
-    missing reward then defaults to zero -- so an empty reply would reach
-    training as a genuine task failure instead of a protocol fault."""
     assert _admitted_reward({}) is None
     assert _admitted_reward({"runtime_eligible": True, "mask_sample": False}) is None
     assert _admitted_reward({"runtime_eligible": True, "mask_sample": False, "reward": True}) is None
@@ -329,13 +287,6 @@ def test_an_envelope_without_a_positive_admission_is_not_a_grade():
 
 @pytest.fixture
 def eval_log(monkeypatch):
-    """Capture what the hook logs, patching attributes on the real modules.
-
-    Deliberately not a synthetic entry in ``sys.modules``: an earlier version
-    of these tests inserted a fake ``miles.utils.tracking``, which does not
-    exist, so the suite stayed green while the wired hook raised ImportError on
-    every run. Patching attributes means the import path itself is under test.
-    """
     from miles.ray.rollout import metrics
     from miles.utils.tracking_utils import tracking
 
@@ -346,8 +297,6 @@ def eval_log(monkeypatch):
 
 
 def test_the_eval_logger_excludes_infrastructure_faults_from_the_denominator(eval_log):
-    """The default logger turns a null reward into a zero before averaging, so
-    one sandbox that never ran would halve a two-task score."""
     assert log_eval_rollout_data(1, SimpleNamespace(), {"heldout": {"rewards": [1.0, None]}}) is True
     assert eval_log["eval/heldout"] == 1.0
     assert eval_log["eval/heldout-attempted"] == 2
@@ -356,7 +305,6 @@ def test_the_eval_logger_excludes_infrastructure_faults_from_the_denominator(eva
 
 
 def test_the_eval_logger_reports_no_mean_when_nothing_was_graded(eval_log):
-    """No score at all is not a score of zero."""
     log_eval_rollout_data(1, SimpleNamespace(), {"heldout": {"rewards": [None, None]}})
     assert "eval/heldout" not in eval_log
     assert eval_log["eval/heldout-attempted"] == 2

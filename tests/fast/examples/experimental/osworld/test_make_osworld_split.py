@@ -1,9 +1,3 @@
-"""Offline tests: no GPU, no network, no Gym.
-
-make_osworld_split.py's one claim: the held-out side carries the same domain mix
-as training, is disjoint from it, and is reproducible from its recorded seed.
-"""
-
 from __future__ import annotations
 
 import json
@@ -37,8 +31,6 @@ def test_rows_carry_the_task_for_gym_and_no_instruction_for_the_model(tmp_path):
     assert task.row["prompt"] == "chrome/t1"
     assert task.row["label"] == "chrome"
     assert task.row["metadata"]["osworld_task"]["verifier_metadata"]["task_id"] == "t1"
-    # The instruction reaches the policy inside the environment, so nothing the
-    # model reads may sit in `prompt`.
     assert "instruction" not in json.dumps(task.row["prompt"])
 
 
@@ -54,8 +46,6 @@ def test_every_domain_is_held_out_in_proportion(tmp_path):
 
 
 def test_a_single_task_domain_stays_in_training(tmp_path):
-    """A held-out side of one task measures nothing, and losing the domain from
-    training costs more."""
     source = _write_source(tmp_path / "src.jsonl", [_task("only", "thunderbird")])
     train, held_out = _stratified_split(_read_tasks(source), held_out_fraction=0.5, seed=1)
     assert [t.task_id for t in train] == ["only"] and held_out == []
@@ -118,8 +108,6 @@ def _write_probe(path, rows):
 
 
 def test_outcomes_count_only_episodes_gym_admitted(tmp_path):
-    """An episode Gym refused never measured the policy, so letting it stand in
-    for a failure would make a task look unanimous when nothing was learned."""
     probe = _write_probe(
         tmp_path / "r.jsonl",
         [
@@ -134,8 +122,6 @@ def test_outcomes_count_only_episodes_gym_admitted(tmp_path):
 
 
 def test_only_tasks_whose_own_rewards_differ_are_kept(tmp_path):
-    """A GRPO group is the N samples of one prompt, so a task whose samples all
-    score the same gives exactly zero advantage."""
     source = _write_source(tmp_path / "src.jsonl", [_task(f"t{i}", "chrome") for i in range(4)])
     tasks = _read_tasks(source)
     outcomes = {
@@ -151,9 +137,6 @@ def test_only_tasks_whose_own_rewards_differ_are_kept(tmp_path):
 
 
 def test_partial_raw_rewards_that_differ_are_kept(tmp_path):
-    """reward_mode: raw preserves partial scores, so [0.2, 0.8] has real spread
-    and a non-zero advantage. Recoding every positive reward as "success" threw
-    exactly these tasks away."""
     source = _write_source(tmp_path / "src.jsonl", [_task("t1", "chrome"), _task("t2", "gimp"), _task("t3", "vlc")])
     kept, report = select_by_variance(
         _read_tasks(source),
@@ -163,7 +146,6 @@ def test_partial_raw_rewards_that_differ_are_kept(tmp_path):
     assert [entry["task_id"] for entry in report["no_spread"]] == ["t3"]
     spreads = {entry["task_id"]: entry["spread"] for entry in report["with_spread"]}
     assert spreads["t1"] == pytest.approx(0.6)
-    # The binary count would have called both of these unanimous successes.
     assert all(entry["successes"] == entry["samples"] for entry in report["with_spread"])
 
 
@@ -174,8 +156,6 @@ def test_a_task_probed_once_cannot_show_variance(tmp_path):
 
 
 def test_a_split_with_no_spread_anywhere_is_refused(tmp_path):
-    """Training on it would make every optimizer step a no-op, which is worth
-    an error rather than a run that looks like it worked."""
     source = _write_source(tmp_path / "src.jsonl", [_task(f"t{i}", "chrome") for i in range(4)])
     probe = _write_probe(tmp_path / "r.jsonl", [_rollout(f"t{i}", r) for i in range(4) for r in (0.0, 0.0)])
     with pytest.raises(Exception, match="differing rewards"):
@@ -190,10 +170,6 @@ def test_a_split_with_no_spread_anywhere_is_refused(tmp_path):
 
 
 def test_the_held_out_side_survives_variance_filtering(tmp_path):
-    """Filtering before splitting shrank the pool the split drew from and
-    produced an empty held_out.jsonl -- written successfully, so the run went
-    ahead and could report no before/after score at all. The holdout is frozen
-    from the unfiltered candidates instead."""
     source = _write_source(
         tmp_path / "src.jsonl",
         [_task(f"c{i}", "chrome") for i in range(5)] + [_task(f"g{i}", "gimp") for i in range(5)],

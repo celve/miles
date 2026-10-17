@@ -1,10 +1,3 @@
-"""Offline tests: no GPU, no model, no processor, no trace.
-
-media_binding.py's one claim: a screenshot's pixels sit under that
-screenshot's token positions. The cases below are the corruptions a summed
-total would wave through.
-"""
-
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -41,18 +34,12 @@ def test_exact_correspondence_passes():
 
 
 def test_more_screenshots_than_runs_is_rejected():
-    """Cutting the images to whichever prefix the runs total would accept a
-    sequence that lost an occurrence as a shorter correct one. The caller only
-    ever recovers screenshots a prompt referenced, so there is no legitimate
-    extra to tolerate."""
     tokens = [1, PAD, PAD, 2]
     with pytest.raises(MediaBindingError, match="1 image runs but 3 screenshots"):
         verify_image_token_layout(tokens, PAD, [2, 3, 7])
 
 
 def test_wrong_per_image_split_with_the_right_total_is_rejected():
-    """[2, 3] and [3, 2] both total 5. Accepting the total binds image 0's
-    pixels to image 1's positions, which is the corruption that matters."""
     tokens = [1, PAD, PAD, 2, PAD, PAD, PAD]
     with pytest.raises(MediaBindingError, match="image 0: ids give it 2 tokens, the processor gives it 3"):
         verify_image_token_layout(tokens, PAD, [3, 2])
@@ -77,9 +64,6 @@ def test_digests_are_ordered_and_content_addressed():
 
 
 def test_processor_identity_records_both_resize_spellings():
-    """Qwen3-VL-4B-Instruct pins its budget as `size`; older checkpoints use
-    min/max_pixels. A run is only reproducible if whichever one applied is
-    written down."""
     modern = processor_identity(
         SimpleNamespace(merge_size=2, patch_size=16, size={"longest_edge": 16777216, "shortest_edge": 65536})
     )
