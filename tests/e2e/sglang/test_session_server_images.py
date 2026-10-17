@@ -203,10 +203,16 @@ def _check_sample(sample: dict, images: dict, *, placeholder_id: int) -> None:
     inputs = sample["multimodal_train_inputs"]
     assert torch.equal(inputs["image_grid_thw"], images["image_grid_thw"]), inputs["image_grid_thw"]
     assert torch.equal(inputs["pixel_values"], images["pixel_values"]), "pixels differ from the frames the agent sent"
-    loss_mask, response = sample["loss_mask"], tokens[-sample["response_length"] :]
-    assert len(loss_mask) == len(response) == len(sample["rollout_log_probs"])
-    assert any(loss_mask) and not all(loss_mask), "observations and completions are not both in the response"
-    assert all(not mask for token, mask in zip(response, loss_mask, strict=True) if token == placeholder_id)
+    response_start = len(tokens) - sample["response_length"]
+    assert len(sample["loss_mask"]) == sample["response_length"] == len(sample["rollout_log_probs"])
+    sampled = {
+        position
+        for call in sample["weight_versions"]
+        for span in call["spans"]
+        for position in range(span["abs_start"], span["abs_end"])
+    }
+    expected_mask = [int(response_start + offset in sampled) for offset in range(sample["response_length"])]
+    assert list(sample["loss_mask"]) == expected_mask, "the loss mask is not exactly the sampled completions"
     assert any(logprob != 0.0 for logprob in sample["rollout_log_probs"])
     assert len(sample["weight_versions"]) == agent.NUM_IMAGE_TURNS
     assert sample["reward"] == sample["index"] % 2
@@ -230,14 +236,16 @@ def _summarize(samples: list[dict], *, placeholder_id: int) -> dict:
 
 def _check_train_batch(dump_dir: Path, rollout_id: int, samples: list[dict]) -> dict:
     group_of = {s["index"]: s["group_index"] for s in samples}
-    grid_of = {s["index"]: s["multimodal_train_inputs"]["image_grid_thw"] for s in samples}
+    images_of = {s["index"]: s["multimodal_train_inputs"] for s in samples}
     rewards = defaultdict(list)
     for path in sorted((dump_dir / "train_data").glob(f"{rollout_id}_*.pt")):
-        batch = torch.load(path, weights_only=False)["rollout_data"]
+        batch = torch.load(path, weights_only=False, map_location="cpu")["rollout_data"]
         for index, reward, inputs in zip(
             batch["sample_indices"], batch["rewards"], batch["multimodal_train_inputs"], strict=True
         ):
-            assert torch.equal(inputs["image_grid_thw"].cpu(), grid_of[index]), f"sample {index} lost its images"
+            expected = images_of[index]
+            assert inputs.keys() == expected.keys(), f"sample {index} reached the trainer with {sorted(inputs)}"
+            assert all(torch.equal(inputs[key], expected[key]) for key in expected), f"sample {index}'s images changed"
             rewards[group_of[index]].append(float(reward))
     assert sorted(len(r) for r in rewards.values()) == [N_SAMPLES_PER_PROMPT] * ROLLOUT_BATCH_SIZE, rewards
     for group_rewards in rewards.values():
