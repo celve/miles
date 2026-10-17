@@ -376,9 +376,8 @@ def execute(args: ScriptArgs):
             "--sequence-parallel "
             "--expert-model-parallel-size 1 "
             "--expert-tensor-parallel-size 1 "
-            "--recompute-granularity full "
-            "--recompute-method uniform "
-            "--recompute-num-layers 1 "
+            # No activation recompute: Megatron-Bridge copies it into the vision tower, whose checkpointed
+            # forward returns DeepStack features outside the graph, so the DeepStack mergers never train.
             "--attention-dropout 0.0 "
             "--hidden-dropout 0.0 "
             "--accumulate-allreduce-grads-in-fp32 "
