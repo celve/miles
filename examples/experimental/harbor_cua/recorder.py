@@ -31,15 +31,9 @@ from urllib.parse import unquote
 
 import httpx
 import uvicorn
+from examples.experimental.harbor_cua.calls import CallEvidenceError, MediaOccurrence, RecordedCall, RolloutRecord
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-
-from examples.experimental.harbor_cua.calls import (
-    CallEvidenceError,
-    MediaOccurrence,
-    RecordedCall,
-    RolloutRecord,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -149,9 +143,7 @@ def parse_choice(choice: dict, envelope: dict | None = None) -> ParsedChoice:
         content = (choice.get("logprobs") or {}).get("content") or []
         logprobs = [entry["logprob"] for entry in content if "logprob" in entry]
 
-    prompt_ids = (
-        choice.get("prompt_token_ids") or envelope.get("prompt_token_ids") or metadata.get("prompt_token_ids")
-    )
+    prompt_ids = choice.get("prompt_token_ids") or envelope.get("prompt_token_ids") or metadata.get("prompt_token_ids")
     if not isinstance(prompt_ids, list):
         raise CallEvidenceError(
             "the engine returned no prompt_token_ids; the recorder asks for them with "
@@ -170,6 +162,13 @@ def parse_choice(choice: dict, envelope: dict | None = None) -> ParsedChoice:
         finish_reason=choice.get("finish_reason"),
         meta_info=dict(meta_info),
     )
+
+
+def _refuse(record: RolloutRecord, reason: str, *, compactor: bool) -> None:
+    """Note a call kept without evidence; its response is still returned, so the agent acts on it."""
+    record.rejected.append(reason)
+    if not compactor:
+        record.unrecorded_policy_calls.append(reason)
 
 
 class CallRecorder:
@@ -293,11 +292,11 @@ class CallRecorder:
     ) -> None:
         index = len(record.calls)
         if media_problems:
-            record.rejected.append(f"call {index}: " + "; ".join(media_problems))
+            _refuse(record, f"call {index}: " + "; ".join(media_problems), compactor=compactor)
             return
         choices = data.get("choices") or []
         if not choices:
-            record.rejected.append(f"call {index}: the engine returned no choices")
+            _refuse(record, f"call {index}: the engine returned no choices", compactor=compactor)
             return
         try:
             parsed = parse_choice(choices[0], data)
@@ -321,9 +320,11 @@ class CallRecorder:
         except CallEvidenceError as exc:
             # The keys are in the message because the usual cause is a proxy that
             # re-serialises the reply and drops the fields the recorder asked for.
-            record.rejected.append(
+            _refuse(
+                record,
                 f"call {index}: {exc} (choice keys {sorted(choices[0])}, envelope keys {sorted(data)}, "
-                f"metadata {str(data.get('metadata'))[:200]})"
+                f"metadata {str(data.get('metadata'))[:200]})",
+                compactor=compactor,
             )
 
     async def _passthrough(self, path: str, request: Request) -> Response:

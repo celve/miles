@@ -17,11 +17,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
-from examples.experimental.harbor_cua.media import (
-    MediaMismatchError,
-    MediaProcessor,
-    placeholder_vision_sample,
-)
+from examples.experimental.harbor_cua.media import MediaMismatchError, MediaProcessor, placeholder_vision_sample
 from examples.experimental.harbor_cua.options import (
     UPSTREAM_AUTO,
     UPSTREAM_ROUTER,
@@ -33,6 +29,7 @@ from examples.experimental.harbor_cua.recorder import CallRecorder, RecorderErro
 from examples.experimental.harbor_cua.samples import build_samples
 from examples.experimental.harbor_cua.segments import segment_calls
 from examples.experimental.harbor_cua.trial_driver import TrialOutcome, run_trial
+
 from miles.rollout.agentic.rollout_limits import rollout_semaphore
 from miles.utils.types import Sample
 
@@ -195,13 +192,20 @@ def _check_call_accounting(record, outcome: TrialOutcome, metadata: dict[str, An
     spending the next episode, so the count is a lower bound rather than an equality:
     reactive compaction can add a call inside one episode, and the final-answer
     fallback adds one at the end. Fewer than one per episode can only mean a call the
-    agent loop made was taken for one of the compactor's.
+    agent loop made was taken for one of the compactor's. A policy call the agent acted
+    on without the recorder capturing it fails outright, since an extra call can make up
+    the count while that action's tokens train as masked context.
     """
     episodes = int((outcome.metadata.get("agent_metrics") or {}).get("n_episodes") or 0)
     actions = len(record.trained_calls())
     metadata["harbor_episodes"] = episodes
     metadata["recorded_trained_calls"] = actions
     metadata["rejected_calls"] = list(record.rejected)
+    if record.unrecorded_policy_calls:
+        raise ValueError(
+            f"{len(record.unrecorded_policy_calls)} policy calls reached the agent without token evidence: "
+            f"{record.unrecorded_policy_calls[:3]}"
+        )
     if episodes and actions < episodes:
         raise ValueError(
             f"recorded {actions} action calls for {episodes} Harbor episodes; "

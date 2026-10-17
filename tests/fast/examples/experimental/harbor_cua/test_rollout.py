@@ -4,11 +4,11 @@ from argparse import Namespace
 from types import SimpleNamespace
 
 import pytest
-
 from examples.experimental.harbor_cua import rollout as harbor_cua
 from examples.experimental.harbor_cua.trial_driver import TrialOutcome
-from miles.utils.types import Sample
 from tests.fast.examples.experimental.harbor_cua.conftest import png_bytes
+
+from miles.utils.types import Sample
 
 
 def args(**overrides):
@@ -36,7 +36,9 @@ def fn_input(sample, state):
 
 @pytest.fixture
 def state(fake_processor, request):
-    return SimpleNamespace(args=getattr(request, "param", args()), processor=fake_processor, tokenizer=fake_processor.tokenizer)
+    return SimpleNamespace(
+        args=getattr(request, "param", args()), processor=fake_processor, tokenizer=fake_processor.tokenizer
+    )
 
 
 @pytest.fixture
@@ -157,6 +159,19 @@ async def test_fewer_action_calls_than_episodes_is_a_write_off(stub, state, epis
     assert "action calls for 3 Harbor episodes" in sample.metadata["write_off_reason"]
 
 
+async def test_an_unrecorded_action_is_a_write_off_even_when_the_count_is_met(stub, state, episode):
+    episode.turn(image=png_bytes((4, 1, 0)))
+    episode.turn(image=png_bytes((4, 2, 0)))
+    episode.record.unrecorded_policy_calls.append("call 1: the engine returned no prompt_token_ids")
+    stub.outcome = outcome(episodes=2)
+
+    output = await harbor_cua.generate(fn_input(task_sample(9), state))
+
+    (sample,) = output.samples
+    assert sample.status is Sample.Status.ABORTED
+    assert "reached the agent without token evidence" in sample.metadata["write_off_reason"]
+
+
 async def test_a_text_only_episode_is_a_write_off_not_a_padded_sample(stub, state, episode):
     episode.turn()
     stub.outcome = outcome(episodes=1)
@@ -185,9 +200,7 @@ async def test_the_processor_fingerprint_is_recorded_on_every_sample(stub, state
 
 def test_generate_fn_output_contract():
     """Where base_types imports, the stand-in above must match the real type."""
-    base_types = pytest.importorskip(
-        "miles.rollout.base_types", reason="needs the sglang build a training node has"
-    )
+    base_types = pytest.importorskip("miles.rollout.base_types", reason="needs the sglang build a training node has")
     assert set(base_types.GenerateFnOutput.__dataclass_fields__) == {"samples"}
 
 

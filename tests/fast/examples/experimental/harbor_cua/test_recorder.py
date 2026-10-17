@@ -9,12 +9,15 @@ import pytest
 from examples.experimental.harbor_cua.recorder import CallRecorder, parse_media
 from tests.fast.examples.experimental.harbor_cua.conftest import png_bytes
 
+
 def data_url(payload: bytes, media_type: str = "image/webp") -> str:
     return f"data:{media_type};base64,{base64.b64encode(payload).decode()}"
 
 
 def chat_response(*, prompt_ids, output_ids, logprobs=None):
-    triples = [(logprob, token, "") for logprob, token in zip(logprobs or [-0.5] * len(output_ids), output_ids, strict=True)]
+    triples = [
+        (logprob, token, "") for logprob, token in zip(logprobs or [-0.5] * len(output_ids), output_ids, strict=True)
+    ]
     return {
         "model": "test-model",
         "choices": [
@@ -143,6 +146,20 @@ async def test_a_call_without_prompt_token_ids_is_refused_not_guessed(recorder):
 
     assert record.calls == []
     assert "return_prompt_token_ids" in record.rejected[0]
+    assert record.unrecorded_policy_calls == record.rejected
+
+
+async def test_a_refused_compactor_call_is_not_an_unrecorded_action(recorder):
+    response = chat_response(prompt_ids=[1], output_ids=[2])
+    response["choices"][0].pop("prompt_token_ids")
+    canned(recorder, response)
+    token = recorder.open_rollout()
+
+    await post_chat(recorder, token, messages_with(png_bytes((6, 6, 7))), headers={"X-Session-ID": "abc"})
+    record = recorder.take(token)
+
+    assert len(record.rejected) == 1
+    assert record.unrecorded_policy_calls == []
 
 
 async def test_a_remote_image_url_is_refused_rather_than_fetched(recorder):
@@ -184,6 +201,7 @@ async def test_an_engine_error_is_passed_through_and_noted(recorder):
     assert response.status_code == 500
     assert record.calls == []
     assert "engine returned 500" in record.rejected[0]
+    assert record.unrecorded_policy_calls == []
 
 
 async def test_calls_are_numbered_in_the_order_they_arrive(recorder):

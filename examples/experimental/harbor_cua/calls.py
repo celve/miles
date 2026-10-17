@@ -87,6 +87,8 @@ class RolloutRecord:
     arena: AssetArena = field(default_factory=AssetArena)
     calls: list[RecordedCall] = field(default_factory=list)
     rejected: list[str] = field(default_factory=list)
+    # Refused policy calls whose responses the agent still acted on; rollout.py writes such an episode off.
+    unrecorded_policy_calls: list[str] = field(default_factory=list)
 
     def trained_calls(self) -> list[RecordedCall]:
         """Every policy call except the compactor's own, which are context, not actions."""
