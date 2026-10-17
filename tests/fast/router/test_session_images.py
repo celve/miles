@@ -164,25 +164,28 @@ class ScriptedChatBackend:
         if image_urls:
             effective = BaseMultimodalProcessor._expand_input_ids(effective, self._counts(image_urls), self.vlm.pad_id)
         output_ids = self._output_ids(index)
-        choice = {
-            "index": 0,
-            "message": {"role": "assistant", "content": self.vlm.tokenizer.decode(output_ids)},
-            "finish_reason": "stop",
-            "meta_info": {
-                "id": f"chat-{index}",
-                "completion_tokens": len(output_ids),
-                "weight_version": "w0",
-                "output_token_logprobs": [[-i / 128, tid, None] for i, tid in enumerate(output_ids)],
-            },
-        }
-        if payload.get("return_prompt_token_ids") or payload.get("return_token_ids"):
-            choice["prompt_token_ids"] = effective
+        choices = []
+        for choice_index in range(payload.get("n") or 1):
+            choice = {
+                "index": choice_index,
+                "message": {"role": "assistant", "content": self.vlm.tokenizer.decode(output_ids)},
+                "finish_reason": "stop",
+                "meta_info": {
+                    "id": f"chat-{index}",
+                    "completion_tokens": len(output_ids),
+                    "weight_version": "w0",
+                    "output_token_logprobs": [[-i / 128, tid, None] for i, tid in enumerate(output_ids)],
+                },
+            }
+            if payload.get("return_prompt_token_ids") or payload.get("return_token_ids"):
+                choice["prompt_token_ids"] = effective
+            choices.append(choice)
         return {
             "id": f"chat-{index}",
             "object": "chat.completion",
             "created": 0,
             "model": "scripted",
-            "choices": [choice],
+            "choices": choices,
         }
 
 
@@ -599,18 +602,21 @@ class TestAgentCompatibility:
             assert differing == {"messages", "input_ids", "return_prompt_token_ids"}
             assert image_body["tools"] == TOOLS
 
-    def test_the_readback_is_neither_returned_nor_recorded(self, vlm):
+    def test_the_readback_is_neither_returned_nor_recorded_on_any_choice(self, vlm):
         with image_router(vlm, ["a"]) as env:
             session_id = _create_session(env.url)
-            response = chat(env, session_id, [user_turn(SHOT1, "look")])
-            assert "prompt_token_ids" not in response.json()["choices"][0]
+            body = {"messages": [user_turn(SHOT1, "look")], "max_tokens": 16, "n": 2}
+            choices = _post_chat(env.url, session_id, body).json()["choices"]
+            assert len(choices) == 2
+            assert not any("prompt_token_ids" in choice for choice in choices)
             record = requests.get(f"{env.url}/sessions/{session_id}", timeout=10).json()["records"][0]
             assert "return_prompt_token_ids" not in record["request"]
-            assert "prompt_token_ids" not in record["response"]["choices"][0]
+            assert not any("prompt_token_ids" in choice for choice in record["response"]["choices"])
 
-    def test_a_client_that_asks_for_prompt_ids_gets_the_engines(self, vlm):
+    def test_a_client_that_asks_for_prompt_ids_gets_the_engines_on_every_choice(self, vlm):
         with image_router(vlm, ["a"]) as env:
             session_id = _create_session(env.url)
-            body = {"messages": [user_turn(SHOT1, "look")], "max_tokens": 16, "return_prompt_token_ids": True}
-            ids = _post_chat(env.url, session_id, body).json()["choices"][0]["prompt_token_ids"]
-            assert image_token_runs(ids, vlm.pad_id) == expected_counts(vlm, [SHOT1])
+            body = {"messages": [user_turn(SHOT1, "look")], "max_tokens": 16, "n": 2, "return_prompt_token_ids": True}
+            choices = _post_chat(env.url, session_id, body).json()["choices"]
+            counts = expected_counts(vlm, [SHOT1])
+            assert [image_token_runs(choice["prompt_token_ids"], vlm.pad_id) for choice in choices] == [counts, counts]

@@ -201,7 +201,7 @@ class SessionCoreV2(SessionCore):
 
         response, choice, assistant_message, completion_token_ids = extract_completion(result)
         if prepared.has_images:
-            self._check_engine_expansion(choice, request_body, prepared)
+            self._check_engine_expansion(response, request_body, prepared)
         assistant_message = tito_tokenizer.postprocess_completion(
             choice=choice,
             assistant_message=assistant_message,
@@ -241,10 +241,13 @@ class SessionCoreV2(SessionCore):
 
         return _chat_client_response(result, response, response_intent)
 
-    def _check_engine_expansion(self, choice: dict, request_body: dict, prepared) -> None:
+    def _check_engine_expansion(self, response: dict, request_body: dict, prepared) -> None:
+        choices = response.get("choices") or [{}]
+        effective = choices[0].get("prompt_token_ids")
         # The reply and the record keep the engine's ids only when the client asked SGLang for them.
-        client_asked = request_body.get("return_prompt_token_ids") or request_body.get("return_token_ids")
-        effective = choice.get("prompt_token_ids") if client_asked else choice.pop("prompt_token_ids", None)
+        if not (request_body.get("return_prompt_token_ids") or request_body.get("return_token_ids")):
+            for choice in choices:
+                choice.pop("prompt_token_ids", None)
         assert_engine_expansion_matches(
             effective,
             expand_input_ids(
