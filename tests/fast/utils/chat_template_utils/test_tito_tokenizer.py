@@ -507,6 +507,7 @@ class TestResolveRequestArgs:
             (Qwen35TITOTokenizer, "add_vision_id", True, False),
             (Qwen36TITOTokenizer, "add_vision_id", True, False),
             (Qwen38SmallTITOTokenizer, "add_vision_id", True, False),
+            (Qwen3VLTITOTokenizer, "add_vision_id", True, False),
             (Qwen38SmallTITOTokenizer, "enable_thinking", True, False),
             (Qwen38SmallTITOTokenizer, "reasoning_effort", "low", "medium"),
             (GLM53TITOTokenizer, "reasoning_effort", "max", "low"),
@@ -939,10 +940,19 @@ class TestMergeTokensBoundary:
     # -- Qwen3-VL: the checkpoint's own template with the Qwen3 junction --
 
     @pytest.mark.parametrize(
-        "tito_type, matches_template", [(TITOTokenizerType.QWEN3_VL, True), (TITOTokenizerType.DEFAULT, False)]
+        "tito_type, template_kwargs, matches_template",
+        [
+            (TITOTokenizerType.QWEN3_VL, {}, True),
+            (TITOTokenizerType.QWEN3_VL, {"add_vision_id": True}, True),
+            (TITOTokenizerType.DEFAULT, {}, False),
+        ],
     )
-    def test_qwen3_vl_image_turn_after_a_model_stop(self, tito_type, matches_template):
-        tito = get_tito_tokenizer(_get_tokenizer("Qwen/Qwen3-VL-2B-Instruct", tito_type), tokenizer_type=tito_type)
+    def test_qwen3_vl_image_turn_after_a_model_stop(self, tito_type, template_kwargs, matches_template):
+        tito = get_tito_tokenizer(
+            _get_tokenizer("Qwen/Qwen3-VL-2B-Instruct", tito_type),
+            tokenizer_type=tito_type,
+            chat_template_kwargs=template_kwargs,
+        )
         image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}
         old = [
             {"role": "user", "content": [image, {"type": "text", "text": "Screen 1. What next?"}]},

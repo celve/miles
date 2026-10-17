@@ -361,6 +361,20 @@ class TestTemplate:
             assert vlm.tokenizer.decode(accumulated[accumulated.index(im_end) + 1]) == "\n"
             assert collect(env.url, session_id)[0].metadata["tito_session_mismatch"] == []
 
+    def test_image_labels_count_across_the_whole_session(self, vlm):
+        with image_router(vlm, ["clicked<|im_end|>", "done<|im_end|>"]) as env:
+            session_id = _create_session(env.url)
+            first = [user_turn(SHOT1, "step 1")]
+            body = {"max_tokens": 16, "temperature": 1.0}
+            labelled = {**body, "messages": first, "chat_template_kwargs": {"add_vision_id": True}}
+            assert _post_chat(env.url, session_id, labelled).status_code == 200
+            second = first + [assistant("clicked"), user_turn(SHOT2, "step 2")]
+            unlabelled = {**body, "messages": second, "chat_template_kwargs": {"add_vision_id": False}}
+            assert _post_chat(env.url, session_id, unlabelled).status_code == 200
+
+            assert "Picture 2: " in vlm.tokenizer.decode(env.backend.calls[1]["input_ids"])
+            assert collect(env.url, session_id)[0].metadata["tito_session_mismatch"] == []
+
 
 class TestRepeatedAndReordered:
     def test_the_same_screenshot_twice_is_two_occurrences(self, vlm):

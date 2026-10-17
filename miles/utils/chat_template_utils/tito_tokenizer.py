@@ -478,7 +478,23 @@ class QwenNextTITOTokenizer(Qwen3TITOTokenizer):
 class Qwen3VLTITOTokenizer(Qwen3TITOTokenizer):
     """Qwen3-VL Instruct: the Qwen3 token boundary with the checkpoint's own template, which renders images."""
 
-    FIXED_TEMPLATE = FixedTemplate()
+    FIXED_TEMPLATE = FixedTemplate(consistant_kwargs=["add_vision_id"])
+
+    def tokenize_additional_messages(
+        self,
+        old_messages: list[dict[str, Any]],
+        new_messages: list[dict[str, Any]],
+        *,
+        template_args: dict[str, Any] | None = None,
+    ) -> list[int]:
+        """Diff real-history renders because ``add_vision_id`` numbers images across the whole conversation."""
+        assert_messages_append_only_with_allowed_role(old_messages, new_messages, self.allowed_append_roles)
+        return self._tokenize_rendered_suffix(
+            old_messages,
+            new_messages[len(old_messages) :],
+            template_args=template_args,
+            add_generation_prompt=True,
+        )
 
 
 # ---------------------------------------------------------------------------
