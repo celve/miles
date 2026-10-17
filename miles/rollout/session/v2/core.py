@@ -18,7 +18,7 @@ from miles.rollout.session.core import (
 from miles.rollout.session.errors import SessionNotFoundError, TokenizationError
 from miles.rollout.session.generate_transport import (
     adapt_generate_response,
-    assert_effective_prompt_ids,
+    assert_engine_expansion_matches,
     build_generate_body,
     validate_image_request_features,
 )
@@ -68,10 +68,10 @@ class SessionCoreV2(SessionCore):
         metadata["max_trim_tokens"] = self.registry.tito_tokenizer.max_trim_tokens
         metadata["tree"] = tree_metadata(session)
         metadata["turn_args"] = filter_turn_args(latest.turn_args) if latest is not None else {}
-        if self.registry.image_support is not None:
+        if self.registry.image_processor is not None:
             # What bound this run's pixels. Launch-scoped, so one record per session
             # and per sample says everything a per-request copy would.
-            metadata["image_provenance"] = self.registry.image_support.provenance()
+            metadata["image_provenance"] = self.registry.image_processor.provenance()
         return metadata
 
     async def get_session(self, session_id: str) -> Response:
@@ -175,7 +175,7 @@ class SessionCoreV2(SessionCore):
                 config=self.config,
                 tito_tokenizer=self.registry.tito_tokenizer,
                 message_matcher=self.registry.message_matcher,
-                image_support=self.registry.image_support,
+                image_processor=self.registry.image_processor,
             )
             request_body, tito_tokenizer = prepared.body, self.registry.tito_tokenizer
             response_intent = prepared.response_intent
@@ -189,17 +189,20 @@ class SessionCoreV2(SessionCore):
 
             # An image turn goes to the native route, which is the only one that carries pixels
             # alongside pretokenized ids; a text turn keeps the chat route unchanged.
-            if prepared.has_media:
-                support = self.registry.image_support
-                validate_image_request_features(request_body, parser=support.engine.tool_call_parser)
+            if prepared.has_images:
+                image_processor = self.registry.image_processor
+                engine_settings = image_processor.engine_settings
+                validate_image_request_features(request_body, parser=engine_settings.tool_call_parser)
                 route = "generate"
                 proxy_body = orjson.dumps(
                     build_generate_body(
                         request_body,
-                        image_data=[session.media.arena.get(a).to_data_url() for a in prepared.media.asset_ids],
-                        content_hashes=list(prepared.media.asset_ids),
+                        image_data=[session.images.store.get(a).to_data_url() for a in prepared.images.image_ids],
+                        content_hashes=list(prepared.images.image_ids),
                         client_wants_logprobs=response_intent.logprobs,
-                        model_generation_config=support.sampling_defaults(),
+                        model_generation_config=engine_settings.model_generation_config(
+                            image_processor.checkpoint_generation_config
+                        ),
                     )
                 )
             else:
@@ -219,7 +222,7 @@ class SessionCoreV2(SessionCore):
         if result["status_code"] != 200:
             return proxy_result_to_response(result)
 
-        if prepared.has_media:
+        if prepared.has_images:
             result = self._chat_result_from_generate(result, request_body, prepared, response_intent)
         response, choice, assistant_message, completion_token_ids = extract_completion(result)
         assistant_message = tito_tokenizer.postprocess_completion(
@@ -255,7 +258,7 @@ class SessionCoreV2(SessionCore):
                 response_id=response.get("id", ""),
                 finish_reason=choice.get("finish_reason") or "",
                 turn_args=request_body,
-                media=prepared.media,
+                images=prepared.images,
             )
         # --- lock released ---
 
@@ -268,13 +271,13 @@ class SessionCoreV2(SessionCore):
         exactly the envelope the chat route would have produced.
         """
         generated = orjson.loads(result["response_body"])
-        assert_effective_prompt_ids(
+        assert_engine_expansion_matches(
             generated,
             expand_input_ids(
-                request_body["input_ids"], prepared.media_counts, self.registry.image_support.placeholder_id
+                request_body["input_ids"], prepared.image_token_counts, self.registry.image_processor.placeholder_id
             ),
-            prepared.media,
-            prepared.media_counts,
+            prepared.images,
+            prepared.image_token_counts,
         )
         envelope = adapt_generate_response(
             result,
@@ -282,7 +285,7 @@ class SessionCoreV2(SessionCore):
             model=request_body.get("model") or self.config.tito_model,
             tools=request_body.get("tools"),
             tool_choice=request_body.get("tool_choice"),
-            parsers=self.registry.image_support.parsers(),
+            parsers=self.registry.image_processor.engine_settings.parsers(self.registry.tokenizer),
             separate_reasoning=request_body.get("separate_reasoning", True),
             client_wants_logprobs=response_intent.logprobs,
         )

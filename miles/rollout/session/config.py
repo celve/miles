@@ -8,7 +8,7 @@ SESSION_IMAGE_SUPPORT_OFF = "off"
 SESSION_IMAGE_SUPPORT_QWEN3_VL = "qwen3_vl"
 
 # The engine launch settings that decide what an image becomes and how a reply is parsed.
-SESSION_IMAGE_ENGINE_FIELDS = (
+ENGINE_LAUNCH_SETTING_FIELDS = (
     "revision",
     "tokenizer_path",
     "mm_process_config",
@@ -27,7 +27,7 @@ def validate_session_image_args(args) -> None:
     so it runs at the end of ``miles_validate_args``.
     """
     support = getattr(args, "session_image_support", SESSION_IMAGE_SUPPORT_OFF)
-    args.session_image_engine = None
+    args.session_image_engine_settings = None
     if support == SESSION_IMAGE_SUPPORT_OFF:
         return
     if args.use_session_server != "v2":
@@ -51,10 +51,10 @@ def validate_session_image_args(args) -> None:
             "rows are sized on the sequence the engine expanded, while the session server's offsets are "
             "computed on the unexpanded render, so the two silently misalign"
         )
-    args.session_image_engine = resolve_session_image_engine(args)
+    args.session_image_engine_settings = resolve_engine_launch_settings(args)
 
 
-def resolve_session_image_engine(args) -> dict[str, Any] | None:
+def resolve_engine_launch_settings(args) -> dict[str, Any] | None:
     """The image settings every policy engine is launched with, read from this run's own args.
 
     Miles launches those engines itself from these args, so their settings are known before
@@ -78,7 +78,7 @@ def resolve_session_image_engine(args) -> dict[str, Any] | None:
             "have only been verified on regular engines"
         )
     settings = [
-        _engine_image_settings(args, group.overrides)
+        _group_launch_settings(args, group.overrides)
         for group in policy.server_groups
         if group.worker_type != WorkerType.PLACEHOLDER
     ]
@@ -88,24 +88,24 @@ def resolve_session_image_engine(args) -> dict[str, Any] | None:
             f"--session-image-support={support} needs every policy engine group to launch with the same "
             f"image settings, because the router picks any of them per turn; they differ in {differing}"
         )
-    check_session_image_engine(settings[0], checkpoint=args.hf_checkpoint)
+    check_engine_launch_settings(settings[0], checkpoint=args.hf_checkpoint)
     return settings[0]
 
 
-def _engine_image_settings(args, overrides: dict[str, Any]) -> dict[str, Any]:
+def _group_launch_settings(args, overrides: dict[str, Any]) -> dict[str, Any]:
     # The order `_compute_server_args` launches with: a group override beats --sglang-<field>.
     settings = {
         "model_path": overrides["model_path"],
-        **{name: overrides.get(name, getattr(args, f"sglang_{name}", None)) for name in SESSION_IMAGE_ENGINE_FIELDS},
+        **{name: overrides.get(name, getattr(args, f"sglang_{name}", None)) for name in ENGINE_LAUNCH_SETTING_FIELDS},
     }
     # SGLang loads the image processor from tokenizer_path, which defaults to model_path.
     settings["tokenizer_path"] = settings["tokenizer_path"] or settings["model_path"]
     return settings
 
 
-def check_session_image_engine(settings: dict[str, Any], *, checkpoint: str) -> None:
+def check_engine_launch_settings(settings: dict[str, Any], *, checkpoint: str) -> None:
     """Require the one engine image configuration whose pixels and parsing this path has verified."""
-    missing = [key for key in ("model_path", *SESSION_IMAGE_ENGINE_FIELDS) if key not in settings]
+    missing = [key for key in ("model_path", *ENGINE_LAUNCH_SETTING_FIELDS) if key not in settings]
     if missing:
         raise ValueError(f"the session image engine settings do not state {missing}")
     if settings["model_path"] != checkpoint:
@@ -175,7 +175,7 @@ class SessionServerConfig(FrozenStrictBaseModel):
     lora_train_only: bool
     use_session_server: bool | str | None
     session_image_support: str
-    session_image_engine: dict[str, Any] | None
+    session_image_engine_settings: dict[str, Any] | None
     session_image_text_only_leaf: str
     session_message_matcher: str
     pause_generation_mode: str | None
@@ -211,7 +211,7 @@ def compute_session_server_config(
         lora_train_only=getattr(args, "lora_train_only", False),
         use_session_server=getattr(args, "use_session_server", None),
         session_image_support=getattr(args, "session_image_support", SESSION_IMAGE_SUPPORT_OFF),
-        session_image_engine=getattr(args, "session_image_engine", None),
+        session_image_engine_settings=getattr(args, "session_image_engine_settings", None),
         session_image_text_only_leaf=getattr(args, "session_image_text_only_leaf", "drop"),
         session_message_matcher=getattr(args, "session_message_matcher", "strict"),
         pause_generation_mode=getattr(args, "pause_generation_mode", None),

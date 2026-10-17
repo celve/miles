@@ -27,10 +27,9 @@ from typing import Any
 
 from miles.rollout.session.config import SessionServerConfig
 from miles.rollout.session.errors import MessageValidationError, TokenizationError, TruncatedGenerationError
-from miles.rollout.session.image_processing import placeholder_runs
-from miles.rollout.session.image_support import SessionImageSupport, SessionMedia
+from miles.rollout.session.image_processing import SessionImageProcessor, SessionImages, placeholder_runs
+from miles.rollout.session.images import NO_IMAGES, PromptImages
 from miles.rollout.session.linear_trajectory import SessionRegistry, assert_pretokenized_prefix
-from miles.rollout.session.media import EMPTY_MEDIA, RequestMedia
 from miles.rollout.session.request_args import PreparedChatRequest, prepare_chat_request
 from miles.rollout.session.types import SessionRecord
 from miles.rollout.session.v2.tree_trajectory import AttachPoint, SessionTree, TrajectoryNode
@@ -56,8 +55,8 @@ class SessionStateV2:
     sampling_defaults: dict[str, Any] = field(default_factory=dict)
     sampling_support_replay: bool = False
     extra_key: str | None = None
-    # This session's interned image bytes and token counts; None on a text-only run.
-    media: SessionMedia | None = None
+    # This session's stored image bytes and token counts; None on a text-only run.
+    images: SessionImages | None = None
 
     def latest(self) -> TrajectoryNode | None:
         """The most recently committed generation (always a leaf), or ``None``
@@ -103,7 +102,7 @@ def prepare_token_ids_and_request_args(
     config: SessionServerConfig,
     tito_tokenizer: TITOTokenizer,
     message_matcher: SessionMessageMatcher | None = None,
-    image_support: SessionImageSupport | None = None,
+    image_processor: SessionImageProcessor | None = None,
 ) -> tuple[PreparedChatRequest, TrajectoryNode | None]:
     """Return the prepared request with `body["input_ids"]` and its parent for `commit_generation`."""
     request_messages = client_args.get("messages", [])
@@ -117,40 +116,40 @@ def prepare_token_ids_and_request_args(
         sampling_defaults=state.sampling_defaults,
         sampling_support_replay=state.sampling_support_replay,
     )
-    if image_support is not None and state.media is not None:
-        prepared.media, prepared.media_counts = state.media.ingest(request_messages)
-        _validate_media_against_parent(parent, prepared.media)
+    if image_processor is not None and state.images is not None:
+        prepared.images, prepared.image_token_counts = state.images.ingest(request_messages)
+        _validate_images_against_parent(parent, prepared.images)
     prepared.body["input_ids"] = _render_token_ids(
         parent, request_messages, template_args=prepared.template_args, tito_tokenizer=tito_tokenizer
     )
-    if image_support is not None:
-        _validate_placeholder_layout(prepared, image_support.placeholder_id)
+    if image_processor is not None:
+        _validate_placeholder_layout(prepared, image_processor.placeholder_id)
     return prepared, parent
 
 
-def _validate_media_against_parent(parent: TrajectoryNode | None, media: RequestMedia) -> None:
+def _validate_images_against_parent(parent: TrajectoryNode | None, images: PromptImages) -> None:
     """A continuation must keep every image its parent's prompt already carried.
 
-    The message matcher decided this request extends the parent; if the media
+    The message matcher decided this request extends the parent; if the images
     disagrees, the two disagree about what was shown, and reusing the parent's
     sampled tokens would bind them to different pixels.
     """
-    if parent is None or parent.media.is_prefix_of(media):
+    if parent is None or parent.images.is_prefix_of(images):
         return
     raise MessageValidationError(
-        f"request attaches to node seq={parent.seq}, whose prompt media "
-        f"{list(parent.media.asset_ids)} is not a prefix of this request's "
-        f"{list(media.asset_ids)}; an earlier image was replaced without changing its message"
+        f"request attaches to node seq={parent.seq}, whose prompt images "
+        f"{list(parent.images.image_ids)} is not a prefix of this request's "
+        f"{list(images.image_ids)}; an earlier image was replaced without changing its message"
     )
 
 
 def _validate_placeholder_layout(prepared: PreparedChatRequest, placeholder_id: int) -> None:
     """The render must hold exactly one placeholder per image, which is what the engine expands."""
     runs = placeholder_runs(prepared.body["input_ids"], placeholder_id)
-    if len(runs) != len(prepared.media_counts):
+    if len(runs) != len(prepared.image_token_counts):
         raise MessageValidationError(
             f"the rendered prompt holds {len(runs)} image placeholder run(s) but the request carries "
-            f"{len(prepared.media_counts)} image(s); the chat template and the media disagree"
+            f"{len(prepared.image_token_counts)} image(s); the chat template and the images disagree"
         )
     if any(run != 1 for run in runs):
         raise MessageValidationError(
@@ -221,7 +220,7 @@ def commit_generation(
     response_id: str,
     finish_reason: str,
     turn_args: dict[str, Any] | None = None,
-    media: RequestMedia = EMPTY_MEDIA,
+    images: PromptImages = NO_IMAGES,
 ) -> TrajectoryNode:
     """Validate and append one generation under *parent* (the request's attach
     node). Prefix validation is byte-identical to the pre-tree checkpoint check.
@@ -247,7 +246,7 @@ def commit_generation(
         record=record,
         finish_reason=finish_reason,
         turn_args=turn_args,
-        media=media,
+        images=images,
     )
     return node
 
@@ -269,10 +268,10 @@ class SessionRegistryV2(SessionRegistry):
         *,
         tito_tokenizer: TITOTokenizer,
         message_matcher: SessionMessageMatcher | None = None,
-        image_support: SessionImageSupport | None = None,
+        image_processor: SessionImageProcessor | None = None,
     ) -> None:
         super().__init__(tokenizer, tito_tokenizer=tito_tokenizer, message_matcher=message_matcher)
-        self.image_support = image_support
+        self.image_processor = image_processor
 
     def create_session(
         self,
@@ -288,7 +287,7 @@ class SessionRegistryV2(SessionRegistry):
             sampling_defaults=dict(sampling_defaults or {}),
             sampling_support_replay=sampling_support_replay,
             extra_key=extra_key,
-            media=self.image_support.new_session_media() if self.image_support is not None else None,
+            images=self.image_processor.new_session_images() if self.image_processor is not None else None,
         )
         return session_id
 

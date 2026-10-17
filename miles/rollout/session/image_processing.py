@@ -5,22 +5,25 @@ placeholder token in the rendered ids. SGLang expands the i-th placeholder into
 ``counts[i]`` copies and keeps every other token verbatim
 (``base_processor._expand_input_ids``), so the sequence inference consumed is a
 pure positional function of the rendered ids and the per-image counts. This
-module is that function, plus the processor call the counts and pixels come from.
+module is that function, the processor call the counts and pixels come from, and
+``SessionImageProcessor``, which holds the processor and the engines' launch settings.
 
 Everything here works on one image at a time and concatenates: Qwen-VL resizes
-and patchifies each image independently, so per-asset outputs stacked in
+and patchifies each image independently, so per-image outputs stacked in
 occurrence order equal a single multi-image processor call.
 """
 
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import torch
 
-from miles.rollout.session.media import MediaAsset
-from miles.utils.processing_utils import call_processor, extract_multimodal_train_inputs
+from miles.rollout.session.config import SESSION_IMAGE_SUPPORT_OFF, SessionServerConfig, check_engine_launch_settings
+from miles.rollout.session.generate_transport import CompletionParsers
+from miles.rollout.session.images import NO_IMAGES, ImageStore, PromptImages, StoredImage, extract_prompt_images
+from miles.utils.processing_utils import call_processor, extract_multimodal_train_inputs, load_processor
 
 logger = logging.getLogger(__name__)
 
@@ -29,12 +32,8 @@ GRID_KEY = "image_grid_thw"
 
 
 @dataclass(frozen=True)
-class ProcessorFingerprint:
-    """What a processed image depends on besides its own bytes.
-
-    Recorded on every request and compared across turns: a run whose resize
-    settings or processor revision changed cannot reuse an earlier turn's pixels.
-    """
+class ImageProcessorSettings:
+    """The processor's placeholder token and resize settings, fixed for the process and recorded with every sample."""
 
     checkpoint: str
     image_token: str
@@ -58,7 +57,7 @@ class ProcessorFingerprint:
 
 @dataclass(frozen=True)
 class ProcessedImage:
-    """One asset's full processor output: the trainer's kwargs for that image."""
+    """One image's full processor output: the trainer's kwargs for that image."""
 
     train_inputs: dict[str, torch.Tensor]  # trainer kwargs, e.g. pixel_values + image_grid_thw
     token_count: int  # placeholder tokens this image expands into
@@ -79,85 +78,88 @@ class ImageTokenCounter:
     survived.
     """
 
-    def __init__(self, processor: Any, fingerprint: ProcessorFingerprint) -> None:
+    def __init__(self, processor: Any, processor_settings: ImageProcessorSettings) -> None:
         self.processor = processor
-        self.fingerprint = fingerprint
+        self.processor_settings = processor_settings
         self._counts: dict[str, int] = {}
 
-    def count(self, asset: MediaAsset) -> int:
-        cached = self._counts.get(asset.asset_id)
+    def count(self, stored: StoredImage) -> int:
+        cached = self._counts.get(stored.image_id)
         if cached is not None:
             return cached
-        count = _count_from_size(self.processor, asset)
-        self._counts[asset.asset_id] = count
+        count = _count_from_size(self.processor, stored)
+        self._counts[stored.image_id] = count
         return count
 
-    def count_all(self, assets: Sequence[MediaAsset]) -> list[int]:
-        return [self.count(asset) for asset in assets]
+    def count_all(self, stored_images: Sequence[StoredImage]) -> list[int]:
+        return [self.count(stored) for stored in stored_images]
 
 
-def _count_from_size(processor: Any, asset: MediaAsset) -> int:
+def _count_from_size(processor: Any, stored: StoredImage) -> int:
     """How many placeholder tokens this image expands into, read from its header."""
     from io import BytesIO
 
     from PIL import Image
 
-    with Image.open(BytesIO(asset.data)) as handle:
+    with Image.open(BytesIO(stored.data)) as handle:
         size = (handle.height, handle.width)
     counts = processor._get_num_multimodal_tokens(image_sizes=[size]).num_image_tokens
     count = int(counts[0])
     if count <= 0:
-        raise ValueError(f"{asset.asset_id} ({size[1]}x{size[0]}) expands into {count} tokens")
+        raise ValueError(f"{stored.image_id} ({size[1]}x{size[0]}) expands into {count} tokens")
     return count
 
 
-def process_image(processor: Any, asset: MediaAsset, fingerprint: ProcessorFingerprint) -> ProcessedImage:
+def process_image(processor: Any, stored: StoredImage, processor_settings: ImageProcessorSettings) -> ProcessedImage:
     """Run the processor over one image's bytes, with its placeholder as the text."""
     from io import BytesIO
 
     from PIL import Image
 
-    with Image.open(BytesIO(asset.data)) as handle:
+    with Image.open(BytesIO(stored.data)) as handle:
         image = handle.convert("RGB")
-    output = call_processor(processor, fingerprint.image_token, {"images": [image]})
+    output = call_processor(processor, processor_settings.image_token, {"images": [image]})
     train_inputs = extract_multimodal_train_inputs(output)
     if not train_inputs or GRID_KEY not in train_inputs:
         raise ValueError(
-            f"processor produced no {GRID_KEY} for {asset.asset_id}; "
+            f"processor produced no {GRID_KEY} for {stored.image_id}; "
             f"keys={sorted(train_inputs or {})} — this model is not supported by the session image path"
         )
-    _assert_tensor_values(train_inputs, asset.asset_id)
+    _assert_tensor_values(train_inputs, stored.image_id)
     grid = train_inputs[GRID_KEY]
     if tuple(grid.shape) != (1, 3):
-        raise ValueError(f"expected one {GRID_KEY} row for {asset.asset_id}, got shape {tuple(grid.shape)}")
-    token_count = int(torch.prod(grid, dim=-1).sum().item()) // (fingerprint.merge_size**2)
+        raise ValueError(f"expected one {GRID_KEY} row for {stored.image_id}, got shape {tuple(grid.shape)}")
+    token_count = int(torch.prod(grid, dim=-1).sum().item()) // (processor_settings.merge_size**2)
     return ProcessedImage(train_inputs=train_inputs, token_count=token_count)
 
 
 def process_images(
-    processor: Any, assets: Sequence[MediaAsset], fingerprint: ProcessorFingerprint, expected_counts: Sequence[int]
+    processor: Any,
+    stored_images: Sequence[StoredImage],
+    processor_settings: ImageProcessorSettings,
+    expected_counts: Sequence[int],
 ) -> list[ProcessedImage]:
     """Process the retained images and check each against the count serving used.
 
     A disagreement means the pixels no longer match the token span they are bound
     to, which is the one failure that would silently train on the wrong image.
     """
-    processed = [process_image(processor, asset, fingerprint) for asset in assets]
+    processed = [process_image(processor, stored, processor_settings) for stored in stored_images]
     for index, (image, expected) in enumerate(zip(processed, expected_counts, strict=True)):
         if image.token_count != expected:
             raise ValueError(
-                f"image {index} ({assets[index].asset_id}) processes to {image.token_count} tokens but "
+                f"image {index} ({stored_images[index].image_id}) processes to {image.token_count} tokens but "
                 f"serving laid out {expected}; grid={image.grid.tolist()}"
             )
     return processed
 
 
-def _assert_tensor_values(train_inputs: dict[str, Any], asset_id: str) -> None:
+def _assert_tensor_values(train_inputs: dict[str, Any], image_id: str) -> None:
     """The trainer calls ``.to(device)`` on every value, so none may be a list or array."""
     for key, value in train_inputs.items():
         if not isinstance(value, torch.Tensor):
             raise ValueError(
-                f"processor output {key!r} for {asset_id} is {type(value).__name__}, not a torch.Tensor; "
+                f"processor output {key!r} for {image_id} is {type(value).__name__}, not a torch.Tensor; "
                 "the trainer moves every multimodal value to the device unconditionally"
             )
 
@@ -219,7 +221,7 @@ def retained_image_count(expanded_ids: Sequence[int], counts: Sequence[int], pla
             break
         raise ValueError(
             f"placeholder run {index} has {run} tokens but image {index} expands into {expected}; "
-            "the token sequence and its media disagree"
+            "the token sequence and its images disagree"
         )
     return retained
 
@@ -235,14 +237,14 @@ def merge_train_inputs(processed: Sequence[ProcessedImage]) -> dict[str, torch.T
     return {key: torch.cat([image.train_inputs[key] for image in processed], dim=0) for key in sorted(keys)}
 
 
-def build_fingerprint(processor: Any, tokenizer: Any, *, checkpoint: str) -> ProcessorFingerprint:
+def read_processor_settings(processor: Any, tokenizer: Any, *, checkpoint: str) -> ImageProcessorSettings:
     """Read the resize and placeholder settings this run is pinned to."""
     image_processor = getattr(processor, "image_processor", None)
     image_token = getattr(processor, "image_token", None) or "<|image_pad|>"
     image_token_id = tokenizer.convert_tokens_to_ids(image_token)
     if image_token_id is None or image_token_id == getattr(tokenizer, "unk_token_id", None):
         raise ValueError(f"tokenizer does not know the image placeholder {image_token!r}")
-    return ProcessorFingerprint(
+    return ImageProcessorSettings(
         checkpoint=checkpoint,
         image_token=image_token,
         image_token_id=int(image_token_id),
@@ -255,3 +257,135 @@ def build_fingerprint(processor: Any, tokenizer: Any, *, checkpoint: str) -> Pro
 
 def _optional_int(value: Any) -> int | None:
     return None if value is None else int(value)
+
+
+@dataclass(frozen=True)
+class EngineLaunchSettings:
+    """What the policy engines launch with that decides an image's pixels and how a reply is parsed."""
+
+    model_path: str
+    revision: str | None
+    tokenizer_path: str
+    mm_process_config: dict[str, Any] | None
+    image_processor_backend: str
+    disable_fast_image_processor: bool
+    sampling_defaults: str
+    tool_call_parser: str | None
+    reasoning_parser: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def parsers(self, tokenizer: Any) -> CompletionParsers:
+        """The parsers the engines apply on the chat route, so both routes in one session agree."""
+        return CompletionParsers(
+            reasoning_parser=self.reasoning_parser, tool_call_parser=self.tool_call_parser, tokenizer=tokenizer
+        )
+
+    def model_generation_config(self, checkpoint_generation_config: dict[str, Any]) -> dict[str, Any]:
+        """Mirrors `ModelConfig.get_default_sampling_params`: the checkpoint's defaults only under `model`."""
+        return dict(checkpoint_generation_config) if self.sampling_defaults == "model" else {}
+
+
+@dataclass(frozen=True)
+class SessionImageProcessor:
+    """The checkpoint's image processor and the settings every image turn in this process shares."""
+
+    hf_processor: Any
+    processor_settings: ImageProcessorSettings
+    engine_settings: EngineLaunchSettings
+    checkpoint_generation_config: dict[str, Any]
+    text_only_leaf: str  # "drop" | "keep"
+
+    @property
+    def placeholder_id(self) -> int:
+        return self.processor_settings.image_token_id
+
+    def new_session_images(self) -> "SessionImages":
+        return SessionImages(token_counter=ImageTokenCounter(self.hf_processor, self.processor_settings))
+
+    def provenance(self) -> dict[str, Any]:
+        """What bound this run's pixels, recorded with the session and every sample."""
+        return {"processor": self.processor_settings.to_dict(), "engine": self.engine_settings.to_dict()}
+
+    def compute_pixels(self, image_ids: list[str], counts: list[int], images: "SessionImages") -> list[ProcessedImage]:
+        stored = [images.store.get(image_id) for image_id in image_ids]
+        return process_images(self.hf_processor, stored, self.processor_settings, counts)
+
+
+@dataclass
+class SessionImages:
+    """One session's image bytes, keyed by content, and their token counts."""
+
+    token_counter: ImageTokenCounter
+    store: ImageStore = field(default_factory=ImageStore)
+
+    def ingest(self, messages: list[dict[str, Any]]) -> tuple[PromptImages, list[int]]:
+        """Store a request's images and say how many tokens each expands into."""
+        images = extract_prompt_images(messages, self.store)
+        if not images.occurrences:
+            return NO_IMAGES, []
+        return images, self.counts_for(images)
+
+    def counts_for(self, images: PromptImages) -> list[int]:
+        return self.token_counter.count_all([self.store.get(image_id) for image_id in images.image_ids])
+
+
+# The fields SGLang's ModelConfig.get_default_sampling_params reads from a checkpoint.
+_GENERATION_CONFIG_KEYS = ("repetition_penalty", "temperature", "top_k", "top_p", "min_p")
+
+
+def build_session_image_processor(config: SessionServerConfig, tokenizer: Any) -> SessionImageProcessor | None:
+    """Load the image processor for an image-enabled run, or ``None`` for text."""
+    if config.session_image_support == SESSION_IMAGE_SUPPORT_OFF:
+        return None
+    if config.session_image_engine_settings is None:
+        raise ValueError(
+            f"--session-image-support={config.session_image_support} needs the policy engines' image "
+            "settings, which validate_session_image_args reads from the launch args"
+        )
+    # Checked again here because a config can also be built by hand, as scripts and tests do.
+    check_engine_launch_settings(config.session_image_engine_settings, checkpoint=config.hf_checkpoint)
+    hf_processor = load_processor(config.hf_checkpoint, trust_remote_code=True)
+    if hf_processor is None:
+        raise ValueError(
+            f"--session-image-support={config.session_image_support} needs an image processor, but "
+            f"{config.hf_checkpoint!r} provides none"
+        )
+    if not hasattr(hf_processor, "_get_num_multimodal_tokens"):
+        raise ValueError(
+            f"{config.hf_checkpoint!r}'s processor has no _get_num_multimodal_tokens, so per-image token "
+            "counts cannot be derived without processing every image on every turn"
+        )
+    processor_settings = read_processor_settings(hf_processor, tokenizer, checkpoint=config.hf_checkpoint)
+    engine_settings = EngineLaunchSettings(**config.session_image_engine_settings)
+    logger.info(
+        "[session] Image support=%s processor=%s engine=%s text_only_leaf=%s",
+        config.session_image_support,
+        processor_settings.to_dict(),
+        engine_settings.to_dict(),
+        config.session_image_text_only_leaf,
+    )
+    return SessionImageProcessor(
+        hf_processor=hf_processor,
+        processor_settings=processor_settings,
+        engine_settings=engine_settings,
+        checkpoint_generation_config=read_checkpoint_generation_config(config.hf_checkpoint),
+        text_only_leaf=config.session_image_text_only_leaf,
+    )
+
+
+def read_checkpoint_generation_config(checkpoint: str) -> dict[str, Any]:
+    """The checkpoint's own sampling defaults, for a field the request omits."""
+    from transformers import GenerationConfig
+
+    try:
+        config = GenerationConfig.from_pretrained(checkpoint).to_dict()
+    except Exception as exc:
+        logger.warning(
+            "[session] No generation config for %s (%s); omitted sampling fields will take the engine's own fallbacks",
+            checkpoint,
+            exc,
+        )
+        return {}
+    return {key: config[key] for key in _GENERATION_CONFIG_KEYS if config.get(key) is not None}

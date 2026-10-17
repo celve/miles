@@ -21,7 +21,7 @@ from miles.rollout.generate_utils.rollout_topk_logprobs import configure_rollout
 from miles.rollout.generate_utils.sampling_mask import validate_sampling_support_request
 from miles.rollout.session.config import SESSION_IMAGE_SUPPORT_OFF, SessionServerConfig
 from miles.rollout.session.errors import MessageValidationError
-from miles.rollout.session.media import EMPTY_MEDIA, IMAGE_PART_TYPES, RequestMedia
+from miles.rollout.session.images import IMAGE_PART_TYPES, NO_IMAGES, PromptImages
 from miles.utils.chat_template_utils.tito_tokenizer import TITOTokenizer, extract_template_args
 from miles.utils.lora.utils import LORA_ADAPTER_NAME, lora_rollout_enabled
 
@@ -62,19 +62,19 @@ class PreparedChatRequest:
     """Outbound body before adding ``input_ids``, template args to render them,
     and what the client asked the response to carry.
 
-    ``media`` and ``media_counts`` are this request's image occurrences in prompt
+    ``images`` and ``image_token_counts`` are this request's image occurrences in prompt
     order and the tokens each expands into; both are empty on a text request.
     """
 
     body: dict[str, Any]
     template_args: dict[str, Any]
     response_intent: ClientResponseIntent
-    media: RequestMedia = EMPTY_MEDIA
-    media_counts: list[int] = field(default_factory=list)
+    images: PromptImages = NO_IMAGES
+    image_token_counts: list[int] = field(default_factory=list)
 
     @property
-    def has_media(self) -> bool:
-        return bool(self.media.occurrences)
+    def has_images(self) -> bool:
+        return bool(self.images.occurrences)
 
 
 def prepare_chat_request(

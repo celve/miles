@@ -3,10 +3,10 @@
 A screenshot harness replays its whole history every turn, so the same picture
 arrives many times and two different pictures can share a size. Content, not
 position or URL, is therefore the identity: every image is snapshotted to bytes
-on arrival and interned under the SHA-256 of those bytes, and each *appearance*
+on arrival and stored under the SHA-256 of those bytes, and each *appearance*
 stays a separate ordered occurrence so repeats and reorderings remain visible.
 
-The arena lives on the session and dies with it. Extraction reads the OpenAI
+The store lives on the session and dies with it. Extraction reads the OpenAI
 chat content parts and never mutates them: ``messages`` is shared read-only with
 the recorded request.
 """
@@ -29,10 +29,10 @@ _SUPPORTED_MIME_TYPES = ("image/png", "image/jpeg", "image/webp", "image/gif", "
 
 
 @dataclass(frozen=True)
-class MediaAsset:
+class StoredImage:
     """One image's immutable bytes and the identity derived from them."""
 
-    asset_id: str  # "sha256:<64 hex>", the spelling SGLang's mm_content_hashes takes
+    image_id: str  # "sha256:<64 hex>", the spelling SGLang's mm_content_hashes takes
     data: bytes
     mime_type: str
 
@@ -41,66 +41,66 @@ class MediaAsset:
 
 
 @dataclass(frozen=True)
-class MediaOccurrence:
-    """One appearance of an asset in a request, located for diagnostics."""
+class ImageOccurrence:
+    """One appearance of a stored image in a request, located for diagnostics."""
 
-    asset_id: str
+    image_id: str
     message_index: int
     part_index: int
 
 
 @dataclass(frozen=True)
-class RequestMedia:
+class PromptImages:
     """A request's image occurrences in prompt order."""
 
-    occurrences: tuple[MediaOccurrence, ...] = ()
+    occurrences: tuple[ImageOccurrence, ...] = ()
 
     def __len__(self) -> int:
         return len(self.occurrences)
 
     @property
-    def asset_ids(self) -> tuple[str, ...]:
-        return tuple(occurrence.asset_id for occurrence in self.occurrences)
+    def image_ids(self) -> tuple[str, ...]:
+        return tuple(occurrence.image_id for occurrence in self.occurrences)
 
-    def is_prefix_of(self, other: "RequestMedia") -> bool:
-        return other.asset_ids[: len(self.asset_ids)] == self.asset_ids
-
-
-EMPTY_MEDIA = RequestMedia()
+    def is_prefix_of(self, other: "PromptImages") -> bool:
+        return other.image_ids[: len(self.image_ids)] == self.image_ids
 
 
-class MediaArena:
-    """Session-scoped interning store: one entry per distinct image content."""
+NO_IMAGES = PromptImages()
+
+
+class ImageStore:
+    """Session-scoped store: one entry per distinct image content."""
 
     def __init__(self) -> None:
-        self._assets: dict[str, MediaAsset] = {}
+        self._images: dict[str, StoredImage] = {}
 
-    def intern(self, data: bytes, mime_type: str) -> MediaAsset:
-        asset_id = f"sha256:{hashlib.sha256(data).hexdigest()}"
-        existing = self._assets.get(asset_id)
+    def add(self, data: bytes, mime_type: str) -> StoredImage:
+        image_id = f"sha256:{hashlib.sha256(data).hexdigest()}"
+        existing = self._images.get(image_id)
         if existing is not None:
             return existing
-        asset = MediaAsset(asset_id=asset_id, data=data, mime_type=mime_type)
-        self._assets[asset_id] = asset
-        return asset
+        stored = StoredImage(image_id=image_id, data=data, mime_type=mime_type)
+        self._images[image_id] = stored
+        return stored
 
-    def get(self, asset_id: str) -> MediaAsset:
-        asset = self._assets.get(asset_id)
-        if asset is None:
-            raise KeyError(f"unknown media asset {asset_id!r}")
-        return asset
+    def get(self, image_id: str) -> StoredImage:
+        stored = self._images.get(image_id)
+        if stored is None:
+            raise KeyError(f"no stored image {image_id!r}")
+        return stored
 
     def __len__(self) -> int:
-        return len(self._assets)
+        return len(self._images)
 
     @property
     def total_bytes(self) -> int:
-        return sum(len(asset.data) for asset in self._assets.values())
+        return sum(len(stored.data) for stored in self._images.values())
 
 
-def extract_request_media(messages: list[dict[str, Any]], arena: MediaArena) -> RequestMedia:
-    """Snapshot every image in *messages* into *arena*, in prompt order."""
-    occurrences: list[MediaOccurrence] = []
+def extract_prompt_images(messages: list[dict[str, Any]], store: ImageStore) -> PromptImages:
+    """Snapshot every image in *messages* into *store*, in prompt order."""
+    occurrences: list[ImageOccurrence] = []
     for message_index, message in enumerate(messages):
         content = message.get("content")
         if not isinstance(content, list):
@@ -112,11 +112,11 @@ def extract_request_media(messages: list[dict[str, Any]], arena: MediaArena) -> 
             if part_type not in IMAGE_PART_TYPES:
                 _reject_unsupported_media_part(part_type, message_index, part_index)
                 continue
-            asset = arena.intern(*_resolve_image_part(part, message_index, part_index))
+            stored = store.add(*_resolve_image_part(part, message_index, part_index))
             occurrences.append(
-                MediaOccurrence(asset_id=asset.asset_id, message_index=message_index, part_index=part_index)
+                ImageOccurrence(image_id=stored.image_id, message_index=message_index, part_index=part_index)
             )
-    return RequestMedia(occurrences=tuple(occurrences))
+    return PromptImages(occurrences=tuple(occurrences))
 
 
 def _reject_unsupported_media_part(part_type: Any, message_index: int, part_index: int) -> None:

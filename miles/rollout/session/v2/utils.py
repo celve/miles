@@ -90,7 +90,7 @@ def build_leaf_material(
             sample = merge_samples_with_addition_r3(args, turns, records, registry.tokenizer)
         else:
             sample = merge_samples(turns, registry.tokenizer)
-        if registry.image_support is not None and not _attach_multimodal_inputs(
+        if registry.image_processor is not None and not _add_pixels_or_drop(
             sample, leaf, leaf_counts, state, registry
         ):
             continue
@@ -104,9 +104,9 @@ def build_leaf_material(
                 "response_id": leaf.response_id,
             },
         }
-        if registry.image_support is not None:
-            flat["prompt_media"] = {str(node.seq): list(node.media.asset_ids) for node in path}
-            flat["image_provenance"] = registry.image_support.provenance()
+        if registry.image_processor is not None:
+            flat["prompt_image_ids"] = {str(node.seq): list(node.images.image_ids) for node in path}
+            flat["image_provenance"] = registry.image_processor.provenance()
         if computed_mismatch is not None and leaf.seq in computed_mismatch:
             mismatch = computed_mismatch[leaf.seq]
         else:
@@ -137,27 +137,27 @@ def _expanded_path(
     weight-version arithmetic describes the real sequence with no index remapping.
     """
     records = [node.record for node in path]
-    if registry.image_support is None or state.media is None or not leaf.media.occurrences:
+    if registry.image_processor is None or state.images is None or not leaf.images.occurrences:
         return records, leaf.token_ids, []
-    placeholder_id = registry.image_support.placeholder_id
+    placeholder_id = registry.image_processor.placeholder_id
     expanded_records = [
         node.record.model_copy(
             update={
                 "request": {
                     **node.record.request,
                     "input_ids": expand_input_ids(
-                        node.record.request["input_ids"], state.media.counts_for(node.media), placeholder_id
+                        node.record.request["input_ids"], state.images.counts_for(node.images), placeholder_id
                     ),
                 }
             }
         )
         for node in path
     ]
-    leaf_counts = state.media.counts_for(leaf.media)
+    leaf_counts = state.images.counts_for(leaf.images)
     return expanded_records, expand_input_ids(leaf.token_ids, leaf_counts, placeholder_id), leaf_counts
 
 
-def _attach_multimodal_inputs(
+def _add_pixels_or_drop(
     sample: Sample,
     leaf: TrajectoryNode,
     leaf_counts: list[int],
@@ -166,18 +166,18 @@ def _attach_multimodal_inputs(
 ) -> bool:
     """Bind the surviving token sequence to its images; False drops the sample.
 
-    The media comes from the tokens that survived truncation, not from the leaf's
+    The images comes from the tokens that survived truncation, not from the leaf's
     last request: a cut that lands inside an image leaves pixels whose token span
     is gone.
     """
-    support = registry.image_support
+    image_processor = registry.image_processor
     retained = (
-        retained_image_count(sample.tokens, leaf_counts, support.placeholder_id)
-        if leaf_counts and state.media is not None
+        retained_image_count(sample.tokens, leaf_counts, image_processor.placeholder_id)
+        if leaf_counts and state.images is not None
         else 0
     )
     if retained == 0:
-        if support.text_only_leaf == "drop":
+        if image_processor.text_only_leaf == "drop":
             logger.info(
                 "Dropping leaf seq=%d: no image survives in its %d tokens (--session-image-text-only-leaf=drop)",
                 leaf.seq,
@@ -185,6 +185,8 @@ def _attach_multimodal_inputs(
             )
             return False
         return True
-    processed = support.process(list(leaf.media.asset_ids[:retained]), leaf_counts[:retained], state.media)
+    processed = image_processor.compute_pixels(
+        list(leaf.images.image_ids[:retained]), leaf_counts[:retained], state.images
+    )
     sample.multimodal_train_inputs = merge_train_inputs(processed)
     return True

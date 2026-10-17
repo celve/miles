@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from miles.rollout.session.errors import MessageValidationError, UpstreamResponseError
-from miles.rollout.session.media import RequestMedia
+from miles.rollout.session.images import PromptImages
 
 logger = logging.getLogger(__name__)
 
@@ -128,8 +128,8 @@ def build_generate_body(
     return body
 
 
-def assert_effective_prompt_ids(
-    response: dict[str, Any], expected_ids: list[int], media: RequestMedia, counts: list[int]
+def assert_engine_expansion_matches(
+    response: dict[str, Any], expected_ids: list[int], images: PromptImages, counts: list[int]
 ) -> None:
     """Compare the ids inference consumed against the ids we meant it to consume.
 
@@ -154,7 +154,7 @@ def assert_effective_prompt_ids(
     raise UpstreamResponseError(
         f"effective prompt ids differ from the rendered expansion: engine has {len(effective)} tokens, "
         f"the session server expected {len(expected_ids)} (first difference at index {first_diff}); "
-        f"media={list(media.asset_ids)} counts={counts} — the engine's processor settings or image "
+        f"images={list(images.image_ids)} counts={counts} — the engine's processor settings or image "
         "decoding disagree with this run's pinned processor"
     )
 

@@ -196,7 +196,7 @@ class ScriptedGenerateBackend:
         }
 
 
-# What `resolve_session_image_engine` reads from SGLang 0.5.22's own launch defaults.
+# What `resolve_engine_launch_settings` reads from SGLang 0.5.22's own launch defaults.
 ENGINE_SETTINGS = {
     "model_path": CHECKPOINT,
     "revision": None,
@@ -230,7 +230,7 @@ def image_server_args(engine: dict | None = None, **extra) -> dict[str, Any]:
         "lora_adapter_path": None,
         "use_session_server": "v2",
         "session_image_support": "qwen3_vl",
-        "session_image_engine": {**ENGINE_SETTINGS, **(engine or {})},
+        "session_image_engine_settings": {**ENGINE_SETTINGS, **(engine or {})},
         "session_image_text_only_leaf": "drop",
         "session_server_instance_id": uuid.uuid4().hex,
         "pause_generation_mode": "retract",
@@ -552,7 +552,7 @@ class TestEngineSettings:
 
     def test_settings_that_state_nothing_refuse_to_start(self, vlm):
         with pytest.raises(ValueError, match="needs the policy engines' image settings"):
-            build_server(image_server_args(session_image_engine=None), backend_url="http://127.0.0.1:9")
+            build_server(image_server_args(session_image_engine_settings=None), backend_url="http://127.0.0.1:9")
 
     def test_the_server_starts_with_nothing_behind_it(self, vlm):
         """Miles starts this server before any engine, so building it must contact nothing."""

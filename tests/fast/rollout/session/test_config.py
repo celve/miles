@@ -30,7 +30,7 @@ _ARGS_TO_CONFIG_FIELD = {
     "lora_train_only": "lora_train_only",
     "use_session_server": "use_session_server",
     "session_image_support": "session_image_support",
-    "session_image_engine": "session_image_engine",
+    "session_image_engine_settings": "session_image_engine_settings",
     "session_image_text_only_leaf": "session_image_text_only_leaf",
     "session_message_matcher": "session_message_matcher",
     "pause_generation_mode": "pause_generation_mode",
@@ -69,7 +69,7 @@ _DISTINCT_ARGS_VALUES = dict(
     lora_train_only=True,
     use_session_server="v2",
     session_image_support="fake_vlm",
-    session_image_engine={"model_path": "/fake/ckpt", "image_processor_backend": "auto"},
+    session_image_engine_settings={"model_path": "/fake/ckpt", "image_processor_backend": "auto"},
     session_image_text_only_leaf="keep",
     session_message_matcher="fake.matcher",
     pause_generation_mode="in_place",
@@ -163,7 +163,7 @@ _COMPLETE_CONFIG_KWARGS = dict(
     lora_train_only=False,
     use_session_server=None,
     session_image_support="off",
-    session_image_engine=None,
+    session_image_engine_settings=None,
     session_image_text_only_leaf="drop",
     session_message_matcher="strict",
     pause_generation_mode=None,
@@ -266,7 +266,7 @@ class TestSessionImageEngine:
     def test_the_default_launch_args_resolve_to_the_engines_defaults(self):
         args = _image_args()
         validate_session_image_args(args)
-        assert args.session_image_engine == {
+        assert args.session_image_engine_settings == {
             "model_path": "/ckpt/actor",
             "revision": None,
             "tokenizer_path": "/ckpt/actor",
@@ -281,7 +281,7 @@ class TestSessionImageEngine:
     def test_support_off_resolves_nothing(self):
         args = _image_args(session_image_support="off", rollout_external=True)
         validate_session_image_args(args)
-        assert args.session_image_engine is None
+        assert args.session_image_engine_settings is None
 
     def test_a_base_flag_is_checked(self):
         with pytest.raises(ValueError, match="mm_process_config"):
@@ -292,7 +292,7 @@ class TestSessionImageEngine:
             tmp_path, _groups(_group(4, tool_call_parser="qwen25"), _group(4, tool_call_parser="qwen25"))
         )
         validate_session_image_args(args)
-        assert args.session_image_engine["tool_call_parser"] == "qwen25"
+        assert args.session_image_engine_settings["tool_call_parser"] == "qwen25"
 
     def test_an_unsupported_group_override_is_refused(self, tmp_path):
         yaml_text = _groups(_group(8, mm_process_config="{image: {do_normalize: false}}"))
@@ -308,7 +308,7 @@ class TestSessionImageEngine:
     def test_a_placeholder_group_launches_no_engine_and_is_ignored(self, tmp_path):
         args = _image_args(tmp_path, _groups(_group(4), _group(4, worker_type="placeholder")))
         validate_session_image_args(args)
-        assert args.session_image_engine["image_processor_backend"] == "auto"
+        assert args.session_image_engine_settings["image_processor_backend"] == "auto"
 
     def test_another_checkpoint_is_refused(self, tmp_path):
         with pytest.raises(ValueError, match="the two processors would disagree"):
@@ -326,7 +326,7 @@ class TestSessionImageEngine:
     def test_a_tokenizer_path_flag_naming_the_checkpoint_is_the_default(self):
         args = _image_args(sglang_tokenizer_path="/ckpt/actor")
         validate_session_image_args(args)
-        assert args.session_image_engine["tokenizer_path"] == "/ckpt/actor"
+        assert args.session_image_engine_settings["tokenizer_path"] == "/ckpt/actor"
 
     def test_a_processor_root_other_than_the_checkpoint_is_refused(self):
         """SGLang loads the image processor from tokenizer_path, which the token ids cannot vouch for."""

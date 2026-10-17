@@ -113,11 +113,11 @@ def _same_prompt(node_id: int, sample: Sample, leaf_samples: list[Sample], nodes
         != sample.metadata["accumulated_token_ids"][:prompt_len]
     ):
         return False
-    return _same_media(node_id, sample, covering)
+    return _same_images(node_id, sample, covering)
 
 
-def _same_media(node_id: int, sample: Sample, covering: Sample) -> bool:
+def _same_images(node_id: int, sample: Sample, covering: Sample) -> bool:
     """Whether the two prompts showed the same images, in the same order."""
-    sibling_media = (covering.metadata.get("prompt_media") or {}).get(str(node_id))
-    own_media = (sample.metadata.get("prompt_media") or {}).get(str(sample.metadata["leaf"]["node_id"]))
+    sibling_media = (covering.metadata.get("prompt_image_ids") or {}).get(str(node_id))
+    own_media = (sample.metadata.get("prompt_image_ids") or {}).get(str(sample.metadata["leaf"]["node_id"]))
     return sibling_media == own_media
