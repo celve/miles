@@ -165,33 +165,6 @@ def _prepare_loss_masks(
     return loss_mask.unsqueeze(0)
 
 
-def _build_arch_position_ids(
-    unconcat_tokens: Sequence[torch.Tensor],
-    multimodal_train_inputs: Sequence[Mapping | None] | None,
-    position_ids_builder: Callable[[torch.Tensor, Mapping | None], torch.Tensor],
-    *,
-    qkv_format: str,
-    cp_size: int,
-    pad: int,
-) -> torch.Tensor:
-    assert qkv_format == "thd", f"architecture-specific position ids need thd packing, got {qkv_format}"
-    assert cp_size == 1, "architecture-specific position ids do not support CP yet"
-
-    if multimodal_train_inputs is None:
-        multimodal_train_inputs = [None] * len(unconcat_tokens)
-
-    packed = torch.cat(
-        [
-            position_ids_builder(tokens, mm_inputs)
-            for tokens, mm_inputs in zip(unconcat_tokens, multimodal_train_inputs, strict=True)
-        ],
-        dim=1,
-    )
-    if pad != 0:
-        packed = F.pad(packed, (0, pad), value=0)
-    return packed.unsqueeze(1)
-
-
 def get_batch(
     data_iterator: "DataIterator",
     keys: Sequence[str],
@@ -350,30 +323,24 @@ def get_batch(
             ids = torch.stack(ids)
         elif qkv_format == "thd":
             ids = [slice_with_cp(p, 0, qkv_format) for p in ids_list]
-            ids = torch.cat(ids)
+            ids = torch.cat(ids, dim=-1)
             if pad != 0:
                 ids = F.pad(ids, (0, pad), value=0)
-            ids = ids.unsqueeze(0)
+            ids = ids.unsqueeze(-2)
         else:
             raise NotImplementedError
         return ids
 
-    if get_position_ids and position_ids_builder is not None:
-        batch["position_ids"] = _build_arch_position_ids(
-            batch["unconcat_tokens"],
-            batch.get("multimodal_train_inputs"),
-            position_ids_builder,
-            qkv_format=qkv_format,
-            cp_size=cp_size,
-            pad=pad,
-        )
-    elif get_position_ids:
-        position_ids_list = []
-        for t in batch["unconcat_tokens"]:
-            seq_len = t.size(0)
-            pos_ids = torch.arange(seq_len, device=t.device, dtype=torch.long)
-            position_ids_list.append(pos_ids)
-
+    if get_position_ids:
+        unconcat_tokens = batch["unconcat_tokens"]
+        if position_ids_builder is None:
+            position_ids_list = [torch.arange(t.size(0), device=t.device, dtype=torch.long) for t in unconcat_tokens]
+        else:
+            assert (
+                qkv_format == "thd" and cp_size == 1
+            ), f"architecture-specific position ids need thd packing without CP, got {qkv_format} with CP {cp_size}"
+            mm_inputs = batch.get("multimodal_train_inputs") or [None] * len(unconcat_tokens)
+            position_ids_list = [position_ids_builder(t, mm) for t, mm in zip(unconcat_tokens, mm_inputs, strict=True)]
         batch["position_ids"] = _compute_transform_like_token_ids(position_ids_list)
 
     if (witness_ids := batch.get("witness_ids")) is not None:
