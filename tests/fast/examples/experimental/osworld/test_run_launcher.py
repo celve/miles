@@ -187,7 +187,7 @@ def test_a_megatron_parallel_size_override_is_refused(flag):
         _emitted_argv(train_backend="megatron", extra_args=f"{flag} 2")
 
 
-def test_a_launcher_driving_another_trees_miles_is_refused(monkeypatch):
-    monkeypatch.setattr(launcher.command_utils, "repo_base_dir", "/root/miles")
-    with pytest.raises(RuntimeError, match="imported miles from /root/miles"):
+def test_a_launcher_driving_another_trees_miles_is_refused(monkeypatch, tmp_path):
+    monkeypatch.setattr(launcher.command_utils, "repo_base_dir", tmp_path / "another-miles")
+    with pytest.raises(RuntimeError, match="imported miles from"):
         _emitted_argv()
