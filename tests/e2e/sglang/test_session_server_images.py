@@ -19,7 +19,7 @@ from miles.utils.external_utils import command_utils
 from miles.utils.processing_utils import call_processor, extract_multimodal_train_inputs, load_processor
 
 register_cuda_ci(
-    est_time=1500, suite="stage-c-2-gpu-h200", labels=["sglang", "megatron"], hardware=["hopper"], num_gpus=2
+    est_time=600, suite="stage-c-2-gpu-h200", labels=["sglang", "megatron"], hardware=["hopper"], num_gpus=2
 )
 
 MODEL_NAME = "Qwen3-VL-2B-Instruct"
