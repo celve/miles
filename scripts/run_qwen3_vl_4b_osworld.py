@@ -59,6 +59,7 @@ Usage:
 
 import shlex
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 import typer
@@ -243,6 +244,23 @@ def _refuse_geometry_overrides(train_args: str, args: ScriptArgs, launcher_env: 
             )
 
 
+def _refuse_a_shadowed_checkout() -> None:
+    """Fail when ``miles`` resolves to a different tree than the one this launcher lives in.
+
+    The job runs ``train.py`` and model definitions from wherever ``command_utils``
+    was imported, and an rx devbox image exports ``PYTHONPATH=/root/miles``, so a
+    launcher started from another checkout otherwise drives the image's driver
+    while Ray's workers import the checkout from their working directory.
+    """
+    checkout = Path(__file__).resolve().parents[1]
+    if Path(command_utils.repo_base_dir).resolve() != checkout:
+        raise RuntimeError(
+            f"this launcher is in {checkout} but imported miles from {command_utils.repo_base_dir}, so the job "
+            f"would run that tree's train.py and model definitions. Put the checkout first: "
+            f"PYTHONPATH={checkout}:$PYTHONPATH"
+        )
+
+
 def prepare(args: ScriptArgs):
     U = args.create_backend()
     U.exec_command_cpu(f"mkdir -p {args.model_dir}")
@@ -250,6 +268,7 @@ def prepare(args: ScriptArgs):
 
 
 def execute(args: ScriptArgs):
+    _refuse_a_shadowed_checkout()
     U = args.create_backend()
     smoke = args.mode == "smoke"
 

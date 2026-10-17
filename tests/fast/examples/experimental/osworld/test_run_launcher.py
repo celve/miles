@@ -12,6 +12,7 @@ import shlex
 import pytest
 
 from miles.utils.external_utils.model_args_utils import load_model_args
+from scripts import run_qwen3_vl_4b_osworld as launcher
 from scripts.run_qwen3_vl_4b_osworld import ScriptArgs, _refuse_geometry_overrides, execute
 
 
@@ -222,3 +223,12 @@ def test_a_megatron_parallel_size_override_is_refused(flag):
     mis-places Qwen3-VL's vision embeddings while the plugin only warns."""
     with pytest.raises(ValueError, match=f"{flag} is declared more than once"):
         _emitted_argv(train_backend="megatron", extra_args=f"{flag} 2")
+
+
+def test_a_launcher_driving_another_trees_miles_is_refused(monkeypatch):
+    """On an rx devbox the image's PYTHONPATH put /root/miles ahead of the
+    checkout, so the job ran the image's train.py while its Ray workers ran the
+    checkout. That split was harmless only because the two trees agreed."""
+    monkeypatch.setattr(launcher.command_utils, "repo_base_dir", "/root/miles")
+    with pytest.raises(RuntimeError, match="imported miles from /root/miles"):
+        _emitted_argv()
