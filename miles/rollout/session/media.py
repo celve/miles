@@ -145,7 +145,9 @@ def _resolve_image_part(part: dict[str, Any], message_index: int, part_index: in
         )
     mime_type = match.group("mime").lower()
     if mime_type not in _SUPPORTED_MIME_TYPES:
-        raise MessageValidationError(f"{where} has unsupported image type {mime_type!r} (want one of {_SUPPORTED_MIME_TYPES})")
+        raise MessageValidationError(
+            f"{where} has unsupported image type {mime_type!r} (want one of {_SUPPORTED_MIME_TYPES})"
+        )
     try:
         data = base64.b64decode(match.group("payload"), validate=True)
     except (binascii.Error, ValueError) as exc:

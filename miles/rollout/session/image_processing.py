@@ -170,9 +170,7 @@ def expand_input_ids(ids: Sequence[int], counts: Sequence[int], placeholder_id: 
     """
     found = sum(1 for token_id in ids if token_id == placeholder_id)
     if found != len(counts):
-        raise ValueError(
-            f"prompt has {found} image placeholder token(s) but {len(counts)} image(s) were provided"
-        )
+        raise ValueError(f"prompt has {found} image placeholder token(s) but {len(counts)} image(s) were provided")
     expanded: list[int] = []
     next_image = 0
     for token_id in ids:

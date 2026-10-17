@@ -183,7 +183,11 @@ def read_generation_defaults(checkpoint: str) -> dict[str, Any]:
     try:
         config = GenerationConfig.from_pretrained(checkpoint).to_dict()
     except Exception as exc:
-        logger.warning("[session] No generation config for %s (%s); omitted sampling fields "
-                       "will take the engine's own fallbacks", checkpoint, exc)
+        logger.warning(
+            "[session] No generation config for %s (%s); omitted sampling fields "
+            "will take the engine's own fallbacks",
+            checkpoint,
+            exc,
+        )
         return {}
     return {key: config[key] for key in _GENERATION_DEFAULT_KEYS if config.get(key) is not None}

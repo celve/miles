@@ -445,9 +445,7 @@ class TestMultimodalTrainInputsOnTheSamplesWire:
     def test_dim_zero_concatenation_still_works_after_decode(self):
         """Two decoded samples must stack the way the trainer stacks a micro-batch."""
         payload = encode_samples([self._mm_sample(), self._mm_sample()], {}, fields=COMPUTED_FIELDS_V2)
-        first, second = decode_samples_and_merge_input_sample(
-            payload, Sample(), fields=COMPUTED_FIELDS_V2
-        ).samples
+        first, second = decode_samples_and_merge_input_sample(payload, Sample(), fields=COMPUTED_FIELDS_V2).samples
         stacked = torch.cat(
             [first.multimodal_train_inputs["pixel_values"], second.multimodal_train_inputs["pixel_values"]], dim=0
         )

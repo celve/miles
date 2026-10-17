@@ -109,9 +109,7 @@ def build_generate_body(
     """Translate a resolved chat request into a native generate request."""
     body: dict[str, Any] = {
         "input_ids": request_body["input_ids"],
-        "sampling_params": build_sampling_params(
-            request_body, model_generation_config=model_generation_config
-        ),
+        "sampling_params": build_sampling_params(request_body, model_generation_config=model_generation_config),
         "return_logprob": True,
         # The effective ids: what the engine expanded our placeholders into.
         "return_prompt_token_ids": True,

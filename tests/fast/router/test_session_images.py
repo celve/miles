@@ -277,9 +277,7 @@ def image_router(
 def collect(url: str, session_id: str, body: dict | None = None) -> list[Sample]:
     response = requests.post(f"{url}/sessions/{session_id}/samples", json=body or {}, timeout=20.0)
     assert response.status_code == 200, response.content
-    return decode_samples_and_merge_input_sample(
-        response.content, Sample(), fields=COMPUTED_FIELDS_V2
-    ).samples
+    return decode_samples_and_merge_input_sample(response.content, Sample(), fields=COMPUTED_FIELDS_V2).samples
 
 
 def chat(env, session_id: str, messages: list[dict]) -> requests.Response:
@@ -682,9 +680,7 @@ class TestToolCallsAndFinishReason:
     def test_a_length_cut_is_not_relabelled_as_tool_calls(self, vlm):
         """Relabelling would clear TrajectoryNode.truncated and let the tree extend a closed path."""
         reply = '<tool_call>\n{"name": "click", "arguments": {"x": 3}}\n</tool_call>'
-        with image_router(
-            vlm, [reply], engine={"tool_call_parser": "qwen25"}, finish_reason="length"
-        ) as env:
+        with image_router(vlm, [reply], engine={"tool_call_parser": "qwen25"}, finish_reason="length") as env:
             session_id = _create_session(env.url)
             response = _post_chat(
                 env.url, session_id, {"messages": [user_turn(SHOT1, "look")], "max_tokens": 4, "tools": TOOLS}

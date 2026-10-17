@@ -135,9 +135,7 @@ def _load_tensor_views(payload: bytes | np.ndarray) -> dict[str, np.ndarray]:
     return tensors
 
 
-def _encode_tensor_dict(
-    field: str, value: object, tensors: dict[str, np.ndarray], sample_index: int
-) -> list[str]:
+def _encode_tensor_dict(field: str, value: object, tensors: dict[str, np.ndarray], sample_index: int) -> list[str]:
     """Pack a ``{kwarg: tensor}`` dict as one safetensors entry per key; return the key order."""
     if not isinstance(value, dict):
         raise TypeError(f"{field} must be a dict of tensors, got {type(value).__name__}")
@@ -158,8 +156,7 @@ def _encode_tensor_dict(
 def _assert_wire_dtype(field: str, key: str, dtype: object) -> None:
     if dtype is None:
         raise ValueError(
-            f"{field}[{key!r}] has a dtype the samples wire cannot carry "
-            f"(supported: {sorted(_WIRE_DTYPES)})"
+            f"{field}[{key!r}] has a dtype the samples wire cannot carry (supported: {sorted(_WIRE_DTYPES)})"
         )
 
 

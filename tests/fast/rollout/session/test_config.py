@@ -284,7 +284,9 @@ class TestSessionImageEngine:
             validate_session_image_args(_image_args(sglang_mm_process_config={"image": {"do_normalize": False}}))
 
     def test_a_group_override_beats_the_base_flag(self, tmp_path):
-        args = _image_args(tmp_path, _groups(_group(4, tool_call_parser="qwen25"), _group(4, tool_call_parser="qwen25")))
+        args = _image_args(
+            tmp_path, _groups(_group(4, tool_call_parser="qwen25"), _group(4, tool_call_parser="qwen25"))
+        )
         validate_session_image_args(args)
         assert args.session_image_engine["tool_call_parser"] == "qwen25"
 
@@ -295,7 +297,9 @@ class TestSessionImageEngine:
 
     def test_groups_that_launch_differently_are_refused(self, tmp_path):
         with pytest.raises(ValueError, match=r"differ in \['tool_call_parser'\]"):
-            validate_session_image_args(_image_args(tmp_path, _groups(_group(4, tool_call_parser="qwen25"), _group(4))))
+            validate_session_image_args(
+                _image_args(tmp_path, _groups(_group(4, tool_call_parser="qwen25"), _group(4)))
+            )
 
     def test_a_placeholder_group_launches_no_engine_and_is_ignored(self, tmp_path):
         args = _image_args(tmp_path, _groups(_group(4), _group(4, worker_type="placeholder")))
