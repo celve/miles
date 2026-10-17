@@ -35,8 +35,9 @@ Args:
     model_name, model_dir: where the HF checkpoint lives; ``prepare`` downloads it.
     prompt_data, eval_prompt_data: the training and held-out splits.
     gym_url: NeMo Gym's agent server, reachable from the train actors.
-    router_ip, router_port: where this run's SGLang router listens. Gym reaches
-        the policy through it, so it cannot be left for Miles to choose.
+    router_port: the port this run's SGLang router listens on, pinned so Gym can
+        be configured before the job starts. The router is pinned to the Ray
+        head rather than given an address, so the proxy forwards to that host.
     samples_per_episode: OSWorld's step cap; fixes each episode's sample count.
     rollout_batch_size, n_samples_per_prompt: the GRPO group geometry.
     micro_batch_size: must divide each rank's share of the global batch.
@@ -76,11 +77,15 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     prompt_data: str = ""
     eval_prompt_data: str = ""
     gym_url: str = "http://127.0.0.1:11001"
-    # Pinned, because Gym is a separate process on another host and has to be
-    # told where the policy is before this job starts. Miles defaults both to
-    # None and then picks a port, which nothing outside the job can discover,
-    # so the recipe's own proxy would have nowhere to forward to.
-    router_ip: str = "127.0.0.1"
+    # The port is pinned and the router is pinned to the Ray head, because Gym
+    # is a separate process group that has to reach the policy and is
+    # configured before this job exists. The *address* is deliberately not
+    # preset: `router_manager.resolve_router_addrs` treats a non-None
+    # `sglang_router_ip` as an already-resolved address and asserts that the
+    # per-model map exists, so presetting it fails the run before it contacts
+    # Gym. Pinning placement gives a stable host without writing into Miles's
+    # resolved state; the port is safe to pin because an occupied static port
+    # is rejected loudly rather than silently reassigned.
     router_port: int = 31000
     samples_per_episode: int = 15
     micro_batch_size: int = 1
@@ -325,8 +330,8 @@ def execute(args: ScriptArgs):
     # as text and OSWorld's own agent parses them, so a parser would strip what
     # that agent is waiting for.
     sglang_args = (
-        f"--sglang-router-ip {args.router_ip} "
         f"--sglang-router-port {args.router_port} "
+        "--pin-rollout-manager-to-head "
         "--rollout-num-gpus-per-engine 1 "
         "--sglang-mem-fraction-static 0.6 "
         "--sglang-decode-log-interval 1000 "

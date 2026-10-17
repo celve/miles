@@ -105,21 +105,34 @@ def read_task_outcomes(rollouts: Path) -> dict[str, list[float]]:
 
 
 def select_by_variance(tasks: list[Task], outcomes: dict[str, list[float]]) -> tuple[list[Task], dict]:
-    """Keep the tasks whose own samples disagree, and say why each was dropped."""
+    """Keep the tasks whose own rewards differ, and say why each was dropped.
+
+    The test is on the **reward values**, not on a success/failure recoding of
+    them. This recipe runs Gym with ``reward_mode: raw``, which preserves
+    partial scores, so samples of ``[0.2, 0.8]`` have real spread and a
+    non-zero GRPO advantage while collapsing them to "both succeeded" would
+    throw the task away. Binary success counts are kept beside the spread as a
+    diagnostic, because they are what a reader expects to see, but they do not
+    decide anything.
+    """
     kept: list[Task] = []
-    report = {"with_variance": [], "unanimous_success": [], "unanimous_failure": [], "not_probed": []}
+    report = {"with_spread": [], "no_spread": [], "not_probed": []}
     for task in tasks:
         rewards = outcomes.get(task.task_id)
         if not rewards or len(rewards) < 2:
             report["not_probed"].append(task.task_id)
             continue
-        successes = sum(1 for reward in rewards if reward > 0)
-        if successes == 0:
-            report["unanimous_failure"].append(task.task_id)
-        elif successes == len(rewards):
-            report["unanimous_success"].append(task.task_id)
+        record = {
+            "task_id": task.task_id,
+            "samples": len(rewards),
+            "rewards": sorted(rewards),
+            "spread": max(rewards) - min(rewards),
+            "successes": sum(1 for reward in rewards if reward > 0),
+        }
+        if max(rewards) == min(rewards):
+            report["no_spread"].append(record)
         else:
-            report["with_variance"].append({"task_id": task.task_id, "successes": successes, "samples": len(rewards)})
+            report["with_spread"].append(record)
             kept.append(task)
     return kept, report
 
@@ -174,17 +187,33 @@ def main(
     if not tasks:
         raise typer.BadParameter(f"no tasks read from {source}")
 
+    # The held-out side is frozen from the *unfiltered* candidates and variance
+    # selection is applied only to the training side. Filtering first shrinks
+    # the pool the split draws from, which silently produced an empty
+    # held_out.jsonl -- written successfully, so the run proceeded and could
+    # report no before/after score at all. The holdout's job is to measure the
+    # policy, and a task's reward spread under the *current* policy is not a
+    # property the evaluation set should be chosen on.
+    train_candidates, held_out = _stratified_split(tasks, held_out_fraction, seed)
+    if held_out_fraction > 0 and not held_out:
+        raise typer.BadParameter(
+            f"a held-out fraction of {held_out_fraction} yielded no evaluation tasks from {len(tasks)} "
+            "candidates. The launcher still schedules held-out evaluation, so this would run and report "
+            "nothing; lower the fraction, add tasks, or pass 0 deliberately."
+        )
+
     variance_report = None
     if variance_from is not None:
         outcomes = read_task_outcomes(variance_from)
-        tasks, variance_report = select_by_variance(tasks, outcomes)
-        if not tasks:
+        train_candidates, variance_report = select_by_variance(train_candidates, outcomes)
+        if not train_candidates:
             raise typer.BadParameter(
-                f"no task in {source} showed within-task variance in {variance_from}. Every GRPO group would "
-                "have zero advantage, so there is nothing to train on; probe more samples or other tasks."
+                f"no training task in {source} showed differing rewards in {variance_from}. Every GRPO group "
+                "drawn from this probe would have zero advantage, so there is nothing to train on; probe more "
+                "samples or other tasks."
             )
 
-    train, held_out = _stratified_split(tasks, held_out_fraction, seed)
+    train = train_candidates
     overlap = {task.task_id for task in train} & {task.task_id for task in held_out}
     assert not overlap, f"a task is on both sides of the split: {sorted(overlap)}"
 
@@ -198,10 +227,10 @@ def main(
         "seed": seed,
         "held_out_fraction": held_out_fraction,
         "only_domains": sorted(keep) if keep is not None else None,
-        "selection": "within-task variance" if variance_report else "domain stratification only",
+        "selection": "reward spread on the training side only" if variance_report else "domain stratification only",
         "variance_probe": str(variance_from) if variance_from else None,
         "variance_report": variance_report,
-        "counts": {"selected": len(tasks), "train": len(train), "held_out": len(held_out)},
+        "counts": {"candidates": len(tasks), "train": len(train), "held_out": len(held_out)},
         "domains": {"train": _domain_counts(train), "held_out": _domain_counts(held_out)},
         "train_task_ids": sorted(task.task_id for task in train),
         "held_out_task_ids": sorted(task.task_id for task in held_out),

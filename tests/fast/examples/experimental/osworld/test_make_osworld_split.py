@@ -81,7 +81,7 @@ def test_provenance_records_what_a_before_after_claim_rests_on(tmp_path):
     provenance = json.loads((out_dir / "provenance.json").read_text())
     assert provenance["seed"] == 99
     assert len(provenance["source_sha256"]) == 64
-    assert provenance["counts"] == {"selected": 10, "train": 6, "held_out": 4}
+    assert provenance["counts"] == {"candidates": 10, "train": 6, "held_out": 4}
     assert provenance["selection"] == "domain stratification only"
     assert not set(provenance["train_task_ids"]) & set(provenance["held_out_task_ids"])
 
@@ -133,9 +133,9 @@ def test_outcomes_count_only_episodes_gym_admitted(tmp_path):
     assert read_task_outcomes(probe) == {"t1": [1.0, 0.0]}
 
 
-def test_only_tasks_whose_own_samples_disagree_are_kept(tmp_path):
-    """A GRPO group is the N samples of one prompt, so a task every sample
-    solves and a task none solves both give exactly zero advantage."""
+def test_only_tasks_whose_own_rewards_differ_are_kept(tmp_path):
+    """A GRPO group is the N samples of one prompt, so a task whose samples all
+    score the same gives exactly zero advantage."""
     source = _write_source(tmp_path / "src.jsonl", [_task(f"t{i}", "chrome") for i in range(4)])
     tasks = _read_tasks(source)
     outcomes = {
@@ -146,9 +146,25 @@ def test_only_tasks_whose_own_samples_disagree_are_kept(tmp_path):
     }
     kept, report = select_by_variance(tasks, outcomes)
     assert [t.task_id for t in kept] == ["t2", "t3"]
-    assert report["unanimous_success"] == ["t0"]
-    assert report["unanimous_failure"] == ["t1"]
-    assert {entry["task_id"] for entry in report["with_variance"]} == {"t2", "t3"}
+    assert {entry["task_id"] for entry in report["no_spread"]} == {"t0", "t1"}
+    assert {entry["task_id"] for entry in report["with_spread"]} == {"t2", "t3"}
+
+
+def test_partial_raw_rewards_that_differ_are_kept(tmp_path):
+    """reward_mode: raw preserves partial scores, so [0.2, 0.8] has real spread
+    and a non-zero advantage. Recoding every positive reward as "success" threw
+    exactly these tasks away."""
+    source = _write_source(tmp_path / "src.jsonl", [_task("t1", "chrome"), _task("t2", "gimp"), _task("t3", "vlc")])
+    kept, report = select_by_variance(
+        _read_tasks(source),
+        {"t1": [0.2, 0.8], "t2": [0.4, 1.0], "t3": [0.6, 0.6]},
+    )
+    assert [t.task_id for t in kept] == ["t1", "t2"]
+    assert [entry["task_id"] for entry in report["no_spread"]] == ["t3"]
+    spreads = {entry["task_id"]: entry["spread"] for entry in report["with_spread"]}
+    assert spreads["t1"] == pytest.approx(0.6)
+    # The binary count would have called both of these unanimous successes.
+    assert all(entry["successes"] == entry["samples"] for entry in report["with_spread"])
 
 
 def test_a_task_probed_once_cannot_show_variance(tmp_path):
@@ -157,19 +173,55 @@ def test_a_task_probed_once_cannot_show_variance(tmp_path):
     assert kept == [] and report["not_probed"] == ["t1"]
 
 
-def test_a_split_with_no_variance_anywhere_is_refused(tmp_path):
+def test_a_split_with_no_spread_anywhere_is_refused(tmp_path):
     """Training on it would make every optimizer step a no-op, which is worth
     an error rather than a run that looks like it worked."""
-    source = _write_source(tmp_path / "src.jsonl", [_task("t1", "chrome"), _task("t2", "gimp")])
-    probe = _write_probe(tmp_path / "r.jsonl", [_rollout("t1", 0.0), _rollout("t1", 0.0), _rollout("t2", 1.0), _rollout("t2", 1.0)])
-    with pytest.raises(Exception, match="within-task variance"):
+    source = _write_source(tmp_path / "src.jsonl", [_task(f"t{i}", "chrome") for i in range(4)])
+    probe = _write_probe(tmp_path / "r.jsonl", [_rollout(f"t{i}", r) for i in range(4) for r in (0.0, 0.0)])
+    with pytest.raises(Exception, match="differing rewards"):
+        main(
+            source=source,
+            out_dir=tmp_path / "out",
+            held_out_fraction=0.25,
+            seed=1,
+            only_domains="",
+            variance_from=probe,
+        )
+
+
+def test_the_held_out_side_survives_variance_filtering(tmp_path):
+    """Filtering before splitting shrank the pool the split drew from and
+    produced an empty held_out.jsonl -- written successfully, so the run went
+    ahead and could report no before/after score at all. The holdout is frozen
+    from the unfiltered candidates instead."""
+    source = _write_source(
+        tmp_path / "src.jsonl",
+        [_task(f"c{i}", "chrome") for i in range(5)] + [_task(f"g{i}", "gimp") for i in range(5)],
+    )
+    rows = []
+    for name in ("c0", "g0"):
+        rows += [_rollout(name, 1.0), _rollout(name, 0.0)]
+    for name in ("c1", "c2", "c3", "c4", "g1", "g2", "g3", "g4"):
+        rows += [_rollout(name, 0.0), _rollout(name, 0.0)]
+    probe = _write_probe(tmp_path / "r.jsonl", rows)
+    out_dir = tmp_path / "out"
+    main(source=source, out_dir=out_dir, held_out_fraction=0.3, seed=99, only_domains="", variance_from=probe)
+    provenance = json.loads((out_dir / "provenance.json").read_text())
+    assert provenance["counts"]["held_out"] > 0, "the evaluation set must not be emptied by training-side filtering"
+    assert (out_dir / "held_out.jsonl").read_text().strip(), "held_out.jsonl must not be written empty"
+    assert not set(provenance["train_task_ids"]) & set(provenance["held_out_task_ids"])
+
+
+def test_a_requested_holdout_that_yields_nothing_is_refused(tmp_path):
+    source = _write_source(tmp_path / "src.jsonl", [_task("only", "chrome")])
+    with pytest.raises(Exception, match="no evaluation tasks"):
         main(
             source=source,
             out_dir=tmp_path / "out",
             held_out_fraction=0.3,
             seed=1,
             only_domains="",
-            variance_from=probe,
+            variance_from=None,
         )
 
 
@@ -182,6 +234,6 @@ def test_provenance_records_the_variance_selection(tmp_path):
     out_dir = tmp_path / "out"
     main(source=source, out_dir=out_dir, held_out_fraction=0.0, seed=5, only_domains="", variance_from=probe)
     provenance = json.loads((out_dir / "provenance.json").read_text())
-    assert provenance["selection"] == "within-task variance"
-    assert provenance["counts"]["selected"] == 3
-    assert len(provenance["variance_report"]["unanimous_failure"]) == 3
+    assert provenance["selection"] == "reward spread on the training side only"
+    assert provenance["counts"]["candidates"] == 6
+    assert len(provenance["variance_report"]["no_spread"]) == 3
