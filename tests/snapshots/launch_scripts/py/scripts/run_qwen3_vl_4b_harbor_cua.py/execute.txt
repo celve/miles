@@ -79,9 +79,6 @@ export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && ray job submit
   --sequence-parallel
   --pipeline-model-parallel-size 1
   --context-parallel-size 1
-  --recompute-granularity full
-  --recompute-method uniform
-  --recompute-num-layers 1
   --attention-dropout 0.0
   --hidden-dropout 0.0
   --accumulate-allreduce-grads-in-fp32

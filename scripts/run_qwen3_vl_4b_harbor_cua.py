@@ -234,9 +234,8 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
         "--sequence-parallel "
         "--pipeline-model-parallel-size 1 "
         "--context-parallel-size 1 "
-        "--recompute-granularity full "
-        "--recompute-method uniform "
-        "--recompute-num-layers 1 "
+        # No activation recompute: the bridge's Qwen3-VL vision tower inherits it, and its
+        # checkpointed forward returns the DeepStack features detached, so those mergers never train.
         "--attention-dropout 0.0 "
         "--hidden-dropout 0.0 "
         "--accumulate-allreduce-grads-in-fp32 "
