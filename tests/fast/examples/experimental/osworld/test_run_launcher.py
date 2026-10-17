@@ -11,6 +11,7 @@ import shlex
 
 import pytest
 
+from miles.utils.external_utils.model_args_utils import load_model_args
 from scripts.run_qwen3_vl_4b_osworld import ScriptArgs, _refuse_geometry_overrides, execute
 
 
@@ -38,6 +39,22 @@ def test_a_micro_batch_that_does_not_divide_the_rank_share_is_refused():
             num_gpus_per_node=4,
             micro_batch_size=7,
         )
+
+
+def test_megatron_divides_the_batch_over_data_parallel_ranks_not_gpus():
+    """Tensor parallelism shards each sample, not the batch, so 30 samples that
+    four FSDP ranks cannot split are one data-parallel rank's share at TP 4."""
+    args = ScriptArgs(
+        train_backend="megatron",
+        tensor_parallel=4,
+        rollout_batch_size=1,
+        n_samples_per_prompt=2,
+        samples_per_episode=15,
+        num_gpus_per_node=4,
+    )
+    assert args.data_parallel_size == 1
+    with pytest.raises(ValueError, match="does not divide 4 GPUs"):
+        ScriptArgs(train_backend="megatron", tensor_parallel=3, samples_per_episode=15, num_gpus_per_node=4)
 
 
 def test_smoke_mode_is_exempt_because_it_runs_no_optimizer_step():
@@ -124,8 +141,8 @@ GEOMETRY_FLAGS = (
 )
 
 
-def _emitted_argv(**kwargs):
-    """The argv execute() hands the backend, captured without running anything."""
+def _emitted(**kwargs):
+    """What execute() hands the backend, captured without running anything."""
     captured = {}
 
     class _Backend:
@@ -134,6 +151,7 @@ def _emitted_argv(**kwargs):
 
         def execute_train(self, train_args, **kw):
             captured["argv"] = shlex.split(train_args)
+            captured["kwargs"] = kw
 
     args = ScriptArgs(samples_per_episode=15, num_gpus_per_node=4, **kwargs)
     monkey = pytest.MonkeyPatch()
@@ -142,22 +160,26 @@ def _emitted_argv(**kwargs):
         execute(args)
     finally:
         monkey.undo()
-    return captured["argv"]
+    return captured
 
 
-def test_the_geometry_is_declared_once_and_last():
+def _emitted_argv(**kwargs):
+    return _emitted(**kwargs)["argv"]
+
+
+@pytest.mark.parametrize(
+    "backend, flags",
+    [("fsdp", GEOMETRY_FLAGS), ("megatron", (*GEOMETRY_FLAGS, "--tensor-model-parallel-size"))],
+)
+def test_the_geometry_is_declared_once_and_last(backend, flags):
     """This is what makes the guard belt-and-braces rather than load-bearing:
     argparse's store action overwrites, so the launcher's declaration being
     last is what defeats an override of any spelling."""
-    argv = _emitted_argv()
-    for flag in GEOMETRY_FLAGS:
+    argv = _emitted_argv(train_backend=backend)
+    for flag in flags:
         assert argv.count(flag) == 1, f"{flag} is declared {argv.count(flag)} times"
-    first_geometry = min(argv.index(flag) for flag in GEOMETRY_FLAGS)
-    non_geometry_after = [
-        token
-        for token in argv[first_geometry:]
-        if token.startswith("--") and token not in GEOMETRY_FLAGS
-    ]
+    first_geometry = min(argv.index(flag) for flag in flags)
+    non_geometry_after = [token for token in argv[first_geometry:] if token.startswith("--") and token not in flags]
     assert non_geometry_after == [], f"these flags follow the geometry block: {non_geometry_after}"
 
 
@@ -166,3 +188,23 @@ def test_an_unrelated_extra_arg_still_takes_effect():
     later declaration of a non-geometry flag still wins."""
     argv = _emitted_argv(extra_args="--lr 2e-6")
     assert [index for index, token in enumerate(argv) if token == "--lr"][-1] > argv.index("--optimizer")
+
+
+def test_megatron_runs_the_vl_model_definition_through_the_bridge():
+    emitted = _emitted(train_backend="megatron")
+    argv = emitted["argv"]
+    assert emitted["kwargs"]["megatron_model_type"] == "qwen3-vl-4B"
+    assert argv[argv.index("--train-backend") + 1] == "megatron"
+    assert argv[argv.index("--megatron-to-hf-mode") + 1] == "bridge"
+    assert "--gradient-checkpointing" not in argv and "--attn-implementation" not in argv
+    assert _emitted(train_backend="fsdp")["kwargs"]["megatron_model_type"] is None
+
+
+def test_the_vl_model_definition_fixes_qwen3_vls_rotary_base(monkeypatch):
+    """Qwen3-VL-4B's language tower resolves to Qwen3-4B's definition, whose
+    rotary base defaults to the text model's 1,000,000; the VL checkpoint's
+    rope_theta is 5,000,000, and nothing raises on the wrong one."""
+    monkeypatch.setenv("MODEL_ARGS_ROTARY_BASE", "1000000")
+    vl, text = load_model_args("qwen3-vl-4B").split(), load_model_args("qwen3-4B").split()
+    assert vl[vl.index("--rotary-base") + 1] == "5000000"
+    assert [token for token in vl if token != "5000000"] == [token for token in text if token != "1000000"]

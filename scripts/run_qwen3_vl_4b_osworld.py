@@ -1,4 +1,4 @@
-"""Computer-use GRPO on OSWorld through NeMo Gym: Qwen3-VL-4B-Instruct, FSDP, single node.
+"""Computer-use GRPO on OSWorld through NeMo Gym: Qwen3-VL-4B-Instruct, FSDP or Megatron, single node.
 
 NeMo Gym owns the episode -- it boots an OSWorld VM, drives ``DesktopEnv``
 against our policy and grades with OSWorld's own evaluator -- and
@@ -24,8 +24,9 @@ from it: an episode yields one sample per exact-trace segment, and a
 data-dependent count cannot be trained on an image batch today. The schedule
 that counts ``--global-batch-size`` in rollouts rather than samples is switched
 off for any batch carrying ``multimodal_train_inputs``
-(``train_data_conversion.py:381``) and needs a schedule config the FSDP backend
-never publishes, so the legacy sample-strided split runs instead and
+(``train_data_conversion.py:381``) whatever the backend, and on FSDP it also
+needs a schedule config that backend never publishes, so the legacy
+sample-strided split runs instead and
 floor-divides the shard into steps, leaving its tail rows without log-probs
 while they keep their rewards. Fixing the count makes that division exact. Set
 it to OSWorld's step cap and it is an upper bound by construction, since an
@@ -39,6 +40,10 @@ Args:
         be configured before the job starts. The router is pinned to the Ray
         head rather than given an address, so the proxy forwards to that host.
     samples_per_episode: OSWorld's step cap; fixes each episode's sample count.
+    train_backend: ``fsdp``, or ``megatron`` through megatron-bridge, which loads
+        the HF checkpoint directly and needs no conversion.
+    tensor_parallel: Megatron's tensor-parallel size; data-parallel ranks are
+        the GPUs divided by it.
     max_output_tokens: Gym's per-call generation cap, the value the variance
         probe ran at. A task row's own value wins.
     rollout_batch_size, n_samples_per_prompt: the GRPO group geometry.
@@ -49,6 +54,7 @@ Args:
 Usage:
     python3 scripts/run_qwen3_vl_4b_osworld.py --gym-url http://10.0.0.1:11001
     python3 scripts/run_qwen3_vl_4b_osworld.py --mode smoke --gym-url http://10.0.0.1:11001
+    python3 scripts/run_qwen3_vl_4b_osworld.py --train-backend megatron --gym-url http://10.0.0.1:11001
 """
 
 import shlex
@@ -97,6 +103,8 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     rollout_batch_size: int = 2
     n_samples_per_prompt: int = 4
     num_rollout: int = 20
+    train_backend: Literal["fsdp", "megatron"] = "fsdp"
+    tensor_parallel: int = 4
     mode: Literal["normal", "smoke"] = "normal"
     extra_args: str = ""
 
@@ -114,7 +122,7 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
             # and the division below is not a constraint on it.
             return
         total = self.global_batch_size
-        dp_size = self.num_nodes * self.num_gpus_per_node
+        dp_size = self.data_parallel_size
         if total % dp_size:
             raise ValueError(
                 f"{self.episodes_per_step} episodes x {self.samples_per_episode} samples = {total} samples "
@@ -127,6 +135,15 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
                 f"each rank takes {per_rank} samples, which --micro-batch-size {self.micro_batch_size} "
                 "must divide and which must be at least 1."
             )
+
+    @property
+    def data_parallel_size(self) -> int:
+        gpus = self.num_nodes * self.num_gpus_per_node
+        if self.train_backend == "fsdp":
+            return gpus
+        if gpus % self.tensor_parallel:
+            raise ValueError(f"--tensor-parallel {self.tensor_parallel} does not divide {gpus} GPUs.")
+        return gpus // self.tensor_parallel
 
     @property
     def model_path(self) -> str:
@@ -170,6 +187,7 @@ _PROTECTED_FLAGS = (
     "--actor-num-nodes",
     "--actor-num-gpus-per-node",
     "--num-gpus-per-node",
+    "--tensor-model-parallel-size",
 )
 _PROTECTED_ENV = ("MILES_SCRIPT_OSWORLD_SAMPLES_PER_EPISODE",)
 
@@ -249,6 +267,8 @@ def execute(args: ScriptArgs):
         f"--actor-num-nodes {args.num_nodes} "
         f"--actor-num-gpus-per-node {args.num_gpus_per_node} "
         f"--num-gpus-per-node {args.num_gpus_per_node} "
+        # On Megatron the data-parallel size, and so each rank's share, follows from it.
+        + (f"--tensor-model-parallel-size {args.tensor_parallel} " if args.train_backend == "megatron" else "")
     )
 
     ckpt_args = f"--hf-checkpoint {args.model_path} --ref-load {args.model_path} "
@@ -319,13 +339,37 @@ def execute(args: ScriptArgs):
     # dispatching it keeps rank 0 past the default 10-minute NCCL timeout while
     # the other ranks wait in their first collective, and the watchdog then
     # kills the job at the end of step one.
-    train_backend_args = (
-        "--train-backend fsdp "
-        "--gradient-checkpointing "
-        "--update-weight-buffer-size 536870912 "
-        "--distributed-timeout-minutes 60 "
-        "--attn-implementation flash_attention_3 "
-    )
+    if args.train_backend == "megatron":
+        # examples/geo3k_vlm's Megatron block. Context parallelism stays 1 because
+        # the Qwen3-VL plugin cannot place vision embeddings across CP ranks.
+        train_backend_args = (
+            "--train-backend megatron "
+            f"--load {args.model_path} "
+            "--megatron-to-hf-mode bridge "
+            "--sequence-parallel "
+            "--pipeline-model-parallel-size 1 "
+            "--context-parallel-size 1 "
+            "--expert-model-parallel-size 1 "
+            "--expert-tensor-parallel-size 1 "
+            "--recompute-granularity full "
+            "--recompute-method uniform "
+            "--recompute-num-layers 1 "
+            "--attention-dropout 0.0 "
+            "--hidden-dropout 0.0 "
+            "--accumulate-allreduce-grads-in-fp32 "
+            "--attention-softmax-in-fp32 "
+            "--attention-backend flash "
+            "--update-weight-buffer-size 536870912 "
+            "--distributed-timeout-minutes 60 "
+        )
+    else:
+        train_backend_args = (
+            "--train-backend fsdp "
+            "--gradient-checkpointing "
+            "--update-weight-buffer-size 536870912 "
+            "--distributed-timeout-minutes 60 "
+            "--attn-implementation flash_attention_3 "
+        )
 
     # No tool-call parser on purpose: the policy emits Qwen's <tool_call> blocks
     # as text and OSWorld's own agent parses them, so a parser would strip what
@@ -386,7 +430,7 @@ def execute(args: ScriptArgs):
     U.execute_train(
         train_args=train_args,
         num_gpus_per_node=args.num_gpus_per_node,
-        megatron_model_type=None,
+        megatron_model_type="qwen3-vl-4B" if args.train_backend == "megatron" else None,
         extra_env_vars=launcher_env,
     )
 
