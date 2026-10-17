@@ -92,6 +92,12 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     recorder_upstream: str = "auto"
     desktop_width: int = 1024
     desktop_height: int = 900
+    # Set for OSWorld-Verified: the runner service (osworld_service.py) on the machine with
+    # /dev/kvm runs each trial, and its agent calls the recorder at the advertised address.
+    osworld_runner_url: str = ""
+    recorder_host: str = "127.0.0.1"
+    recorder_advertise_host: str = ""
+    history_n: int = 4
     mode: Literal["train", "rollout", "eval"] = "train"
     # megatron by default because LIN-2046 measured FSDP training Qwen3-VL with linear
     # 1-D positions, so its multimodal RoPE never runs (max |logit diff| 32.72 on a
@@ -176,6 +182,14 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
         f"--harbor-cua-max-sandboxes {args.max_sandboxes} "
         "--harbor-cua-write-off-mode abort_group "
         + f"--harbor-cua-upstream {args.recorder_upstream} "
+        + (
+            f"--harbor-cua-runner-url {args.osworld_runner_url} "
+            f"--harbor-cua-recorder-host {args.recorder_host} "
+            f"--harbor-cua-recorder-advertise-host {args.recorder_advertise_host} "
+            f"--harbor-cua-history-n {args.history_n} "
+            if args.osworld_runner_url
+            else ""
+        )
         + ("--debug-rollout-only " if args.mode == "rollout" else "")
     )
 
