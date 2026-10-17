@@ -8,8 +8,13 @@ runs on the stock HF path.
 from types import MappingProxyType
 
 from miles.backends.fsdp_utils.adaptations.arch_adapter import ArchAdapter
+from miles.backends.fsdp_utils.adaptations.specs.cosmos3_omni import Cosmos3OmniAdapter
+from miles.backends.fsdp_utils.adaptations.specs.ernie4_5_vl_moe import Ernie45VLMoeAdapter
 from miles.backends.fsdp_utils.adaptations.specs.glm4_moe_lite import Glm4MoeLiteAdapter
+from miles.backends.fsdp_utils.adaptations.specs.glm4v import Glm4vAdapter
 from miles.backends.fsdp_utils.adaptations.specs.nemotron_h import NemotronHAdapter
+from miles.backends.fsdp_utils.adaptations.specs.paddleocr_vl import PaddleOcrVLAdapter
+from miles.backends.fsdp_utils.adaptations.specs.qwen2_vl import Qwen2VLAdapter
 from miles.backends.fsdp_utils.adaptations.specs.qwen3 import Qwen3Adapter
 from miles.backends.fsdp_utils.adaptations.specs.qwen3_5 import (
     Qwen35Adapter,
@@ -21,8 +26,13 @@ from miles.backends.fsdp_utils.adaptations.specs.qwen3_moe import Qwen3MoeAdapte
 from miles.backends.fsdp_utils.adaptations.specs.qwen3_vl import Qwen3VLAdapter, Qwen3VLMoeAdapter
 
 _ADAPTERS: tuple[ArchAdapter, ...] = (
+    Cosmos3OmniAdapter(),
+    Ernie45VLMoeAdapter(),
     Glm4MoeLiteAdapter(),
+    Glm4vAdapter(),
     NemotronHAdapter(),
+    PaddleOcrVLAdapter(),
+    Qwen2VLAdapter(),
     Qwen3Adapter(),
     Qwen35Adapter(),
     Qwen35VLAdapter(),

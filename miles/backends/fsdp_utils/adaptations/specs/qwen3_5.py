@@ -5,7 +5,7 @@ composite ``qwen3_5`` / ``qwen3_5_moe`` checkpoints load with a vision tower and
 from miles.backends.fsdp_utils.adaptations.arch_adapter import ArchAdapter
 from miles.backends.fsdp_utils.adaptations.packing import hf_packing_kwargs
 from miles.backends.fsdp_utils.adaptations.routing_replay import RoutingReplayAdapter
-from miles.backends.fsdp_utils.adaptations.specs.qwen3_vl import MropePositionIds
+from miles.backends.fsdp_utils.adaptations.mrope import MropePositionIds
 from miles.backends.fsdp_utils.models.replay_routers import install_qwen3_router_replay
 
 
