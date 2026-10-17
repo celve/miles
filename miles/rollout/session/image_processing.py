@@ -143,7 +143,7 @@ def process_images(
     to, which is the one failure that would silently train on the wrong image.
     """
     processed = [process_image(processor, asset, fingerprint) for asset in assets]
-    for index, (image, expected) in enumerate(zip(processed, expected_counts)):
+    for index, (image, expected) in enumerate(zip(processed, expected_counts, strict=True)):
         if image.token_count != expected:
             raise ValueError(
                 f"image {index} ({assets[index].asset_id}) processes to {image.token_count} tokens but "

@@ -150,7 +150,7 @@ def assert_effective_prompt_ids(
     if list(effective) == expected_ids:
         return
     first_diff = next(
-        (i for i, (a, b) in enumerate(zip(effective, expected_ids)) if a != b),
+        (i for i, (a, b) in enumerate(zip(effective, expected_ids, strict=False)) if a != b),
         min(len(effective), len(expected_ids)),
     )
     raise UpstreamResponseError(
