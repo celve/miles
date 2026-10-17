@@ -45,6 +45,13 @@ MODE = os.environ.get("MILES_SCRIPT_MODE", "normal")
 OUTPUT_DIR = os.environ.get("MILES_SCRIPT_OUTPUT_DIR", "/personal/lin1996/osworld-rl")
 PROMPT_DATA = os.environ.get("MILES_SCRIPT_PROMPT_DATA", "/personal/lin1996/osworld_train.jsonl")
 MAX_TOKENS_PER_GPU = int(os.environ.get("MILES_SCRIPT_MAX_TOKENS_PER_GPU", "24576"))
+# Megatron by default: megatron-bridge rebuilds Qwen3-VL's 3-D M-RoPE positions,
+# where the FSDP backend before radixark/miles#4140 trains every image token on
+# a linear position (LIN-2046).
+BACKEND = os.environ.get("MILES_SCRIPT_BACKEND", "megatron")
+EVAL_DATA = os.environ.get("MILES_SCRIPT_EVAL_DATA", "")
+EVAL_INTERVAL = int(os.environ.get("MILES_SCRIPT_EVAL_INTERVAL", "10"))
+EVAL_SAMPLES = int(os.environ.get("MILES_SCRIPT_EVAL_SAMPLES", "4"))
 
 SMOKE = MODE == "smoke"
 # 2 prompts x 4 samples: the group size is what gives GRPO its within-group
@@ -112,10 +119,35 @@ def execute() -> None:
     # dispatching it keeps rank 0 past the default 10-minute NCCL timeout while
     # the other ranks wait in their first collective, and the watchdog then
     # kills the job at the end of step one.
-    fsdp_args = (
-        "--train-backend fsdp --gradient-checkpointing --update-weight-buffer-size 536870912 "
-        "--distributed-timeout-minutes 60 "
-    )
+    if BACKEND == "fsdp":
+        backend_args = (
+            "--train-backend fsdp --gradient-checkpointing --update-weight-buffer-size 536870912 "
+            "--attn-implementation flash_attention_3 "
+        )
+    else:
+        # Mirrors examples/geo3k_vlm's Megatron block. Bridge mode loads the HF
+        # checkpoint directly, so no torch_dist conversion is needed. Context
+        # parallel stays 1: the Qwen3-VL plugin warns it lacks CP-local
+        # vision-embed selection, so CP > 1 mis-places vision embeddings.
+        backend_args = (
+            "--train-backend megatron "
+            f"--load {MODEL_DIR}/{MODEL_NAME} "
+            "--megatron-to-hf-mode bridge "
+            f"--tensor-model-parallel-size {NUM_GPUS} --sequence-parallel "
+            "--pipeline-model-parallel-size 1 --context-parallel-size 1 "
+            "--expert-model-parallel-size 1 --expert-tensor-parallel-size 1 "
+            "--recompute-granularity full --recompute-method uniform --recompute-num-layers 1 "
+            "--attention-dropout 0.0 --hidden-dropout 0.0 "
+            "--accumulate-allreduce-grads-in-fp32 --attention-softmax-in-fp32 "
+            "--attention-backend flash "
+            f"--use-dynamic-batch-size --max-tokens-per-gpu {MAX_TOKENS_PER_GPU} "
+        )
+
+    # A rollout batch of long multi-image episodes is GBs of pixel tensors;
+    # dispatching it keeps rank 0 past the default 10-minute NCCL timeout while
+    # the other ranks wait in their first collective, and the watchdog then
+    # kills the job at the end of step one.
+    timeout_args = "--distributed-timeout-minutes 60 "
 
     # Deliberately NOT --use-dynamic-global-batch-size: `postprocess_rollout_data`
     # only produces `dynamic_global_batch_size` for a non-compact batch, and
@@ -156,7 +188,20 @@ def execute() -> None:
         "--sglang-decode-log-interval 1000 "
         "--sglang-enable-metrics "
         "--sglang-attention-backend fa3 "
-        "--attn-implementation flash_attention_3 "
+    )
+
+    eval_args = (
+        # Named osworld_held_out so the logged columns match LIN-2044's FSDP arm.
+        f"--eval-prompt-data osworld_held_out {EVAL_DATA} "
+        f"--eval-interval {EVAL_INTERVAL} "
+        f"--n-samples-per-eval-prompt {EVAL_SAMPLES} "
+        "--eval-max-response-len 12288 "
+        "--custom-eval-rollout-log-function-path examples.experimental.osworld.rollout.log_eval_rollout_data "
+        # No --skip-eval-before-train: it is store_true, and the step-0 baseline
+        # is the comparison every later evaluation is read against.
+        "--eval-temperature 1.0 "
+        if EVAL_DATA
+        else ""
     )
 
     debug_args = "--debug-rollout-only " if MODE in ("debug_rollout_only", "smoke") else ""
@@ -177,8 +222,10 @@ def execute() -> None:
         f"{optimizer_args} "
         f"{grpo_args} "
         f"{command_utils.get_default_wandb_args(__file__)} "
-        f"{fsdp_args} "
+        f"{backend_args} "
+        f"{timeout_args} "
         f"{dynamic_batch_args} "
+        f"{eval_args} "
         f"{sglang_args} "
         f"{telemetry_args} "
         f"{debug_args} "
@@ -189,10 +236,18 @@ def execute() -> None:
     if os.environ.get("WANDB_API_KEY"):
         extra_env_vars["WANDB_API_KEY"] = os.environ["WANDB_API_KEY"]
 
+    megatron_model_type = None
+    if BACKEND == "megatron":
+        # The language tower is Qwen3-4B's architecture; Qwen3-VL needs rotary
+        # base 5,000,000 where the text model's default is 1,000,000, and the
+        # model-args file reads it from this variable when it is resolved here.
+        os.environ["MODEL_ARGS_ROTARY_BASE"] = "5000000"
+        megatron_model_type = "qwen3-4B"
+
     U.execute_train(
         train_args=train_args,
         num_gpus_per_node=NUM_GPUS,
-        megatron_model_type=None,
+        megatron_model_type=megatron_model_type,
         extra_env_vars=extra_env_vars,
     )
 
