@@ -516,7 +516,6 @@ def tiny_qwen3_vl():
 
 
 def _image_document(seed):
-    """One document holding one image, with the processor outputs `extract_multimodal_train_inputs` keeps."""
     torch.manual_seed(seed)
     t, h, w = _IMAGE_GRID
     merge = _TINY_QWEN3_VL_VISION["spatial_merge_size"]
@@ -530,7 +529,6 @@ def _image_document(seed):
 
 
 def _hf_reference_logits(model, tokens, mm_inputs):
-    """What HF computes for this document on its own, from the `mm_token_type_ids` the processor emits."""
     mm_token_type_ids = torch.zeros_like(tokens)
     mm_token_type_ids[tokens == _IMAGE_TOKEN_ID] = 1
     mm_token_type_ids[tokens == 61] = 2
@@ -544,7 +542,6 @@ def _hf_reference_logits(model, tokens, mm_inputs):
 
 
 def _on_cpu(monkeypatch):
-    """`get_batch` allocates `cu_seqlens` on the training device; mirrors test_get_batch_cu_seqlens.py."""
     from miles.backends.training_utils.data import context_parallel
     from miles.backends.training_utils.data import rollout as data_utils
 
@@ -557,10 +554,6 @@ def _on_cpu(monkeypatch):
 
 
 def test_qwen3_vl_position_ids_run_mrope_on_every_packed_document(tiny_qwen3_vl, monkeypatch):
-    """A supplied 1-D ramp makes HF skip `compute_3d_position_ids`; the four-row tensor reaches its logits.
-
-    Driven through the real `_fetch_batches` and `get_batch`, so dropping either half of the wiring fails here.
-    """
     data_utils = _on_cpu(monkeypatch)
 
     first_tokens, first_mm = _image_document(seed=1)
@@ -589,7 +582,7 @@ def test_qwen3_vl_position_ids_run_mrope_on_every_packed_document(tiny_qwen3_vl,
     packed_len = sum(len(document) for document in documents)
     assert position_ids.shape == (4, 1, batch["tokens"].size(1))
     assert position_ids[0, 0, :packed_len].tolist() == list(range(11)) * 2 + list(range(5))
-    assert not torch.equal(position_ids[1], position_ids[0])  # the image rows carry M-RoPE's own coordinates
+    assert not torch.equal(position_ids[1], position_ids[0])
 
     start = 0
     for tokens, mm_inputs in zip(documents, [first_mm, second_mm, {}], strict=True):
@@ -599,7 +592,6 @@ def test_qwen3_vl_position_ids_run_mrope_on_every_packed_document(tiny_qwen3_vl,
 
 
 def test_the_linear_ramp_this_replaces_diverges_from_hf(tiny_qwen3_vl):
-    """Without this fix `position_ids` is an arange, which HF accepts in place of the M-RoPE coordinates."""
     tokens, mm_inputs = _image_document(seed=1)
 
     with torch.no_grad():
@@ -614,11 +606,6 @@ def test_the_linear_ramp_this_replaces_diverges_from_hf(tiny_qwen3_vl):
 
 
 def _media_document(spec):
-    """A document laying its media out the way the processor does: one vision_start/_end group per grid.
-
-    Qwen3-VL separates video frames with timestamps, so `get_rope_index` consumes one grid per group and a
-    T-frame video occupies T of them.
-    """
     merge = _TINY_QWEN3_VL_VISION["spatial_merge_size"]
     patch_dim = _TINY_QWEN3_VL_VISION["in_channels"] * 2 * 2 * 2
     tokens, mm_inputs = [1, 2], {}
@@ -661,11 +648,10 @@ def test_qwen3_vl_rejects_grids_that_disagree_with_the_placeholders(tiny_qwen3_v
     tokens, mm_inputs = _image_document(seed=1)
     understated = {**mm_inputs, "image_grid_thw": torch.tensor([[1, 2, 2]])}
 
-    with pytest.raises(RuntimeError):  # HF builds one position per token, so the count mismatch cannot pass
+    with pytest.raises(RuntimeError):
         _adapter("qwen3_vl").position_ids_builder(tiny_qwen3_vl)(tokens, understated)
 
 
-# every image-text-to-text model type in transformers 5.12 whose forward builds M-RoPE only without position_ids
 _MROPE_MODEL_TYPES = (
     "qwen2_vl", "qwen2_5_vl", "qwen3_vl", "qwen3_vl_moe", "qwen3_5", "qwen3_5_moe",
     "glm4v", "glm4v_moe", "glm46v", "glmga", "glm_ocr", "paddleocr_vl", "ernie4_5_vl_moe", "cosmos3_omni",
@@ -675,7 +661,6 @@ _MROPE_MODEL_TYPES = (
 def test_only_archs_with_a_vision_tower_build_their_own_position_ids():
     for model_type in _MROPE_MODEL_TYPES:
         assert _adapter(model_type).position_ids_builder(SimpleNamespace(model=None)) is not None, model_type
-    # text-only checkpoints load a causal LM with no rope index, and keep the 1-D ramp get_batch builds
     text_only = ("qwen3_5_text", "qwen3_5_moe_text", "qwen3_next", "nemotron_h", "qwen3", "qwen3_moe", "some_lm")
     for model_type in (*text_only, "glm4_moe_lite"):
         assert _adapter(model_type).position_ids_builder(SimpleNamespace(model=None)) is None, model_type
@@ -732,7 +717,6 @@ def _tiny_qwen3_5(model_type):
 
 @pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
 def test_qwen3_5_takes_the_same_mrope_fix(model_type):
-    """Qwen3.5 gates `compute_3d_position_ids` on `position_ids is None` exactly as Qwen3-VL does."""
     model = _tiny_qwen3_5(model_type)
     tokens, mm_inputs = _image_document(seed=3)
 
@@ -790,13 +774,6 @@ def _tiny_video_model(model_type):
 
 
 def _video_document(model_type):
-    """A two-frame video laid out the way each family's processor lays it out.
-
-    Qwen2.5-VL gives a video its own token and one contiguous run, plus the per-grid timing its processor adds;
-    an image precedes it to check both grids are consumed. GLM-V reuses the image token for frames and brackets
-    the video with start and end markers, one run per frame; its forward masks images and frames alike, so a
-    GLM sample holds one or the other.
-    """
     torch.manual_seed(2)
     video_grid = (2, 2, 4)
     patch_dim = 3 * 2 * 14 * 14

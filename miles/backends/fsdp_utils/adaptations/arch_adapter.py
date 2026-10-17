@@ -18,7 +18,6 @@ from miles.backends.fsdp_utils.adaptations.routing_replay import RoutingReplayAd
 # (name, full unsharded tensor, model) -> the (name, tensor) pairs the rollout engine loads instead
 ParamExpand = Callable[[str, torch.Tensor, nn.Module], Iterable[tuple[str, torch.Tensor]]]
 
-# one document's tokens and its processor outputs -> that document's [rows, seq] position ids
 PositionIdsBuilder = Callable[[torch.Tensor, Mapping[str, torch.Tensor] | None], torch.Tensor]
 
 
@@ -48,8 +47,7 @@ class ArchAdapter:
         return {}
 
     def position_ids_builder(self, model: nn.Module) -> PositionIdsBuilder | None:
-        """How this architecture lays out one packed document's positions, or None for the 1-D ramp
-        ``get_batch`` builds. Multimodal ropes need coordinates the ramp cannot express."""
+        """One document's position ids, or None for the 1-D ramp ``get_batch`` builds."""
         return None
 
     def param_transform(self, name: str, param: torch.Tensor) -> ParamExpand | None:

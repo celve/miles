@@ -75,7 +75,6 @@ class TorchNativeTrainRayActor(TrainRayActor):
     tokenizer: PreTrainedTokenizerBase
     ref_runner: StepRunner | None = None
     align_token_side_channel: Callable[[torch.Tensor, int], torch.Tensor] | None = None
-    # Set once by a backend whose architecture needs more than get_batch's 1-D ramp; None keeps the ramp.
     position_ids_builder: Callable[[torch.Tensor, Mapping | None], torch.Tensor] | None = None
 
     def _step_runner(self) -> StepRunner:

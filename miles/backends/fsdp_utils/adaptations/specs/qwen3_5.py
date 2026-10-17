@@ -1,6 +1,5 @@
 """Qwen3.5/3.6 and Qwen3-Next (GatedDeltaNet hybrids): per-document resets under packing come from HF's
-own padding-free kwargs, which the vision tower must not see; Qwen3.5-MoE adds the routing-replay hook. The
-composite ``qwen3_5`` / ``qwen3_5_moe`` checkpoints load with a vision tower and build M-RoPE as Qwen3-VL does."""
+own padding-free kwargs, which the vision tower must not see; Qwen3.5-MoE adds the routing-replay hook."""
 
 from miles.backends.fsdp_utils.adaptations.arch_adapter import ArchAdapter
 from miles.backends.fsdp_utils.adaptations.packing import hf_packing_kwargs

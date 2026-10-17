@@ -1,5 +1,3 @@
-"""Qwen3-VL and its MoE sibling: HF builds their M-RoPE only when given no positions, so the backend builds them."""
-
 from miles.backends.fsdp_utils.adaptations.arch_adapter import ArchAdapter
 from miles.backends.fsdp_utils.adaptations.mrope import MropePositionIds
 

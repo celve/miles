@@ -174,12 +174,6 @@ def _build_arch_position_ids(
     cp_size: int,
     pad: int,
 ) -> torch.Tensor:
-    """Pack each document's ``[rows, seq]`` positions into the ``[rows, 1, T_padded]`` HF reads.
-
-    Per document, not over the packed row: a multimodal rope numbers one sequence at a time, so numbering
-    the whole row would run positions straight through the boundaries the packed mask is derived from.
-    """
-    # Both hold for every caller today -- FSDP is the only one, and it is thd and pure data parallel.
     assert qkv_format == "thd", f"architecture-specific position ids need thd packing, got {qkv_format}"
     assert cp_size == 1, "architecture-specific position ids do not support CP yet"
 
@@ -220,8 +214,6 @@ def get_batch(
         data_iterator: Iterator providing micro-batch data.
         keys: List of keys to fetch from the iterator.
         pad_multiplier: Multiplier for padding size calculation (default: 128).
-        position_ids_builder: Lays out one document's positions when the 1-D ramp cannot express them,
-            as a multimodal rope's coordinates cannot; None keeps the ramp.
 
     Returns a dict including:
     - "tokens": torch.LongTensor of shape [1, T_padded] on the current CUDA device

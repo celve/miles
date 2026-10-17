@@ -104,8 +104,6 @@ class TestFSDPModelInputs:
 
 
 class TestFSDPPositionIds:
-    """The path from the adapter to HF's logits is covered end to end in test_fsdp_hf_compat.py."""
-
     def test_an_arch_without_a_builder_leaves_get_batch_on_its_ramp(self) -> None:
         actor = object.__new__(actor_module.FSDPTrainRayActor)
 
