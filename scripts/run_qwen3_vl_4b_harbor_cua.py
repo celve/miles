@@ -274,6 +274,10 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
     backend_args = fsdp_args
     if args.backend == "megatron":
         backend_args = megatron_args
+        if args.mode == "eval":
+            # Megatron's LR scheduler asserts a positive decay length, which --num-rollout 0
+            # makes zero; nothing trains here and the schedule is constant, so 1 is inert.
+            backend_args += "--lr-decay-iters 1 "
         # Set here, not in the worker environment: scripts/models/qwen3-4B.py reads this
         # while the model args are expanded in *this* process, and defaults to 1000000.
         # Qwen3-VL-4B-Instruct's text_config.rope_theta is 5000000, read off the checkpoint.
