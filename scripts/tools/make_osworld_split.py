@@ -1,36 +1,4 @@
-"""Turn a NeMo Gym OSWorld task file into Miles prompt rows and a held-out split.
-
-Miles reads ``prompt`` / ``label`` / ``metadata`` by the launcher's key flags.
-The instruction itself never goes in ``prompt``: the policy only ever sees it
-inside the environment, so ``prompt`` carries an identifier and nothing the
-model reads. ``metadata.osworld_task`` is what the generate function POSTs back
-to Gym.
-
-**Selection is by measured within-task variance, not by aggregate pass rate.**
-A GRPO group is the N samples of *one* prompt, so the advantage is zero unless
-that task's own samples disagree -- a task every sample solves and a task no
-sample solves both contribute exactly nothing, however interesting the corpus
-looks in aggregate. LIN-1996 measured this directly: across four optimizer
-steps its gradient norm was non-zero on exactly the one step where a single
-task scored 3 of 4, and zero on steps whose tasks were internally unanimous
-even at a mean reward of 0.5. So ``--variance-from`` takes a probe's
-``rollouts.jsonl`` -- the same task file run with ``num_repeats`` > 1 -- and
-keeps only the tasks whose successes fall strictly between none and all.
-
-Without ``--variance-from`` the split is stratified by domain alone, which
-reproduces the earlier behaviour and is the right thing for an evaluation-only
-split, but will waste most optimizer steps if used for training.
-
-The split is written with the seed, the source file's digest and both task-id
-lists, because a before/after number is only worth reporting if it can be shown
-to have been measured on tasks the policy never trained on.
-
-Usage:
-    python3 scripts/tools/make_osworld_split.py \\
-        --source <gym>/benchmarks/osworld/data/test_small.jsonl \\
-        --out-dir /root/datasets/osworld --held-out-fraction 0.3 --seed 20261016 \\
-        --variance-from <run>/rollouts.jsonl
-"""
+"""Turn a NeMo Gym OSWorld task file into Miles prompt rows and a held-out split."""
 
 from __future__ import annotations
 
@@ -81,12 +49,7 @@ def _read_tasks(source: Path) -> list[Task]:
 
 
 def read_task_outcomes(rollouts: Path) -> dict[str, list[float]]:
-    """Every graded reward a probe recorded, keyed by task.
-
-    Only rows Gym admitted count. An episode it refused never measured the
-    policy, so letting it stand in for a failure would make a task look
-    unanimous when nothing was learned about it.
-    """
+    """Every graded reward a probe recorded, keyed by task."""
     outcomes: dict[str, list[float]] = defaultdict(list)
     for line in rollouts.read_text().splitlines():
         if not line.strip():
@@ -105,16 +68,7 @@ def read_task_outcomes(rollouts: Path) -> dict[str, list[float]]:
 
 
 def select_by_variance(tasks: list[Task], outcomes: dict[str, list[float]]) -> tuple[list[Task], dict]:
-    """Keep the tasks whose own rewards differ, and say why each was dropped.
-
-    The test is on the **reward values**, not on a success/failure recoding of
-    them. This recipe runs Gym with ``reward_mode: raw``, which preserves
-    partial scores, so samples of ``[0.2, 0.8]`` have real spread and a
-    non-zero GRPO advantage while collapsing them to "both succeeded" would
-    throw the task away. Binary success counts are kept beside the spread as a
-    diagnostic, because they are what a reader expects to see, but they do not
-    decide anything.
-    """
+    """Keep the tasks whose own rewards differ, and say why each was dropped."""
     kept: list[Task] = []
     report = {"with_spread": [], "no_spread": [], "not_probed": []}
     for task in tasks:
@@ -138,11 +92,7 @@ def select_by_variance(tasks: list[Task], outcomes: dict[str, list[float]]) -> t
 
 
 def _stratified_split(tasks: list[Task], held_out_fraction: float, seed: int) -> tuple[list[Task], list[Task]]:
-    """Hold out the same fraction of every domain, deterministically.
-
-    A domain with a single task goes to training: a held-out side of one task
-    measures nothing, and losing the domain from training costs more.
-    """
+    """Hold out the same fraction of every domain, deterministically."""
     by_domain: dict[str, list[Task]] = defaultdict(list)
     for task in tasks:
         by_domain[task.domain].append(task)
@@ -187,13 +137,6 @@ def main(
     if not tasks:
         raise typer.BadParameter(f"no tasks read from {source}")
 
-    # The held-out side is frozen from the *unfiltered* candidates and variance
-    # selection is applied only to the training side. Filtering first shrinks
-    # the pool the split draws from, which silently produced an empty
-    # held_out.jsonl -- written successfully, so the run proceeded and could
-    # report no before/after score at all. The holdout's job is to measure the
-    # policy, and a task's reward spread under the *current* policy is not a
-    # property the evaluation set should be chosen on.
     train_candidates, held_out = _stratified_split(tasks, held_out_fraction, seed)
     if held_out_fraction > 0 and not held_out:
         raise typer.BadParameter(

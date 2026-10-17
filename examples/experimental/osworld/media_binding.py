@@ -1,19 +1,4 @@
-"""Independent checks that a training sample's image tokens match its screenshots.
-
-A converter that rebuilds vision inputs from an agent's trace has to prove the
-pixels it hands the trainer are the pixels the policy saw. The engine returns
-prompt ids already expanded -- one run of the image placeholder per image, as
-many tokens long as that image costs -- so the proof is positional: run *i* must
-be exactly as long as the processor says image *i* costs, in order.
-
-Checking the *total* count instead, against the summed per-image counts, accepts
-two different corruptions: a wrong per-image assignment whose total happens to
-agree, and a wrong image order. Both put a screenshot's pixels under another
-screenshot's positions, which trains the policy on a context that never existed.
-
-Nothing here imports NeMo Gym, Harbor or Miles, so either connector's converter
-can use it, and the arithmetic is testable without a GPU, a model or a trace.
-"""
+"""Independent checks that a training sample's image tokens match its screenshots."""
 
 from __future__ import annotations
 
@@ -47,13 +32,7 @@ def verify_image_token_layout(
     image_token_id: int,
     expected_counts: list[int],
 ) -> None:
-    """Check each image's token run positionally, one run per image, in order.
-
-    Correspondence is exact rather than prefix-wise. Cutting the images to
-    whichever prefix the runs happen to total would let a sequence that lost or
-    gained an occurrence pass as a shorter correct one, and would bind the
-    wrong screenshot to every position after the discrepancy.
-    """
+    """Check each image's token run positionally, one run per image, in order."""
     runs = image_token_runs(tokens, image_token_id)
     if len(runs) != len(expected_counts):
         raise MediaBindingError(
@@ -69,23 +48,13 @@ def verify_image_token_layout(
 
 
 def media_digests(payloads: list[bytes]) -> list[str]:
-    """``sha256:<hex>`` per screenshot, in prompt order.
-
-    Bound to the sample so a later run with different pixels under the same
-    token layout is detectable rather than silent.
-    """
+    """``sha256:<hex>`` per screenshot, in prompt order."""
     return [f"sha256:{hashlib.sha256(payload).hexdigest()}" for payload in payloads]
 
 
 def processor_identity(image_processor: Any) -> dict[str, Any]:
-    """The preprocessing settings that decide an image's token count and pixels.
-
-    Recorded per sample because a processor change silently rewrites the mapping
-    between a screenshot and its tokens, and a checkpoint trained across such a
-    change cannot be reproduced from the trace alone.
-    """
-    # Both resize spellings are read: Qwen3-VL-4B-Instruct pins the budget as
-    # `size: {longest_edge, shortest_edge}`, older checkpoints as min/max_pixels.
+    """The preprocessing settings that decide an image's token count and pixels."""
+    # Qwen3-VL-4B-Instruct sets size {longest_edge, shortest_edge}; older checkpoints set min/max_pixels.
     fields = (
         "merge_size",
         "patch_size",
@@ -109,15 +78,7 @@ def processor_identity(image_processor: Any) -> dict[str, Any]:
 
 
 def _plain(value: Any) -> Any:
-    """Coerce to types msgpack can carry.
-
-    ``size`` comes back as transformers' ``SizeDict``, a dataclass, and image
-    statistics as tuples; Miles serializes ``Sample.metadata`` with msgpack, so
-    leaving either as-is fails the run where the batch is packaged rather than
-    here. A dataclass becomes its fields rather than its repr, so two runs'
-    settings stay comparable across a transformers version that changes how it
-    prints.
-    """
+    """Coerce to types msgpack can carry."""
     if value is None or isinstance(value, (str, bool, int, float)):
         return value
     if isinstance(value, dict):
@@ -130,13 +91,7 @@ def _plain(value: Any) -> Any:
 
 
 def expanded_token_counts(processor: Any, images: list[Any]) -> list[int]:
-    """Tokens each image costs after merging, without re-running the vision tower.
-
-    Takes the *processor*, because transformers puts the sizing call there and
-    the image processor only underneath it. Preferring that call keeps the count
-    on the same code path the engine expanded the prompt with; the grid is the
-    fallback for a processor too old to expose it.
-    """
+    """Tokens each image costs after merging, without re-running the vision tower."""
     sizer = getattr(processor, "_get_num_multimodal_tokens", None)
     if callable(sizer):
         counts = sizer(image_sizes=[(image.height, image.width) for image in images])["num_image_tokens"]

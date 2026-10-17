@@ -1,65 +1,4 @@
-"""Multi-turn computer-use rollout on OSWorld through NeMo Gym.
-
-The division of labour, and why this file is a converter rather than a loop:
-
-- **NeMo Gym** owns the episode. One POST to its agent server's ``/run`` boots
-  an OSWorld VM, runs ``DesktopEnv`` unmodified against our policy, grades with
-  OSWorld's own evaluator, and returns an exact trace: per model call the
-  prompt/sampled token ids and sampling logprobs, screenshots factored once
-  into ``media_assets``, and a ``segment_id`` that changes whenever a dropped
-  screenshot breaks the training prefix.
-- **This file** turns one graded run into one Miles training sample *per
-  segment*. Siblings share a ``rollout_id``, so ``_normalize_rewards_by_rollout``
-  gives them one reward normalized inside the GRPO group and broadcast back.
-
-Why per segment rather than per episode: Gym has already done the stitching
-analysis the HUD example does by hand. A segment is by construction a run of
-calls whose prompts extend one another, so stitching inside one is exact, and
-the boundary between two is exactly where it would not be.
-
-Two patches to Gym are required for this to receive anything; both are in
-LIN-1996's workspace. Without them the policy runner accepts no
-``history_policy`` and discards every token id, so ``completion_evidence``
-comes back empty and every episode is written off.
-
-**Every episode returns exactly ``osworld_samples_per_episode`` samples**, the
-real segments first and padding after. The padding trains on nothing and moves
-no reward statistic, because reward normalization takes one reward per
-``rollout_id``. It is **not** loss-neutral, and the recipe document states the
-consequence plainly. ``loss_function`` divides by the sample count unless the
-rollout-side schedule supplies ``num_rollouts``, and that schedule is the one
-switched off below, while the FSDP backend's ``TRAIN_KEYS`` carries no
-``rollout_mask_sums`` to fall back on. Two things follow. The constant factor
-from the padded count largely cancels through AdamW's moment estimates, so it
-is *not* an effective learning-rate change. What does not cancel is that the
-loss is **segment-weighted rather than rollout-weighted**: an episode that
-produced twelve segments carries about twelve times the weight of one that
-produced a single segment, and a fixed cap does not change that. The core Miles
-change is what removes it. A data-dependent sample count
-cannot be trained on an image batch today: the schedule that counts
-``--global-batch-size`` in rollouts rather than samples
-(``miles/utils/dp_schedule.py``) is switched off for any batch carrying
-``multimodal_train_inputs`` (``train_data_conversion.py:381``) and needs a
-schedule config the FSDP backend never publishes, so the legacy sample-strided
-split runs instead and floor-divides the shard into steps -- leaving the tail
-rows without log-probs while they keep their rewards, which is an ``IndexError``
-in ``get_grpo_returns``. A fixed count makes that division exact. Set the cap to
-OSWorld's step cap and it is an upper bound by construction, since an episode
-cannot produce more segments than it makes model calls.
-
-**An infrastructure failure aborts the group rather than scoring zero.**
-``remove_sample`` only zeroes the loss mask -- the row keeps its reward and
-still moves the group's mean and standard deviation, which Miles documents
-deliberately in ``filter_hub/sample_filters.py`` and pins in its tests -- and
-``Sample.Status.FAILED`` is read nowhere in the framework. ``ABORTED`` is what
-``apply_aborted_filter`` rejects a group on, before any reward statistic exists,
-and what oversampling then refills. So a sandbox crash costs its group and a
-regenerated prompt; it never teaches the policy that the task was impossible.
-
-Wire with:
-  --custom-generate-function-path examples.experimental.osworld.rollout.generate
-  --custom-rm-path examples.experimental.osworld.rollout.reward_func
-"""
+"""Multi-turn computer-use rollout on OSWorld through NeMo Gym."""
 
 from __future__ import annotations
 
@@ -90,9 +29,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Why an episode kept no trainable segment. Reported per episode and summed over
-# the run, because an episode that quietly contributes nothing is the failure
-# mode this converter is most likely to have and least likely to show.
 _REJECTIONS = (
     "no_exact_evidence",
     "stitch_violation",
@@ -104,16 +40,7 @@ _REJECTIONS = (
 
 @dataclass(frozen=True)
 class EpisodeConfig:
-    """Run-wide knobs this converter needs, resolved once per call site.
-
-    They arrive through the environment rather than as flags because Miles's
-    training entry parses argv strictly -- an unknown ``--osworld-*`` would be
-    rejected -- and because each is set once for the run. All but
-    ``max_output_tokens`` are constraints every episode must share; that one is
-    a per-call default a task row may override. The launcher forwards
-    them and derives ``--global-batch-size`` from ``samples_per_episode``, so
-    the two cannot be set apart.
-    """
+    """Run-wide knobs this converter needs, resolved once per call site."""
 
     gym_url: str
     samples_per_episode: int
@@ -165,8 +92,7 @@ def _request_body(config: EpisodeConfig, task: dict, sampling_params: dict) -> d
     return {
         "responses_create_params": create_params,
         "verifier_metadata": task.get("verifier_metadata") or {},
-        # Gym emits the exact trace only for a training-purpose run, and
-        # cross-checks this against the metadata carrier above.
+        # Gym emits the exact trace only for a training-purpose run.
         "rollout_purpose": "training",
     }
 
@@ -184,12 +110,7 @@ async def _run_gym_task(config: EpisodeConfig, task: dict, sampling_params: dict
 
 
 def _calls(response: dict) -> list[dict]:
-    """One record per model call, joining the two arrays transport v3 splits it across.
-
-    ``output`` carries the token arrays and ``model_call_metadata`` the segment
-    and media identity, paired by position; v3 leaves ``completion_evidence``
-    empty, so reading that instead silently yields nothing to train on.
-    """
+    """One record per model call, joining the two arrays transport v3 splits it across."""
     outputs = response.get("output") or []
     metadata = response.get("model_call_metadata") or []
     if len(outputs) != len(metadata):
@@ -219,16 +140,7 @@ def _segments(calls: list[dict]) -> list[list[dict]]:
 
 
 def _stitch(segment: list[dict]) -> tuple[list[int], list[int], list[float], int] | None:
-    """One token sequence for a segment, with loss on the sampled tokens only.
-
-    ``loss_mask`` and ``logprobs`` cover the response region -- everything after
-    the first call's prompt -- matching what Miles reads alongside
-    ``response_length``, so both are shorter than ``tokens``.
-
-    Returns ``None`` when a call's prompt does not extend its predecessor's
-    prompt+generation: Gym promises that only within a segment, so a violation
-    means the trace and this reader disagree and nothing here is safe to train.
-    """
+    """One token sequence for a segment, with loss on the sampled tokens only."""
     tokens: list[int] = list(segment[0].get("prompt_token_ids") or [])
     if not tokens:
         return None
@@ -260,27 +172,14 @@ def _stitch(segment: list[dict]) -> tuple[list[int], list[int], list[float], int
 
 
 def _images(segment: list[dict], media_assets: dict[str, dict]) -> tuple[list[PILImage.Image], list[bytes], list[str]]:
-    """Decode this segment's screenshots in prompt order, with their bytes and ids.
-
-    First-appearance order across the segment's calls is the prompt order
-    whether Gym lists each call's whole media set or only its new ones, because
-    prompts within a segment extend one another. A screenshot referenced twice
-    in one prompt would collapse here, which ``verify_image_token_layout`` then
-    rejects as a run-count disagreement rather than mis-binding it.
-
-    Gym publishes its own ``content_digest`` per asset, so the bytes we decode
-    are checked against the bytes it recorded. That catches a transport or
-    base64 fault between Gym and here, which no amount of checking our own
-    digest against itself would.
-    """
+    """Decode this segment's screenshots in prompt order, with their bytes and ids."""
     media_ids = _media_occurrences(segment)
     images: list[PILImage.Image] = []
     payloads: list[bytes] = []
     for media_id in media_ids:
         asset = media_assets.get(media_id) or {}
         source = asset.get("source_part") or {}
-        # Both OpenAI shapes occur: image_url as the bare data URL, and as
-        # the nested {"url": ...} object.
+        # OpenAI's image_url is either the bare data URL or {"url": ...}.
         part = source.get("image_url")
         url = part if isinstance(part, str) else str((part or {}).get("url") or source.get("url") or "")
         if "base64," not in url:
@@ -293,25 +192,7 @@ def _images(segment: list[dict], media_assets: dict[str, dict]) -> tuple[list[PI
 
 
 def _media_occurrences(segment: list[dict]) -> list[str]:
-    """This segment's screenshots in prompt order, one entry per occurrence.
-
-    Each call lists its whole prompt's media, so the last call's list is the
-    stitched sequence's media. Compatibility is checked between *successive*
-    calls rather than against the final list alone: every list being a prefix
-    of the final one still admits an intermediate shrink -- ``[A,B]``, ``[A]``,
-    ``[A,B,C]`` passes that weaker test while the middle call's prompt accounts
-    for two images and claims one. Successive prefixes forbid the shrink and
-    imply the final-prefix property anyway.
-
-    This is the media half of append-compatibility, which Gym promises within a
-    segment but which this converter has to confirm for itself: two calls can
-    swap one screenshot for another of the same size without disturbing the
-    token prefix at all, and both assets' digests would still be valid.
-
-    Occurrences are not deduplicated. The arena is content-addressed, so one
-    prompt showing the same screenshot twice lists its id twice and owes two
-    token runs; collapsing them would reject a legitimate episode.
-    """
+    """This segment's screenshots in prompt order, one entry per occurrence."""
     per_call = [[str(media_id) for media_id in call.get("media_ids") or []] for call in segment]
     for index, (earlier, later) in enumerate(zip(per_call, per_call[1:], strict=False)):
         if later[: len(earlier)] != earlier:
@@ -324,16 +205,7 @@ def _media_occurrences(segment: list[dict]) -> list[str]:
 
 
 def _check_against_gyms_digest(media_id: str, source: dict, claimed: Any) -> None:
-    """Fail unless this asset is the one Gym committed to when it recorded it.
-
-    Gym's ``content_digest`` is sha256 over the canonically serialized
-    ``source_part`` -- not over the image bytes -- so recomputing it the same
-    way covers the data URL, the detail and the part type together
-    (``osworld_agent/trajectory.py:register_media_asset``). Its ``media_id`` is
-    that digest's first 24 characters, which is also checked, because an id that
-    no longer matches its own content means the asset arena was rebuilt without
-    its digests.
-    """
+    """Fail unless this asset is the one Gym committed to when it recorded it."""
     if not isinstance(claimed, str) or not claimed:
         return
     canonical = json.dumps(source, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
@@ -348,16 +220,7 @@ def _check_against_gyms_digest(media_id: str, source: dict, claimed: Any) -> Non
 
 
 def _vision_inputs(state: Any, images: list[PILImage.Image], tokens: list[int]) -> dict | None:
-    """pixel_values/image_grid_thw for the sequence, verified image by image.
-
-    The engine returns prompt ids already expanded, so each image owns one run
-    of ``<|image_pad|>`` as long as that image costs. Run *i* is checked against
-    image *i* positionally, which a summed total would not do: it would accept a
-    wrong per-image assignment whose total agrees, and a wrong image order.
-
-    Returns ``None`` only for a legitimate text-only call, where the segment
-    referenced no screenshot at all. Any disagreement raises.
-    """
+    """pixel_values/image_grid_thw for the sequence, verified image by image."""
     if not images:
         return None
 
@@ -368,14 +231,7 @@ def _vision_inputs(state: Any, images: list[PILImage.Image], tokens: list[int]) 
 
 
 def _verify_each_call(state: Any, segment: list[dict], media_ids: list[str], images: list[PILImage.Image]) -> None:
-    """Check every call's own prompt against its own claimed screenshots.
-
-    The stitched sequence only ever exposes the *final* prompt's layout, so a
-    call in the middle whose prompt holds an image its metadata does not claim
-    is invisible there -- its sampled tokens would still be trained, from a
-    context the trace cannot account for. Each call is therefore checked
-    against its own occurrence list, which is a prefix of the segment's.
-    """
+    """Check every call's own prompt against its own claimed screenshots."""
     image_token_id = state.processor.tokenizer.convert_tokens_to_ids("<|image_pad|>")
     counts = dict(zip(media_ids, expanded_token_counts(state.processor, images), strict=True))
     for index, call in enumerate(segment):
@@ -387,13 +243,7 @@ def _verify_each_call(state: Any, segment: list[dict], media_ids: list[str], ima
 
 
 def _inert(sample: Sample, state: Any) -> Sample:
-    """Shape a sample so it travels with the batch and trains on nothing.
-
-    It carries one minimal image, not just a pad token: under FSDP every rank
-    must invoke the vision tower the same number of times per microbatch,
-    because its layers' weight all-gathers are collectives. A text-only sample
-    skips them and stalls the ranks that did issue them (miles#2406).
-    """
+    """Shape a sample so it travels with the batch and trains on nothing."""
     import torch  # noqa: PLC0415
 
     tokenizer = state.processor.tokenizer
@@ -419,15 +269,7 @@ def _inert(sample: Sample, state: Any) -> Sample:
 
 
 def _aborted(sample: Sample, reason: str, state: Any, counters: dict) -> list[Sample]:
-    """Give up on this episode for an infrastructure reason, costing its group.
-
-    ``ABORTED`` is the one status Miles acts on: ``apply_aborted_filter``
-    rejects the whole group before ``_post_process_rewards`` computes anything,
-    and oversampling regenerates the prompt. Writing the episode off with
-    ``remove_sample`` instead would keep its row, and its 0.0 would enter the
-    group's mean and standard deviation as a real task failure -- teaching the
-    policy that a task its sandbox never ran was impossible.
-    """
+    """Give up on this episode for an infrastructure reason, costing its group."""
     logger.warning("osworld episode aborted: %s", reason)
     sample = _inert(sample, state)
     sample.status = Sample.Status.ABORTED
@@ -439,14 +281,7 @@ def _aborted(sample: Sample, reason: str, state: Any, counters: dict) -> list[Sa
 
 
 def _admitted_reward(envelope: dict) -> float | None:
-    """The grade, only if Gym positively says it admitted and scored the episode.
-
-    Checked positively rather than by rejecting the two failure values: a
-    missing ``runtime_eligible`` or ``mask_sample`` passes a negative test, and
-    a missing reward then defaults to zero, so a malformed or empty reply would
-    reach training as a genuine task failure instead of as the protocol fault
-    it is.
-    """
+    """The grade, only if Gym positively says it admitted and scored the episode."""
     if envelope.get("runtime_eligible") is not True or envelope.get("mask_sample") is not False:
         return None
     reward = envelope.get("reward")
@@ -456,14 +291,7 @@ def _admitted_reward(envelope: dict) -> float | None:
 
 
 def _graded_only(sample: Sample, reason: str, state: Any, counters: dict, reward: float) -> list[Sample]:
-    """An episode Gym graded but this converter cannot train on.
-
-    Only evaluation takes this path. Gym admitted the episode and its evaluator
-    produced a score, so that score is the measurement whether or not the trace
-    is trainable -- aborting it would drop a real grade for a training-only
-    reason, and the aborted row is then scored as a zero by the evaluation
-    metrics rather than excluded.
-    """
+    """An episode Gym graded but this converter cannot train on."""
     logger.info("osworld episode graded but not trainable: %s", reason)
     graded = _inert(sample, state)
     graded.status = Sample.Status.COMPLETED
@@ -475,13 +303,7 @@ def _graded_only(sample: Sample, reason: str, state: Any, counters: dict, reward
 
 
 def _padding(template: Sample, reward: float, rollout_id: int, index: int, state: Any) -> Sample:
-    """Fill a fixed-size episode out to its sample count with an inert sibling.
-
-    It carries the episode's own reward rather than zero, because
-    ``_normalize_rewards_by_rollout`` refuses a rollout whose siblings disagree
-    on one, and because the group's statistics are taken over one reward per
-    rollout -- so padding changes no statistic at all.
-    """
+    """Fill a fixed-size episode out to its sample count with an inert sibling."""
     pad = _inert(copy.deepcopy(template), state)
     pad.status = Sample.Status.COMPLETED
     pad.rollout_id = rollout_id
@@ -493,21 +315,14 @@ def _padding(template: Sample, reward: float, rollout_id: int, index: int, state
 
 
 def _boundary_provenance(response: dict) -> list[dict]:
-    """Gym's rewrite boundaries, kept so a segment count can be explained later.
-
-    A boundary is the only record of *why* an episode split where it did, and
-    the segmentation statistics this recipe reports are read off it rather than
-    off a cached-prefix proxy.
-    """
+    """Gym's rewrite boundaries, kept so a segment count can be explained later."""
     return [
         {
             "segment_id": event.get("segment_id"),
             "reason": event.get("reason"),
             "retained_media": event.get("retained_media_count"),
             "removed_media": event.get("removed_media_count"),
-            # The policy Gym actually applied, read off its own events. A policy
-            # name forwarded from the launcher would only record what we asked
-            # for, which is not what the checkpoint was trained under.
+            # Gym's own events record the policy it applied.
             "policy": event.get("policy_name"),
             "policy_version": event.get("policy_version"),
             "config_digest": event.get("config_digest"),
@@ -517,16 +332,8 @@ def _boundary_provenance(response: dict) -> list[dict]:
 
 
 async def generate(input: "GenerateFnInput") -> "GenerateFnOutput":
-    """One graded episode -> a fixed number of training samples, or one eval row.
-
-    The modern signature rather than the legacy ``(args, sample, sampling_params)``
-    one on purpose: only this form is handed ``evaluation``, and a held-out
-    evaluation must report one result per task. Padding it to the training
-    sample count would make a single success read as fifteen.
-    """
-    # In-function on purpose: base_types reaches sglang_router through the data
-    # source, which exists only on a training node, and this module stays
-    # importable on a CPU-only box so its arithmetic can be checked offline.
+    """One graded episode -> a fixed number of training samples, or one eval row."""
+    # Imported here: base_types pulls in sglang_router, which CPU-only boxes lack.
     from miles.rollout.base_types import GenerateFnOutput  # noqa: PLC0415
 
     args, sample, state = input.args, input.sample, input.state
@@ -544,16 +351,10 @@ async def generate(input: "GenerateFnInput") -> "GenerateFnOutput":
         try:
             envelope = await _run_gym_task(config, task, dict(sampling_params))
         except Exception as e:  # noqa: BLE001
-            # One episode is one VM and a long run starts thousands; a provider
-            # or timeout failure is routine and must not take the rollout down.
+            # A provider or timeout failure is routine at this scale and must not stop the rollout.
             logger.warning("osworld episode failed to run: %s", e, exc_info=True)
             return GenerateFnOutput(samples=_aborted(sample, f"transport: {type(e).__name__}: {e}", state, counters))
 
-    # Gym puts the grade and the admission decision on the row, not inside the
-    # response envelope that carries the trace. Admission is required
-    # *positively*: an envelope that does not say it was admitted, or that
-    # carries no numeric grade, is a protocol fault, and defaulting its reward
-    # to zero would manufacture a task failure out of a malformed reply.
     response = envelope.get("response") or {}
     graded = _admitted_reward(envelope)
     if graded is None:
@@ -561,9 +362,6 @@ async def generate(input: "GenerateFnInput") -> "GenerateFnOutput":
         return GenerateFnOutput(samples=_aborted(sample, f"not runtime-eligible: {reason}", state, counters))
     reward = graded
 
-    # Past this point Gym has graded the episode, so an unusable trace is this
-    # converter's limitation rather than an environment fault: training drops
-    # the group, evaluation keeps the grade.
     def unusable(reason: str) -> GenerateFnOutput:
         if input.evaluation:
             return GenerateFnOutput(samples=_graded_only(sample, reason, state, counters, reward))
@@ -592,10 +390,7 @@ async def generate(input: "GenerateFnInput") -> "GenerateFnOutput":
             logger.warning("osworld segment %d did not stitch; dropped", index)
             continue
         tokens, loss_mask, logprobs, response_start = stitched
-        # Nothing downstream compares a sample against the context bound: both
-        # rollout length flags are read only inside Miles's own request builder,
-        # which a custom generate function never reaches, so an over-long
-        # sequence would surface as a rope indexing error in the forward pass.
+        # Miles checks the context bound only in its own request builder, which this function bypasses.
         if context_limit and len(tokens) > context_limit:
             counters["over_context"] += 1
             logger.warning("osworld segment %d is %d tokens over %d; dropped", index, len(tokens), context_limit)
@@ -610,15 +405,11 @@ async def generate(input: "GenerateFnInput") -> "GenerateFnOutput":
             logger.warning("osworld segment %d dropped: %s", index, e)
             continue
         if vision_inputs is None:
-            # A model call with no screenshot is legitimate -- a text-only
-            # summary turn -- but FSDP's vision-tower collectives make a
-            # text-only sample unsafe, so it is counted rather than trained.
+            # FSDP's vision-tower collectives make a text-only sample unsafe.
             counters["text_only_call"] += 1
             logger.info("osworld segment %d is text-only; counted and dropped", index)
             continue
 
-        # Sample is a plain dataclass; the copy happens before any tensor is
-        # attached, so it stays cheap.
         child = sample if index == 0 else copy.deepcopy(sample)
         child.rollout_id = rollout_id
         child.tokens = tokens
@@ -630,10 +421,6 @@ async def generate(input: "GenerateFnInput") -> "GenerateFnOutput":
         child.metadata = dict(child.metadata or {})
         child.metadata["reward"] = reward
         child.metadata["osworld_segment_index"] = index
-        # Provenance: which Gym segment these tokens are, which pixels they were
-        # bound to, and under what preprocessing. Without the digests and the
-        # processor identity a later run cannot tell a reproduction from a
-        # coincidence.
         child.metadata["osworld_segment_id"] = segment[0].get("segment_id")
         child.metadata["osworld_media_ids"] = media_ids
         child.metadata["osworld_media_digests"] = media_digests(payloads)
@@ -645,14 +432,7 @@ async def generate(input: "GenerateFnInput") -> "GenerateFnOutput":
     if not siblings:
         return unusable(f"kept no segment of {len(segments)}")
     if len(siblings) > per_episode:
-        # Impossible while the cap is OSWorld's step cap, since segments cannot
-        # outnumber model calls -- so this means the two were configured apart,
-        # and silently dropping real segments would bias training toward the
-        # start of every episode.
         if input.evaluation:
-            # An evaluation needs one row per task, so the extra segments are
-            # dropped rather than the episode: its environment score is the
-            # measurement, and the segmentation is not what is being reported.
             siblings = siblings[:1]
         else:
             return GenerateFnOutput(
@@ -698,17 +478,7 @@ async def reward_func(args, samples: Sample | list[Sample], **kwargs) -> float |
 
 
 def log_eval_rollout_data(rollout_id, args, data, extra_metrics: dict | None = None) -> bool:
-    """Score the held-out set over the episodes the environment actually graded.
-
-    Miles's default logger turns a null reward into a zero before averaging, so
-    one sandbox that never ran would lower the reported task score rather than
-    leave the denominator. This recipe aborts an episode precisely when its
-    grade is not the policy's fault, so those rows are excluded from the score
-    and reported as their own counts instead. Returning True suppresses the
-    default logging for this dataset.
-
-    Wire with --custom-eval-rollout-log-function-path.
-    """
+    """Score the held-out set over the episodes the environment actually graded."""
     from miles.ray.rollout.metrics import compute_rollout_step  # noqa: PLC0415
     from miles.utils.tracking_utils import tracking  # noqa: PLC0415
 
@@ -723,8 +493,7 @@ def log_eval_rollout_data(rollout_id, args, data, extra_metrics: dict | None = N
         if graded:
             log_dict[f"eval/{key}"] = sum(graded) / len(graded)
         else:
-            # No score at all is not a score of zero; leave the mean out so a
-            # wholly failed evaluation cannot read as a perfect failure.
+            # No graded attempt is no score, not a score of zero.
             logger.warning("eval/%s: all %d attempts were excluded as infrastructure faults", key, len(rewards))
         if excluded:
             logger.warning(
