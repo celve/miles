@@ -74,7 +74,7 @@ export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && ray job submit
   --use-dynamic-batch-size
   --max-tokens-per-gpu 16384 
   --train-backend megatron
-  --load /root/models/Qwen3-VL-4B-Instruct
+  --load /root/shared_data/ckpt
   --tensor-model-parallel-size 2
   --sequence-parallel
   --pipeline-model-parallel-size 1
@@ -102,5 +102,6 @@ export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && ray job submit
   --colocate
   --save /root/shared_data/ckpt
   --save-interval 5
-  --dump-details /root/shared_data/dump   
+  --dump-details /root/shared_data/dump
+  --save-hf /root/shared_data/hf/{rollout_id}   
   --deploy-component all
