@@ -989,10 +989,25 @@ class TestCanScheduleOnRolloutSide:
         args = make_args(balance_data=False, micro_batch_size=1, multi_lora=True)
         assert not can_schedule_on_rollout_side(args, _make_split_data(8), FULL_SCHEDULE_CONFIG)
 
-    def test_rejects_multimodal(self):
+    @pytest.mark.parametrize(
+        "inputs",
+        [
+            [None] * 8,
+            [{"pixel_values": torch.zeros(4, 3), "image_grid_thw": torch.tensor([[1, 2, 2]])}] * 8,
+        ],
+        ids=["no_media", "media_tokens_already_expanded"],
+    )
+    def test_accepts_multimodal_that_keeps_its_length(self, inputs):
         args = make_args(balance_data=False, micro_batch_size=1, multi_lora=False)
         data = _make_split_data(8)
-        data["multimodal_train_inputs"] = [None] * 8
+        data["multimodal_train_inputs"] = inputs
+        assert can_schedule_on_rollout_side(args, data, FULL_SCHEDULE_CONFIG)
+
+    @pytest.mark.parametrize("key", ["grid_thws", "mm_vision_num_patches", "mm_audio_num_tokens"])
+    def test_rejects_multimodal_expanded_on_the_training_side(self, key):
+        args = make_args(balance_data=False, micro_batch_size=1, multi_lora=False)
+        data = _make_split_data(8)
+        data["multimodal_train_inputs"] = [None] * 7 + [{key: torch.tensor([[1, 2, 2]])}]
         assert not can_schedule_on_rollout_side(args, data, FULL_SCHEDULE_CONFIG)
 
     def test_rejects_fewer_rollouts_than_gbs(self):
@@ -1075,6 +1090,28 @@ class TestSplitTrainDataByDpScheduled:
         assert len(shards[0]["num_microbatches"]) == 2
         seen = sorted(j for shard in shards for j in shard["partition"])
         assert seen == list(range(6))
+
+    def test_multimodal_rollouts_with_variable_siblings_train_in_one_step(self):
+        """Eight episodes split into 25 segment samples are one step of eight rollouts, with every
+        sample and its image inputs scheduled exactly once."""
+        args = make_args(balance_data=False, micro_batch_size=1, use_dynamic_batch_size=True, max_tokens_per_gpu=64)
+        siblings = [3, 3, 4, 4, 2, 2, 4, 3]
+        rollout_ids = [rollout for rollout, count in enumerate(siblings) for _ in range(count)]
+        data = _make_split_data(len(rollout_ids), rollout_ids=rollout_ids)
+        data["multimodal_train_inputs"] = [
+            {"pixel_values": torch.full((4, 3), float(i)), "image_grid_thw": torch.tensor([[1, 2, 2]])}
+            for i in range(len(rollout_ids))
+        ]
+        assert can_schedule_on_rollout_side(args, data, FULL_SCHEDULE_CONFIG)
+
+        shards = split_train_data_by_dp_scheduled_raw(args, dict(data), train_parallel_config=FULL_SCHEDULE_CONFIG)
+
+        assert [shard["num_rollouts"] for shard in shards] == [[8], [8]]
+        assert sorted(j for shard in shards for j in shard["partition"]) == list(range(25))
+        for shard in shards:
+            partition = list(shard["partition"])
+            assert sorted(i for mbs in shard["micro_batch_indices"] for i in mbs) == list(range(len(partition)))
+            assert [int(mm["pixel_values"][0, 0]) for mm in shard["multimodal_train_inputs"]] == partition
 
     def test_dynamic_schedule_respects_token_cap(self):
         args = make_args(

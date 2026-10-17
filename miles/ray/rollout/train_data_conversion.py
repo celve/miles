@@ -3,6 +3,7 @@ from typing import Any
 
 import torch
 
+from miles.backends.training_utils.data.multimodal import expands_on_training_side
 from miles.rollout.generate_utils.rollout_topk_logprobs import validate_rollout_topk_logprobs_sample
 from miles.utils import object_store
 from miles.utils.audit_utils.sample_ownership.recorder import SampleOwnershipRecorder
@@ -378,7 +379,7 @@ def can_schedule_on_rollout_side(args, data: dict[str, Any], train_parallel_conf
         return False
     if is_multi_lora_enabled(args):
         return False
-    if "multimodal_train_inputs" in data:
+    if expands_on_training_side(data.get("multimodal_train_inputs")):
         return False
     if "rollout_ids" not in data:
         return False

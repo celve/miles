@@ -119,6 +119,7 @@ INKLING_IMAGE_SENTINEL_ID = -101
 INKLING_AUDIO_SENTINEL_ID = -102
 INKLING_MM_PLACEHOLDER_TOKEN_ID = 200023
 INKLING_MM_AUDIO_PLACEHOLDER_TOKEN_ID = 200025
+_INKLING_MEDIA_LENGTH_KEYS = ("mm_vision_num_patches", "mm_audio_num_tokens")
 
 
 def _expand_inkling_sample(token_tensor, loss_mask, mm, sample_idx: int):
@@ -200,16 +201,31 @@ def _expand_inkling_rollout_data_in_place(rollout_data: RolloutBatch) -> None:
         )
 
 
+def _has_inkling_media(multimodal_train_inputs: Sequence[dict[str, torch.Tensor] | None] | None) -> bool:
+    return multimodal_train_inputs is not None and any(
+        mm is not None and any(key in mm for key in _INKLING_MEDIA_LENGTH_KEYS) for mm in multimodal_train_inputs
+    )
+
+
+def expands_on_training_side(multimodal_train_inputs: Sequence[dict[str, torch.Tensor] | None] | None) -> bool:
+    """Whether `expand_multimodal_rollout_data_in_place` may lengthen these samples.
+
+    Inkling and Kimi-VL samples arrive with one placeholder per media item and grow
+    here, so a micro-batch schedule balanced on their pre-expansion lengths is not
+    the one that trains; samples whose media tokens arrive expanded never change.
+    """
+    return _has_inkling_media(multimodal_train_inputs) or any(
+        mm is not None for mm in _collect_multimodal_grid_inputs(multimodal_train_inputs)
+    )
+
+
 def expand_multimodal_rollout_data_in_place(
     rollout_data: RolloutBatch,
     media_token_id: int = KIMI_VL_MEDIA_TOKEN_ID,
     qkv_format: str = "thd",
 ) -> None:
     multimodal_train_inputs = rollout_data.get("multimodal_train_inputs", None)
-    if multimodal_train_inputs is not None and any(
-        mm is not None and ("mm_vision_num_patches" in mm or "mm_audio_num_tokens" in mm)
-        for mm in multimodal_train_inputs
-    ):
+    if _has_inkling_media(multimodal_train_inputs):
         _expand_inkling_rollout_data_in_place(rollout_data)
         return
     mm_inputs_list = _collect_multimodal_grid_inputs(multimodal_train_inputs)
