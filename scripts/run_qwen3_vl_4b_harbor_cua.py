@@ -227,7 +227,9 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
 
     megatron_args = (
         "--train-backend megatron "
-        f"--load {args.model_path} "
+        # The save dir, not the HF one: on a fresh run it holds no Megatron checkpoint, so
+        # megatron_config falls back to --ref-load through the bridge, and a rerun resumes.
+        f"--load {args.output_dir}/ckpt "
         f"--tensor-model-parallel-size {args.tensor_model_parallel_size} "
         "--sequence-parallel "
         "--pipeline-model-parallel-size 1 "
@@ -265,6 +267,9 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
         f"--save {args.output_dir}/ckpt "
         "--save-interval 5 "
         f"--dump-details {args.output_dir}/dump "
+        # An HF copy of each saved checkpoint, so a trained policy can be served, evaluated
+        # and diffed against the base weights without a conversion step.
+        + (f"--save-hf {args.output_dir}/hf/{{rollout_id}} " if args.backend == "megatron" else "")
     )
 
     backend_args = fsdp_args
