@@ -39,6 +39,8 @@ class QwenOSWorldAgent(OSWorldAgent):
         **kwargs: Any,
     ) -> None:
         kwargs["observation_type"] = "screenshot"
+        # OSWorldRunnerConfig demands a template for screenshot observations; this policy never renders one.
+        kwargs.setdefault("prompt_template", "unused: the Qwen3-VL policy builds its own prompt")
         super().__init__(*args, **kwargs)
         self._policy_request = {
             "api_base": api_base,
