@@ -20,6 +20,7 @@ from examples.experimental.osworld.rollout import (
     _calls,
     _media_occurrences,
     _padding,
+    _request_body,
     _segments,
     _stitch,
     _verify_each_call,
@@ -281,9 +282,36 @@ def test_episode_config_refuses_an_unset_sample_count(monkeypatch):
 def test_episode_config_reads_the_environment_and_strips_the_gym_url(monkeypatch):
     monkeypatch.setenv("MILES_SCRIPT_OSWORLD_SAMPLES_PER_EPISODE", "15")
     monkeypatch.setenv("MILES_SCRIPT_GYM_URL", "http://10.0.0.1:11001/")
+    monkeypatch.delenv("MILES_SCRIPT_OSWORLD_MAX_OUTPUT_TOKENS", raising=False)
     config = EpisodeConfig.read(SimpleNamespace())
     assert config.samples_per_episode == 15
     assert config.gym_url == "http://10.0.0.1:11001"
+    assert config.max_output_tokens == 1500
+
+
+def _episode_config(**overrides) -> EpisodeConfig:
+    fields = dict(gym_url="http://gym", samples_per_episode=15, max_sandboxes=8, episode_timeout_s=60.0)
+    return EpisodeConfig(**{**fields, "max_output_tokens": 1500, **overrides})
+
+
+def test_the_per_call_cap_is_not_the_segment_bound():
+    """max_new_tokens is the launcher's 12,288-token bound on a stitched segment,
+    and sending it as Gym's per-call cap let every call run eight times past the
+    1,500 the variance probe measured at."""
+    sampling_params = {"max_new_tokens": 12288, "temperature": 1.0}
+    body = _request_body(_episode_config(), {"responses_create_params": {}}, sampling_params)
+    assert body["responses_create_params"]["max_output_tokens"] == 1500
+    assert body["responses_create_params"]["temperature"] == 1.0
+    assert body["rollout_purpose"] == "training"
+
+
+def test_a_task_rows_own_request_fields_win_and_the_row_is_not_mutated():
+    task = {"responses_create_params": {"max_output_tokens": 800, "metadata": {"k": "v"}}}
+    body = _request_body(_episode_config(), task, {"max_new_tokens": 12288, "temperature": 0.6})
+    assert body["responses_create_params"]["max_output_tokens"] == 800
+    assert body["responses_create_params"]["temperature"] == 0.6
+    assert body["responses_create_params"]["metadata"] == {"k": "v", "nemo_rl_rollout_purpose": "training"}
+    assert task["responses_create_params"]["metadata"] == {"k": "v"}
 
 
 def test_an_envelope_without_a_positive_admission_is_not_a_grade():

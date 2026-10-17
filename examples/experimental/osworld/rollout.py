@@ -108,8 +108,9 @@ class EpisodeConfig:
 
     They arrive through the environment rather than as flags because Miles's
     training entry parses argv strictly -- an unknown ``--osworld-*`` would be
-    rejected -- and because every one of them is a launch constraint: the run is
-    correct only if every episode uses the same value. The launcher forwards
+    rejected -- and because each is set once for the run. All but
+    ``max_output_tokens`` are constraints every episode must share; that one is
+    a per-call default a task row may override. The launcher forwards
     them and derives ``--global-batch-size`` from ``samples_per_episode``, so
     the two cannot be set apart.
     """
@@ -118,6 +119,7 @@ class EpisodeConfig:
     samples_per_episode: int
     max_sandboxes: int
     episode_timeout_s: float
+    max_output_tokens: int
 
     @classmethod
     def read(cls, args: Any) -> EpisodeConfig:
@@ -137,6 +139,7 @@ class EpisodeConfig:
             samples_per_episode=samples_per_episode,
             max_sandboxes=int(knob("max_sandboxes", "MILES_SCRIPT_OSWORLD_MAX_SANDBOXES", "8")),
             episode_timeout_s=float(knob("episode_timeout_s", "MILES_SCRIPT_OSWORLD_EPISODE_TIMEOUT_S", "2400")),
+            max_output_tokens=int(knob("max_output_tokens", "MILES_SCRIPT_OSWORLD_MAX_OUTPUT_TOKENS", "1500")),
         )
 
 _gate: asyncio.Semaphore | None = None
@@ -150,28 +153,32 @@ def _sandbox_gate(config: EpisodeConfig) -> asyncio.Semaphore:
     return _gate
 
 
+def _request_body(config: EpisodeConfig, task: dict, sampling_params: dict) -> dict:
+    """The /run body, where a task row's own request fields win over this run's defaults."""
+    create_params = dict(task.get("responses_create_params") or {})
+    # Per model call: Miles's max_new_tokens is this recipe's bound on a whole stitched segment.
+    create_params.setdefault("max_output_tokens", config.max_output_tokens)
+    create_params.setdefault("temperature", float(sampling_params.get("temperature", 1.0)))
+    if sampling_params.get("top_p") is not None:
+        create_params.setdefault("top_p", float(sampling_params["top_p"]))
+    create_params["metadata"] = {**(create_params.get("metadata") or {}), "nemo_rl_rollout_purpose": "training"}
+    return {
+        "responses_create_params": create_params,
+        "verifier_metadata": task.get("verifier_metadata") or {},
+        # Gym emits the exact trace only for a training-purpose run, and
+        # cross-checks this against the metadata carrier above.
+        "rollout_purpose": "training",
+    }
+
+
 async def _run_gym_task(config: EpisodeConfig, task: dict, sampling_params: dict) -> dict:
     """POST one task to Gym and return its response envelope."""
     import aiohttp  # noqa: PLC0415
 
-    base_url = config.gym_url
-    create_params = dict(task.get("responses_create_params") or {})
-    create_params.setdefault("max_output_tokens", int(sampling_params.get("max_new_tokens", 1500)))
-    create_params.setdefault("temperature", float(sampling_params.get("temperature", 1.0)))
-    if sampling_params.get("top_p") is not None:
-        create_params.setdefault("top_p", float(sampling_params["top_p"]))
-    body = {
-        "responses_create_params": create_params,
-        "verifier_metadata": task.get("verifier_metadata") or {},
-        # Gym emits the exact trace only for a training-purpose run, and
-        # cross-checks this against the metadata carrier below.
-        "rollout_purpose": "training",
-    }
-    body["responses_create_params"].setdefault("metadata", {})["nemo_rl_rollout_purpose"] = "training"
-
+    body = _request_body(config, task, sampling_params)
     timeout = aiohttp.ClientTimeout(total=config.episode_timeout_s)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.post(f"{base_url}/run", json=body) as response:
+        async with session.post(f"{config.gym_url}/run", json=body) as response:
             response.raise_for_status()
             return await response.json()
 

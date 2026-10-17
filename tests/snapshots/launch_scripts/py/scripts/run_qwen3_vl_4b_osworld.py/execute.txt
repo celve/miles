@@ -15,7 +15,7 @@ nvidia-smi topo -m 2>/dev/null | grep -o 'NV[0-9][0-9]*' | wc -l
 ### 3
 export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && ray job submit
   --address="http://127.0.0.1:8265"
-  --runtime-env-json='{"env_vars": {"PYTHONUNBUFFERED": "1", "NCCL_NVLS_ENABLE": "0", "no_proxy": "127.0.0.1,127.0.0.1", "MASTER_ADDR": "127.0.0.1", "CUDA_DEVICE_MAX_CONNECTIONS": "1", "MILES_SCRIPT_GYM_URL": "http://127.0.0.1:11001", "MILES_SCRIPT_OSWORLD_SAMPLES_PER_EPISODE": "15", "MILES_SCRIPT_OSWORLD_MAX_SANDBOXES": "8", "MILES_SCRIPT_OSWORLD_EPISODE_TIMEOUT_S": "2400", "PYTHONPATH": "<REPO_ROOT>:/root/Megatron-LM:/frozen/pythonpath"}}'
+  --runtime-env-json='{"env_vars": {"PYTHONUNBUFFERED": "1", "NCCL_NVLS_ENABLE": "0", "no_proxy": "127.0.0.1,127.0.0.1", "MASTER_ADDR": "127.0.0.1", "CUDA_DEVICE_MAX_CONNECTIONS": "1", "MILES_SCRIPT_GYM_URL": "http://127.0.0.1:11001", "MILES_SCRIPT_OSWORLD_SAMPLES_PER_EPISODE": "15", "MILES_SCRIPT_OSWORLD_MAX_SANDBOXES": "8", "MILES_SCRIPT_OSWORLD_EPISODE_TIMEOUT_S": "2400", "MILES_SCRIPT_OSWORLD_MAX_OUTPUT_TOKENS": "1500", "PYTHONPATH": "<REPO_ROOT>:/root/Megatron-LM:/frozen/pythonpath"}}'
   -- python3 <REPO_ROOT>/train.py 
   --hf-checkpoint /root/models/Qwen3-VL-4B-Instruct
   --ref-load /root/models/Qwen3-VL-4B-Instruct 

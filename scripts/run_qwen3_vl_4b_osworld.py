@@ -39,6 +39,8 @@ Args:
         be configured before the job starts. The router is pinned to the Ray
         head rather than given an address, so the proxy forwards to that host.
     samples_per_episode: OSWorld's step cap; fixes each episode's sample count.
+    max_output_tokens: Gym's per-call generation cap, the value the variance
+        probe ran at. A task row's own value wins.
     rollout_batch_size, n_samples_per_prompt: the GRPO group geometry.
     micro_batch_size: must divide each rank's share of the global batch.
     num_rollout: optimizer steps.
@@ -91,11 +93,10 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     micro_batch_size: int = 1
     max_sandboxes: int = 8
     episode_timeout_s: int = 2400
+    max_output_tokens: int = 1500
     rollout_batch_size: int = 2
     n_samples_per_prompt: int = 4
     num_rollout: int = 20
-    # Recorded so the run report and the checkpoint agree on which screenshot
-    # window produced them; Gym itself reads this from its own env.yaml.
     mode: Literal["normal", "smoke"] = "normal"
     extra_args: str = ""
 
@@ -377,6 +378,7 @@ def execute(args: ScriptArgs):
         "MILES_SCRIPT_OSWORLD_SAMPLES_PER_EPISODE": str(args.samples_per_episode),
         "MILES_SCRIPT_OSWORLD_MAX_SANDBOXES": str(args.max_sandboxes),
         "MILES_SCRIPT_OSWORLD_EPISODE_TIMEOUT_S": str(args.episode_timeout_s),
+        "MILES_SCRIPT_OSWORLD_MAX_OUTPUT_TOKENS": str(args.max_output_tokens),
     }
     if not smoke:
         _refuse_geometry_overrides(train_args, args, launcher_env)
