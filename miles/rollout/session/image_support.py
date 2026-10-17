@@ -8,7 +8,7 @@ and dies with it.
 """
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from miles.rollout.session.config import SESSION_IMAGE_SUPPORT_OFF, SessionServerConfig, check_session_image_engine
@@ -39,22 +39,16 @@ class EngineImageConfig:
 
     model_path: str
     revision: str | None
+    tokenizer_path: str
     mm_process_config: dict[str, Any] | None
     image_processor_backend: str
+    disable_fast_image_processor: bool
     sampling_defaults: str
     tool_call_parser: str | None
     reasoning_parser: str | None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "model_path": self.model_path,
-            "revision": self.revision,
-            "mm_process_config": self.mm_process_config,
-            "image_processor_backend": self.image_processor_backend,
-            "sampling_defaults": self.sampling_defaults,
-            "tool_call_parser": self.tool_call_parser,
-            "reasoning_parser": self.reasoning_parser,
-        }
+        return asdict(self)
 
     def model_sampling_defaults(self, generation_defaults: dict[str, Any]) -> dict[str, Any]:
         """The defaults the engine applies to a field the request omits.

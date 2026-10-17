@@ -237,8 +237,10 @@ def _image_args(tmp_path=None, yaml_text: str | None = None, **overrides) -> Nam
         use_rollout_indexer_replay=False,
         rollout_external=False,
         sglang_revision=None,
+        sglang_tokenizer_path=None,
         sglang_mm_process_config=None,
         sglang_image_processor_backend="auto",
+        sglang_disable_fast_image_processor=False,
         sglang_sampling_defaults="model",
         sglang_tool_call_parser=None,
         sglang_reasoning_parser=None,
@@ -267,8 +269,10 @@ class TestSessionImageEngine:
         assert args.session_image_engine == {
             "model_path": "/ckpt/actor",
             "revision": None,
+            "tokenizer_path": "/ckpt/actor",
             "mm_process_config": None,
             "image_processor_backend": "auto",
+            "disable_fast_image_processor": False,
             "sampling_defaults": "model",
             "tool_call_parser": None,
             "reasoning_parser": None,
@@ -318,6 +322,34 @@ class TestSessionImageEngine:
         yaml_text = _groups(_group(4, worker_type="prefill"), _group(4, worker_type="decode"))
         with pytest.raises(ValueError, match="disaggregation"):
             validate_session_image_args(_image_args(tmp_path, yaml_text))
+
+    def test_a_tokenizer_path_flag_naming_the_checkpoint_is_the_default(self):
+        args = _image_args(sglang_tokenizer_path="/ckpt/actor")
+        validate_session_image_args(args)
+        assert args.session_image_engine["tokenizer_path"] == "/ckpt/actor"
+
+    def test_a_processor_root_other_than_the_checkpoint_is_refused(self):
+        """SGLang loads the image processor from tokenizer_path, which the token ids cannot vouch for."""
+        with pytest.raises(ValueError, match="load their tokenizer and image processor from"):
+            validate_session_image_args(_image_args(sglang_tokenizer_path="/ckpt/renormalized"))
+
+    def test_a_processor_root_override_on_every_group_is_refused(self, tmp_path):
+        yaml_text = _groups(
+            _group(4, tokenizer_path="/ckpt/renormalized"), _group(4, tokenizer_path="/ckpt/renormalized")
+        )
+        with pytest.raises(ValueError, match="load their tokenizer and image processor from"):
+            validate_session_image_args(_image_args(tmp_path, yaml_text))
+
+    def test_a_processor_root_override_on_one_group_is_refused(self, tmp_path):
+        with pytest.raises(ValueError, match=r"differ in \['tokenizer_path'\]"):
+            validate_session_image_args(
+                _image_args(tmp_path, _groups(_group(4, tokenizer_path="/ckpt/renormalized"), _group(4)))
+            )
+
+    def test_the_legacy_slow_processor_flag_is_refused(self):
+        """It forces SGLang's 'pil' backend whatever image_processor_backend says."""
+        with pytest.raises(ValueError, match="disable_fast_image_processor"):
+            validate_session_image_args(_image_args(sglang_disable_fast_image_processor=True))
 
     def test_an_auto_parser_is_refused(self):
         with pytest.raises(ValueError, match="name the parser explicitly"):

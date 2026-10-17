@@ -200,8 +200,10 @@ class ScriptedGenerateBackend:
 ENGINE_SETTINGS = {
     "model_path": CHECKPOINT,
     "revision": None,
+    "tokenizer_path": CHECKPOINT,
     "mm_process_config": None,
     "image_processor_backend": "auto",
+    "disable_fast_image_processor": False,
     "sampling_defaults": "model",
     "tool_call_parser": None,
     "reasoning_parser": None,
@@ -530,9 +532,19 @@ class TestEngineSettings:
             ({"model_path": "Qwen/Qwen3-VL-4B-Instruct"}, "the two processors would disagree"),
             ({"image_processor_backend": "torchvision"}, "image_processor_backend"),
             ({"revision": "abc123"}, "pin revision"),
+            ({"tokenizer_path": "/tmp/renormalized"}, "load their tokenizer and image processor from"),
+            ({"disable_fast_image_processor": True}, "disable_fast_image_processor"),
             ({"tool_call_parser": "auto"}, "name the parser explicitly"),
         ],
-        ids=["preprocessing-override", "other-checkpoint", "image-backend", "pinned-revision", "auto-parser"],
+        ids=[
+            "preprocessing-override",
+            "other-checkpoint",
+            "image-backend",
+            "pinned-revision",
+            "processor-root",
+            "slow-processor",
+            "auto-parser",
+        ],
     )
     def test_an_unsupported_engine_setting_refuses_to_start(self, vlm, override, message):
         with pytest.raises(ValueError, match=message):

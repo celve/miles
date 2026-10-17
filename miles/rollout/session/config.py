@@ -10,8 +10,10 @@ SESSION_IMAGE_SUPPORT_QWEN3_VL = "qwen3_vl"
 # The engine launch settings that decide what an image becomes and how a reply is parsed.
 SESSION_IMAGE_ENGINE_FIELDS = (
     "revision",
+    "tokenizer_path",
     "mm_process_config",
     "image_processor_backend",
+    "disable_fast_image_processor",
     "sampling_defaults",
     "tool_call_parser",
     "reasoning_parser",
@@ -92,10 +94,13 @@ def resolve_session_image_engine(args) -> dict[str, Any] | None:
 
 def _engine_image_settings(args, overrides: dict[str, Any]) -> dict[str, Any]:
     # The order `_compute_server_args` launches with: a group override beats --sglang-<field>.
-    return {
+    settings = {
         "model_path": overrides["model_path"],
         **{name: overrides.get(name, getattr(args, f"sglang_{name}", None)) for name in SESSION_IMAGE_ENGINE_FIELDS},
     }
+    # SGLang loads the image processor from tokenizer_path, which defaults to model_path.
+    settings["tokenizer_path"] = settings["tokenizer_path"] or settings["model_path"]
+    return settings
 
 
 def check_session_image_engine(settings: dict[str, Any], *, checkpoint: str) -> None:
@@ -108,6 +113,12 @@ def check_session_image_engine(settings: dict[str, Any], *, checkpoint: str) -> 
             f"the policy engines serve {settings['model_path']!r} but --hf-checkpoint is {checkpoint!r}; "
             "the two processors would disagree about every image"
         )
+    if settings["tokenizer_path"] != checkpoint:
+        raise ValueError(
+            f"the policy engines load their tokenizer and image processor from {settings['tokenizer_path']!r} "
+            f"but --hf-checkpoint is {checkpoint!r}; that processor could normalize differently with every "
+            "token id still matching"
+        )
     if settings["revision"] is not None:
         raise ValueError(
             f"the policy engines pin revision {settings['revision']!r} while the session server loads the "
@@ -119,6 +130,12 @@ def check_session_image_engine(settings: dict[str, Any], *, checkpoint: str) -> 
             f"the policy engines launch with mm_process_config {settings['mm_process_config']!r}, which "
             "changes how they decode or normalize images; their pixels would then differ from the "
             "trainer's while every token id stayed identical"
+        )
+    if settings["disable_fast_image_processor"]:
+        raise ValueError(
+            "the policy engines launch with disable_fast_image_processor, which forces SGLang's 'pil' image "
+            "processor whatever image_processor_backend says; only 'auto' has been verified to match the "
+            "trainer's pixels"
         )
     if settings["image_processor_backend"] != "auto":
         raise ValueError(
