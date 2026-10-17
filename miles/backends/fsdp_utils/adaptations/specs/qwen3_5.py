@@ -1,14 +1,16 @@
 """Qwen3.5/3.6 and Qwen3-Next (GatedDeltaNet hybrids): per-document resets under packing come from HF's
-own padding-free kwargs, which the vision tower must not see; Qwen3.5-MoE adds the routing-replay hook."""
+own padding-free kwargs, which the vision tower must not see; Qwen3.5-MoE adds the routing-replay hook. The
+composite ``qwen3_5`` / ``qwen3_5_moe`` checkpoints load with a vision tower and build M-RoPE as Qwen3-VL does."""
 
 from miles.backends.fsdp_utils.adaptations.arch_adapter import ArchAdapter
 from miles.backends.fsdp_utils.adaptations.packing import hf_packing_kwargs
 from miles.backends.fsdp_utils.adaptations.routing_replay import RoutingReplayAdapter
+from miles.backends.fsdp_utils.adaptations.specs.qwen3_vl import MropePositionIds
 from miles.backends.fsdp_utils.models.replay_routers import install_qwen3_router_replay
 
 
 class Qwen35Adapter(ArchAdapter):
-    model_types = frozenset({"qwen3_5", "qwen3_5_text", "qwen3_next"})
+    model_types = frozenset({"qwen3_5_text", "qwen3_next"})
 
     def packing_kwargs(self, *, cu_seqlens, cu_seqlens_host, max_seqlen):
         # GatedDeltaNet reads seq_idx (causal conv) and cu_seq_lens_q (FLA chunk rule) from **kwargs.
@@ -20,8 +22,16 @@ class Qwen35Adapter(ArchAdapter):
         keep_packing_kwargs_out_of_vision(model)
 
 
+class Qwen35VLAdapter(MropePositionIds, Qwen35Adapter):
+    model_types = frozenset({"qwen3_5"})
+
+
 class Qwen35MoeAdapter(Qwen35Adapter):
-    model_types = frozenset({"qwen3_5_moe", "qwen3_5_moe_text"})
+    model_types = frozenset({"qwen3_5_moe_text"})
     routing_replay = RoutingReplayAdapter(
         name="qwen3_5_moe", module_cls_name="Qwen3_5MoeTopKRouter", install=install_qwen3_router_replay
     )
+
+
+class Qwen35MoeVLAdapter(MropePositionIds, Qwen35MoeAdapter):
+    model_types = frozenset({"qwen3_5_moe"})

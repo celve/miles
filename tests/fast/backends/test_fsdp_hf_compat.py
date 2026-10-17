@@ -665,12 +665,83 @@ def test_qwen3_vl_rejects_grids_that_disagree_with_the_placeholders(tiny_qwen3_v
         _adapter("qwen3_vl").position_ids_builder(tiny_qwen3_vl)(tokens, understated)
 
 
-def test_only_qwen3_vl_archs_build_their_own_position_ids():
-    for model_type in ("qwen3_vl", "qwen3_vl_moe"):
+def test_only_archs_with_a_vision_tower_build_their_own_position_ids():
+    for model_type in ("qwen3_vl", "qwen3_vl_moe", "qwen3_5", "qwen3_5_moe"):
         assert _adapter(model_type).position_ids_builder(SimpleNamespace(model=None)) is not None, model_type
-    # every other arch keeps the 1-D ramp get_batch builds, including remote code with no adapter
-    for model_type in ("qwen3_5", "qwen3_5_moe", "nemotron_h", "qwen3", "qwen3_moe", "glm4_moe_lite", "some_lm"):
+    # text-only checkpoints load a causal LM with no rope index, and keep the 1-D ramp get_batch builds
+    text_only = ("qwen3_5_text", "qwen3_5_moe_text", "qwen3_next", "nemotron_h", "qwen3", "qwen3_moe", "some_lm")
+    for model_type in (*text_only, "glm4_moe_lite"):
         assert _adapter(model_type).position_ids_builder(SimpleNamespace(model=None)) is None, model_type
+
+
+_TINY_QWEN3_5_MROPE_TEXT = dict(
+    _TINY_QWEN3_5_TEXT,
+    hidden_size=32,
+    num_attention_heads=4,
+    num_key_value_heads=2,
+    head_dim=16,
+    linear_key_head_dim=8,
+    linear_value_head_dim=8,
+    rope_parameters={
+        "rope_type": "default",
+        "rope_theta": 10000.0,
+        "partial_rotary_factor": 0.5,
+        "mrope_section": [2, 1, 1],
+        "mrope_interleaved": True,
+    },
+)
+
+
+def _tiny_qwen3_5(model_type):
+    from transformers import Qwen3_5Config, Qwen3_5MoeConfig
+    from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForConditionalGeneration
+    from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeForConditionalGeneration
+
+    if model_type == "qwen3_5_moe":
+        config_cls, model_cls = Qwen3_5MoeConfig, Qwen3_5MoeForConditionalGeneration
+        text_config = dict(
+            _TINY_QWEN3_5_MROPE_TEXT,
+            num_experts=4,
+            num_experts_per_tok=2,
+            moe_intermediate_size=16,
+            shared_expert_intermediate_size=16,
+        )
+    else:
+        config_cls, model_cls, text_config = Qwen3_5Config, Qwen3_5ForConditionalGeneration, _TINY_QWEN3_5_MROPE_TEXT
+    cfg = config_cls(
+        text_config=text_config,
+        vision_config=dict(_TINY_QWEN3_VL_VISION, depth=1, deepstack_visual_indexes=[]),
+        image_token_id=_IMAGE_TOKEN_ID,
+        video_token_id=61,
+        vision_start_token_id=62,
+        vision_end_token_id=63,
+    )
+    torch.manual_seed(0)
+    model = model_cls(cfg).eval()
+    model.config.text_config._attn_implementation = "eager"
+    model.config.vision_config._attn_implementation = "eager"
+    return model
+
+
+@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
+def test_qwen3_5_takes_the_same_mrope_fix(model_type):
+    """Qwen3.5 gates `compute_3d_position_ids` on `position_ids is None` exactly as Qwen3-VL does."""
+    model = _tiny_qwen3_5(model_type)
+    tokens, mm_inputs = _image_document(seed=3)
+
+    rows = _adapter(model_type).position_ids_builder(model)(tokens, mm_inputs)
+    with torch.no_grad():
+        fixed = model(input_ids=tokens.unsqueeze(0), position_ids=rows.unsqueeze(1), use_cache=False, **mm_inputs)
+        ramped = model(
+            input_ids=tokens.unsqueeze(0),
+            position_ids=torch.arange(tokens.numel()).unsqueeze(0),
+            use_cache=False,
+            **mm_inputs,
+        )
+    reference = _hf_reference_logits(model, tokens, mm_inputs)
+
+    assert torch.equal(fixed.logits, reference)
+    assert (ramped.logits - reference).abs().max() > 1e-3
 
 
 import transformers

@@ -11,7 +11,12 @@ from miles.backends.fsdp_utils.adaptations.arch_adapter import ArchAdapter
 from miles.backends.fsdp_utils.adaptations.specs.glm4_moe_lite import Glm4MoeLiteAdapter
 from miles.backends.fsdp_utils.adaptations.specs.nemotron_h import NemotronHAdapter
 from miles.backends.fsdp_utils.adaptations.specs.qwen3 import Qwen3Adapter
-from miles.backends.fsdp_utils.adaptations.specs.qwen3_5 import Qwen35Adapter, Qwen35MoeAdapter
+from miles.backends.fsdp_utils.adaptations.specs.qwen3_5 import (
+    Qwen35Adapter,
+    Qwen35MoeAdapter,
+    Qwen35MoeVLAdapter,
+    Qwen35VLAdapter,
+)
 from miles.backends.fsdp_utils.adaptations.specs.qwen3_moe import Qwen3MoeAdapter
 from miles.backends.fsdp_utils.adaptations.specs.qwen3_vl import Qwen3VLAdapter, Qwen3VLMoeAdapter
 
@@ -20,7 +25,9 @@ _ADAPTERS: tuple[ArchAdapter, ...] = (
     NemotronHAdapter(),
     Qwen3Adapter(),
     Qwen35Adapter(),
+    Qwen35VLAdapter(),
     Qwen35MoeAdapter(),
+    Qwen35MoeVLAdapter(),
     Qwen3MoeAdapter(),
     Qwen3VLAdapter(),
     Qwen3VLMoeAdapter(),

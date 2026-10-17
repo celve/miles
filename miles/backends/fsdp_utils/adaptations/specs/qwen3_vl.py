@@ -20,12 +20,16 @@ _TEXT, _IMAGE, _VIDEO = 0, 1, 2
 _GRID_KEYS = {_IMAGE: "image_grid_thw", _VIDEO: "video_grid_thw"}
 
 
-class Qwen3VLAdapter(ArchAdapter):
-    model_types = frozenset({"qwen3_vl"})
-    verified = True
+class MropePositionIds:
+    """For an HF multimodal model whose forward computes M-RoPE only when it is given no ``position_ids``."""
 
     def position_ids_builder(self, model: nn.Module) -> PositionIdsBuilder:
         return partial(mrope_position_ids, model.model)
+
+
+class Qwen3VLAdapter(MropePositionIds, ArchAdapter):
+    model_types = frozenset({"qwen3_vl"})
+    verified = True
 
 
 class Qwen3VLMoeAdapter(Qwen3VLAdapter):
