@@ -204,6 +204,8 @@ def test_megatron_runs_the_vl_model_definition_through_the_bridge():
     assert argv[argv.index("--train-backend") + 1] == "megatron"
     assert argv[argv.index("--megatron-to-hf-mode") + 1] == "bridge"
     assert "--gradient-checkpointing" not in argv and "--attn-implementation" not in argv
+    # LIN-2045 measured all 18 DeepStack tensors bit-identical to the base after six steps with recompute on.
+    assert "--recompute-granularity" not in argv
     assert _emitted(train_backend="fsdp")["kwargs"]["megatron_model_type"] is None
 
 
