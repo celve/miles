@@ -20,9 +20,10 @@ from typing import Any
 
 import torch
 
-from miles.rollout.session.config import SESSION_IMAGE_SUPPORT_OFF, SessionServerConfig, check_engine_launch_settings
+from miles.rollout.session.config import SESSION_IMAGE_SUPPORT_OFF, SessionServerConfig
 from miles.rollout.session.errors import UpstreamResponseError
-from miles.rollout.session.images import NO_IMAGES, ImageStore, PromptImages, StoredImage, extract_prompt_images
+from miles.rollout.session.images.launch_settings import check_engine_launch_settings
+from miles.rollout.session.images.store import NO_IMAGES, ImageStore, PromptImages, StoredImage, extract_prompt_images
 from miles.utils.processing_utils import call_processor, extract_multimodal_train_inputs, load_processor
 
 logger = logging.getLogger(__name__)

@@ -8,7 +8,7 @@ concurrency, and tokenization live one layer up in ``session_state``.
 from dataclasses import dataclass, field
 from typing import Any
 
-from miles.rollout.session.images import NO_IMAGES, PromptImages
+from miles.rollout.session.images.store import NO_IMAGES, PromptImages
 from miles.rollout.session.types import SessionRecord
 from miles.utils.chat_template_utils.message_matcher_hub import SessionMessageMatcher, strict_message_matches
 

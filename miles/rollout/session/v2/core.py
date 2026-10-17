@@ -16,7 +16,7 @@ from miles.rollout.session.core import (
     proxy_result_to_response,
 )
 from miles.rollout.session.errors import SessionNotFoundError, TokenizationError
-from miles.rollout.session.image_processing import assert_engine_expansion_matches, expand_input_ids
+from miles.rollout.session.images.processing import assert_engine_expansion_matches, expand_input_ids
 from miles.rollout.session.request_args import filter_turn_args, parse_chat_request
 from miles.rollout.session.samples.codec import COMPUTED_FIELDS_V2, ROLLOUT_SAMPLING_MASK_FIELDS, encode_samples
 from miles.rollout.session.types import GetSessionResponse, SessionRecord

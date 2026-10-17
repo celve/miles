@@ -27,8 +27,8 @@ from typing import Any
 
 from miles.rollout.session.config import SessionServerConfig
 from miles.rollout.session.errors import MessageValidationError, TokenizationError, TruncatedGenerationError
-from miles.rollout.session.image_processing import SessionImageProcessor, SessionImages, placeholder_runs
-from miles.rollout.session.images import NO_IMAGES, PromptImages
+from miles.rollout.session.images.processing import SessionImageProcessor, SessionImages, placeholder_runs
+from miles.rollout.session.images.store import NO_IMAGES, PromptImages
 from miles.rollout.session.linear_trajectory import SessionRegistry, assert_pretokenized_prefix
 from miles.rollout.session.request_args import PreparedChatRequest, prepare_chat_request
 from miles.rollout.session.types import SessionRecord

@@ -9,14 +9,14 @@ import torch
 from PIL import Image
 
 from miles.rollout.session.errors import MessageValidationError
-from miles.rollout.session.image_processing import (
+from miles.rollout.session.images.processing import (
     ProcessedImage,
     expand_input_ids,
     merge_train_inputs,
     placeholder_runs,
     retained_image_count,
 )
-from miles.rollout.session.images import NO_IMAGES, ImageStore, PromptImages, extract_prompt_images
+from miles.rollout.session.images.store import NO_IMAGES, ImageStore, PromptImages, extract_prompt_images
 
 PAD = 151655
 

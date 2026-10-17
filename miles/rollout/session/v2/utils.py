@@ -4,7 +4,7 @@ from typing import Any
 
 from miles.rollout.generate_utils.sample_utils import merge_samples
 from miles.rollout.session.errors import TokenizationError
-from miles.rollout.session.image_processing import expand_input_ids, merge_train_inputs, retained_image_count
+from miles.rollout.session.images.processing import expand_input_ids, merge_train_inputs, retained_image_count
 from miles.rollout.session.request_args import filter_turn_args
 from miles.rollout.session.samples.merge import (
     compute_samples_from_openai_records,
