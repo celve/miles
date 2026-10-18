@@ -8,7 +8,7 @@ from miles.backends.fsdp_utils.adaptations.arch_adapter import PositionIdsBuilde
 
 _TEXT, _IMAGE, _VIDEO = 0, 1, 2
 
-_ROPE_INPUT_KEYS = ("image_grid_thw", "video_grid_thw", "second_per_grid_ts")
+_ROPE_INPUT_KEYS = ("image_grid_thw", "video_grid_thw")
 
 
 class MropePositionIds:
@@ -37,14 +37,7 @@ def mrope_position_ids(
 
 
 def _mm_token_type_ids(config, tokens: torch.Tensor) -> torch.Tensor:
-    image = tokens == config.image_token_id
     mm_token_type_ids = torch.full_like(tokens, _TEXT)
-    mm_token_type_ids[image] = _IMAGE
-    if (video_token_id := getattr(config, "video_token_id", None)) is not None:
-        mm_token_type_ids[tokens == video_token_id] = _VIDEO
-    # GLM-V marks video frames with the image token, between the video's start and end markers
-    start, end = getattr(config, "video_start_token_id", None), getattr(config, "video_end_token_id", None)
-    if start is not None and end is not None:
-        in_video = torch.cumsum(tokens == start, dim=0) > torch.cumsum(tokens == end, dim=0)
-        mm_token_type_ids[image & in_video] = _VIDEO
+    mm_token_type_ids[tokens == config.image_token_id] = _IMAGE
+    mm_token_type_ids[tokens == config.video_token_id] = _VIDEO
     return mm_token_type_ids

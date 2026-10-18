@@ -491,17 +491,23 @@ _TINY_QWEN3_VL_VISION = dict(
     num_position_embeddings=16,
     deepstack_visual_indexes=[0],
 )
+_TINY_QWEN3_VL_MOE_TEXT = dict(_TINY_QWEN3_VL_TEXT, num_experts=4, num_experts_per_tok=2, moe_intermediate_size=16)
 _IMAGE_TOKEN_ID = 60
 _IMAGE_GRID = (1, 4, 4)
 
 
-@pytest.fixture(scope="module")
-def tiny_qwen3_vl():
-    from transformers import Qwen3VLConfig
+@pytest.fixture(scope="module", params=["qwen3_vl", "qwen3_vl_moe"])
+def tiny_qwen3_vl(request):
+    from transformers import Qwen3VLConfig, Qwen3VLMoeConfig
     from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditionalGeneration
+    from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeForConditionalGeneration
 
-    cfg = Qwen3VLConfig(
-        text_config=_TINY_QWEN3_VL_TEXT,
+    config_cls, model_cls, text_config = {
+        "qwen3_vl": (Qwen3VLConfig, Qwen3VLForConditionalGeneration, _TINY_QWEN3_VL_TEXT),
+        "qwen3_vl_moe": (Qwen3VLMoeConfig, Qwen3VLMoeForConditionalGeneration, _TINY_QWEN3_VL_MOE_TEXT),
+    }[request.param]
+    cfg = config_cls(
+        text_config=text_config,
         vision_config=_TINY_QWEN3_VL_VISION,
         image_token_id=_IMAGE_TOKEN_ID,
         video_token_id=61,
@@ -509,7 +515,7 @@ def tiny_qwen3_vl():
         vision_end_token_id=63,
     )
     torch.manual_seed(0)
-    model = Qwen3VLForConditionalGeneration(cfg).eval()
+    model = model_cls(cfg).eval()
     model.config.text_config._attn_implementation = "eager"
     model.config.vision_config._attn_implementation = "eager"
     return model
@@ -570,7 +576,7 @@ def test_qwen3_vl_position_ids_run_mrope_on_every_packed_document(tiny_qwen3_vl,
 
     actor = object.__new__(FSDPTrainRayActor)
     actor.args = SimpleNamespace(data_pad_size_multiplier=8, qkv_format="thd")
-    actor.arch_adapter = _adapter("qwen3_vl")
+    actor.arch_adapter = _adapter(tiny_qwen3_vl.config.model_type)
     actor.position_ids_builder = actor.arch_adapter.position_ids_builder(tiny_qwen3_vl)
 
     iterator = data_utils.DataIterator(rollout, micro_batch_size=len(documents))
@@ -629,7 +635,7 @@ def test_qwen3_vl_position_ids_match_hf_for_every_media_layout(tiny_qwen3_vl, sp
     torch.manual_seed(5)
     tokens, mm_inputs = _media_document(spec)
 
-    rows = _adapter("qwen3_vl").position_ids_builder(tiny_qwen3_vl)(tokens, mm_inputs)
+    rows = _adapter(tiny_qwen3_vl.config.model_type).position_ids_builder(tiny_qwen3_vl)(tokens, mm_inputs)
     with torch.no_grad():
         logits = tiny_qwen3_vl(
             input_ids=tokens.unsqueeze(0), position_ids=rows.unsqueeze(1), use_cache=False, **mm_inputs
@@ -639,7 +645,7 @@ def test_qwen3_vl_position_ids_match_hf_for_every_media_layout(tiny_qwen3_vl, sp
 
 
 def test_a_text_only_qwen3_vl_document_keeps_the_linear_ramp(tiny_qwen3_vl):
-    rows = _adapter("qwen3_vl").position_ids_builder(tiny_qwen3_vl)(torch.arange(5) + 7, None)
+    rows = _adapter(tiny_qwen3_vl.config.model_type).position_ids_builder(tiny_qwen3_vl)(torch.arange(5) + 7, None)
 
     assert torch.equal(rows, torch.arange(5).expand(4, -1))
 
@@ -649,17 +655,11 @@ def test_qwen3_vl_rejects_grids_that_disagree_with_the_placeholders(tiny_qwen3_v
     understated = {**mm_inputs, "image_grid_thw": torch.tensor([[1, 2, 2]])}
 
     with pytest.raises(RuntimeError):
-        _adapter("qwen3_vl").position_ids_builder(tiny_qwen3_vl)(tokens, understated)
-
-
-_MROPE_MODEL_TYPES = (
-    "qwen2_vl", "qwen2_5_vl", "qwen3_vl", "qwen3_vl_moe", "qwen3_5", "qwen3_5_moe",
-    "glm4v", "glm4v_moe", "glm46v", "glmga", "glm_ocr", "paddleocr_vl", "ernie4_5_vl_moe", "cosmos3_omni",
-)  # fmt: skip
+        _adapter(tiny_qwen3_vl.config.model_type).position_ids_builder(tiny_qwen3_vl)(tokens, understated)
 
 
 def test_only_archs_with_a_vision_tower_build_their_own_position_ids():
-    for model_type in _MROPE_MODEL_TYPES:
+    for model_type in ("qwen3_vl", "qwen3_vl_moe", "qwen3_5", "qwen3_5_moe"):
         assert _adapter(model_type).position_ids_builder(SimpleNamespace(model=None)) is not None, model_type
     text_only = ("qwen3_5_text", "qwen3_5_moe_text", "qwen3_next", "nemotron_h", "qwen3", "qwen3_moe", "some_lm")
     for model_type in (*text_only, "glm4_moe_lite"):
@@ -733,81 +733,6 @@ def test_qwen3_5_takes_the_same_mrope_fix(model_type):
 
     assert torch.equal(fixed.logits, reference)
     assert (ramped.logits - reference).abs().max() > 1e-3
-
-
-_TINY_VIDEO_VISION = dict(
-    depth=1, hidden_size=32, intermediate_size=32, num_heads=4, patch_size=14, temporal_patch_size=2,
-    spatial_merge_size=1, in_channels=3, out_hidden_size=32,
-)  # fmt: skip
-
-
-def _tiny_video_model(model_type):
-    from transformers import Glm4vConfig, Qwen2_5_VLConfig
-    from transformers.models.glm4v.modeling_glm4v import Glm4vForConditionalGeneration
-    from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
-
-    text = dict(
-        vocab_size=99, hidden_size=32, intermediate_size=37, num_hidden_layers=2, num_attention_heads=4,
-        num_key_value_heads=2, rope_parameters={"rope_type": "default", "rope_theta": 10000, "mrope_section": [2, 1, 1]},
-    )  # fmt: skip
-    if model_type == "qwen2_5_vl":
-        cfg = Qwen2_5_VLConfig(
-            text_config=text,
-            vision_config=dict(_TINY_VIDEO_VISION, window_size=112, fullatt_block_indexes=[0], tokens_per_second=2),
-            image_token_id=4, video_token_id=5, vision_start_token_id=3, vision_end_token_id=6,
-        )  # fmt: skip
-        model_cls = Qwen2_5_VLForConditionalGeneration
-    else:
-        cfg = Glm4vConfig(
-            text_config=text,
-            vision_config=dict(_TINY_VIDEO_VISION, image_size=336),
-            image_token_id=7, video_token_id=8, image_start_token_id=5, image_end_token_id=6,
-            video_start_token_id=3, video_end_token_id=4,
-        )  # fmt: skip
-        model_cls = Glm4vForConditionalGeneration
-    torch.manual_seed(0)
-    model = model_cls(cfg).eval()
-    for sub in (model.config, model.config.text_config, model.config.vision_config):
-        sub._attn_implementation = "eager"
-    return model
-
-
-def _video_document(model_type):
-    torch.manual_seed(2)
-    video_grid = (2, 2, 4)
-    patch_dim = 3 * 2 * 14 * 14
-    frame_tokens = video_grid[1] * video_grid[2]
-    media = {
-        "pixel_values_videos": torch.randn(video_grid[0] * video_grid[1] * video_grid[2], patch_dim),
-        "video_grid_thw": torch.tensor([video_grid]),
-    }
-    if model_type == "qwen2_5_vl":
-        image, video = 4, 5
-        tokens = [1, 2, 3, *[image] * 8, 6, 9, 3, *[video] * (video_grid[0] * frame_tokens), 6, 10]
-        mm_types = [1 if t == image else 2 if t == video else 0 for t in tokens]
-        media |= {"pixel_values": torch.randn(8, patch_dim), "image_grid_thw": torch.tensor([(1, 2, 4)])}
-        media |= {"second_per_grid_ts": torch.tensor([0.5])}
-    else:
-        image, start, end = 7, 3, 4
-        tokens, mm_types = [1, 2, start], [0, 0, 0]
-        for _ in range(video_grid[0]):
-            tokens += [5, *[image] * frame_tokens, 6, 11]
-            mm_types += [0, *[2] * frame_tokens, 0, 0]
-        tokens, mm_types = tokens + [end, 10], mm_types + [0, 0]
-    return torch.tensor(tokens), torch.tensor(mm_types), media
-
-
-@pytest.mark.parametrize("model_type", ["qwen2_5_vl", "glm4v"])
-def test_video_positions_match_hf_where_the_families_lay_videos_out_differently(model_type):
-    model = _tiny_video_model(model_type)
-    tokens, mm_types, media = _video_document(model_type)
-
-    rows = _adapter(model_type).position_ids_builder(model)(tokens, media)
-    with torch.no_grad():
-        fixed = model(input_ids=tokens[None], position_ids=rows[:, None], use_cache=False, **media).logits
-        reference = model(input_ids=tokens[None], mm_token_type_ids=mm_types[None], use_cache=False, **media).logits
-
-    assert torch.equal(fixed, reference)
 
 
 import transformers
