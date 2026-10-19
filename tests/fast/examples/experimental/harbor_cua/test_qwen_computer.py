@@ -32,7 +32,6 @@ def test_the_prompt_names_the_screen_qwen3_vl_answers_on(provider):
 
 
 def test_lin_2045s_base_clicks_land_on_the_buttons_they_aimed_at(provider):
-    """LIN-2045's base model clicked (499, 284) and (499, 431) for buttons centred at (512, 255) and (512, 391)."""
     start = _executed(provider, {"type": "click", "x": 499, "y": 284})
     finish = _executed(provider, {"type": "click", "x": 499, "y": 431})
 
