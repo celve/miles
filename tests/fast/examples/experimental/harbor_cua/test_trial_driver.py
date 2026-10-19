@@ -3,8 +3,7 @@
 import inspect
 
 import pytest
-
-from examples.experimental.harbor_cua.trial_driver import AGENT_NAME, PROVIDER_NAME, _agent_kwargs
+from examples.experimental.harbor_cua.trial_driver import AGENT_IMPORT_PATH, PROVIDER_NAME, _agent_kwargs
 
 
 @pytest.fixture
@@ -65,11 +64,19 @@ def test_the_generic_json_provider_is_the_one_selected(kwargs):
     assert kwargs["provider"] == PROVIDER_NAME
 
 
-def test_the_agent_name_is_the_registered_one():
+def test_harbor_builds_the_qwen3_vl_computer_1_from_the_trial_config(kwargs, tmp_path):
     pytest.importorskip("harbor", reason="pip install harbor -- the recipe's one extra dependency")
+    from examples.experimental.harbor_cua.qwen_computer import Qwen3VLComputer1, Qwen3VLJsonProvider
+    from harbor.agents.factory import AgentFactory
     from harbor.models.agent.name import AgentName
+    from harbor.models.trial.config import AgentConfig
 
-    assert AgentName(AGENT_NAME) is AgentName.COMPUTER_1
+    config = AgentConfig(import_path=AGENT_IMPORT_PATH, model_name="openai/model", kwargs=kwargs)
+    agent = AgentFactory.create_agent_from_config(config, logs_dir=tmp_path)
+
+    assert isinstance(agent, Qwen3VLComputer1)
+    assert agent.name() == AgentName.COMPUTER_1.value
+    assert isinstance(agent._build_provider(), Qwen3VLJsonProvider)
 
 
 def test_the_deterministic_inference_seed_is_forwarded():

@@ -27,7 +27,7 @@ from examples.experimental.harbor.harbor_agent_function import (
 
 logger = logging.getLogger(__name__)
 
-AGENT_NAME = "computer-1"
+AGENT_IMPORT_PATH = "examples.experimental.harbor_cua.qwen_computer:Qwen3VLComputer1"
 PROVIDER_NAME = "litellm"
 
 
@@ -82,7 +82,7 @@ def build_trial_config(
     return TrialConfig(
         task=TaskConfig(path=_task_path(tasks_dir, instance_id)),
         agent=AgentConfig(
-            name=AGENT_NAME,
+            import_path=AGENT_IMPORT_PATH,
             model_name=model,
             override_timeout_sec=float(agent_timeout) if agent_timeout else None,
             env={},
