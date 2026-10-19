@@ -2,6 +2,7 @@
 
 import os
 import tempfile
+from argparse import Namespace
 from pathlib import Path
 
 import torch
@@ -41,7 +42,7 @@ def _train_args(extra_args: str) -> str:
         "--apply-chat-template "
         "--rollout-shuffle "
         "--custom-generate-function-path tests.manual.compact_split_generate.generate_one_to_three "
-        "--rm-type math "
+        "--custom-rm-path tests.e2e.short.test_qwen3_vl_2B_compact_rollout.reward_by_index "
         "--rollout-batch-size 8 "
         "--n-samples-per-prompt 4 "
         "--rollout-max-response-len 1024 "
@@ -106,6 +107,13 @@ def _train_args(extra_args: str) -> str:
     )
 
 
+async def reward_by_index(args: Namespace, samples: Sample | list[Sample], **_kwargs) -> float | list[float]:
+    """Gives every group both rewards, so every optimizer step has a gradient to compare."""
+    if isinstance(samples, list):
+        return [float(sample.index % 2) for sample in samples]
+    return float(samples.index % 2)
+
+
 def _merge_rollouts(split_path: str, merged_path: str) -> None:
     """Rejoin each rollout's samples into the one sequence they were cut from."""
     payload = torch.load(split_path, weights_only=False)
@@ -143,8 +151,9 @@ def execute():
 
     train(f"--num-rollout 2 --save-debug-rollout-data {split_rollouts} ")
     _merge_rollouts(split_rollouts.format(rollout_id=0), merged_rollouts.format(rollout_id=0))
-    train(f"--num-rollout 1 --load-debug-rollout-data {merged_rollouts} --ci-save-grad-norm {grad_norms} ")
-    train(f"--num-rollout 1 --load-debug-rollout-data {split_rollouts} --ci-load-grad-norm {grad_norms} ")
+    replay = "--num-rollout 1 --no-enable-sample-ownership-checker "
+    train(f"{replay} --load-debug-rollout-data {merged_rollouts} --ci-save-grad-norm {grad_norms} ")
+    train(f"{replay} --load-debug-rollout-data {split_rollouts} --ci-load-grad-norm {grad_norms} ")
 
 
 if __name__ == "__main__":
