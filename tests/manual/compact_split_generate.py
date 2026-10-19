@@ -4,28 +4,32 @@ training samples that share the parent's rollout_id. Use via
 
 import copy
 
+from miles.rollout import sglang_rollout
 from miles.rollout.base_types import GenerateFnInput, GenerateFnOutput
 from miles.rollout.generate_hub.single_turn import generate as single_turn_generate
 from miles.utils.types import Sample
 
 
 async def generate(input: GenerateFnInput) -> GenerateFnOutput:
-    return await _generate_split(input, num_pieces=2)
+    sample = (await single_turn_generate(input)).samples
+    return GenerateFnOutput(samples=_split(sample, num_pieces=2))
 
 
 async def generate_one_to_three(input: GenerateFnInput) -> GenerateFnOutput:
-    return await _generate_split(input, num_pieces=1 + input.sample.index % 3)
+    """Generates through the default path, whose processor call covers every image format."""
+    sample = await sglang_rollout.generate(
+        input.args, input.sample, input.sampling_params, evaluation=input.evaluation
+    )
+    return GenerateFnOutput(samples=_split(sample, num_pieces=1 + sample.index % 3))
 
 
-async def _generate_split(input: GenerateFnInput, *, num_pieces: int) -> GenerateFnOutput:
-    output = await single_turn_generate(input)
-    sample = output.samples
+def _split(sample: Sample, *, num_pieces: int) -> list[Sample]:
     assert isinstance(sample, Sample)
 
     sample.rollout_id = sample.index
     num_pieces = min(num_pieces, sample.response_length)
     if num_pieces < 2 or sample.status == Sample.Status.ABORTED:
-        return GenerateFnOutput(samples=[sample])
+        return [sample]
 
     prompt_len = len(sample.tokens) - sample.response_length
     # A None mask becomes all ones in conversion, which would train earlier pieces' tokens again.
@@ -42,4 +46,4 @@ async def _generate_split(input: GenerateFnInput, *, num_pieces: int) -> Generat
         if end < sample.response_length:
             piece.status = Sample.Status.COMPLETED
         pieces.append(piece)
-    return GenerateFnOutput(samples=pieces)
+    return pieces

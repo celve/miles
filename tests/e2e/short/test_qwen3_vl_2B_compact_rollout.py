@@ -151,7 +151,8 @@ def execute():
 
     train(f"--num-rollout 2 --save-debug-rollout-data {split_rollouts} ")
     _merge_rollouts(split_rollouts.format(rollout_id=0), merged_rollouts.format(rollout_id=0))
-    replay = "--num-rollout 1 --no-enable-sample-ownership-checker "
+    # Frozen weights keep every replayed step comparable: Adam's first update is sign-like and amplifies noise.
+    replay = "--num-rollout 1 --no-enable-sample-ownership-checker --lr 0 "
     train(f"{replay} --load-debug-rollout-data {merged_rollouts} --ci-save-grad-norm {grad_norms} ")
     train(f"{replay} --load-debug-rollout-data {split_rollouts} --ci-load-grad-norm {grad_norms} ")
 
