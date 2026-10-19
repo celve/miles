@@ -19,9 +19,9 @@ def provider(tmp_path):
     return agent._build_provider()
 
 
-def _executed(provider, action: dict):
+def _executed(provider, action: dict, desktop: DisplayGeometry = DESKTOP):
     step = provider.parse(LLMResponse(content=json.dumps({"analysis": "", "plan": "", "action": action})))
-    return normalize_completion_action(step.action, DESKTOP)
+    return normalize_completion_action(step.action, desktop)
 
 
 def test_the_prompt_names_the_screen_qwen3_vl_answers_on(provider):
@@ -44,6 +44,24 @@ def test_a_drag_scales_both_ends(provider):
     drag = _executed(provider, {"type": "drag", "x": 0, "y": 0, "end_x": 999, "end_y": 999})
 
     assert (drag.x, drag.y, drag.end_x, drag.end_y) == (0, 0, 1023, 899)
+
+
+def test_the_grid_scales_to_whatever_desktop_the_agent_runs(tmp_path):
+    agent = Qwen3VLComputer1(
+        logs_dir=tmp_path,
+        model_name="openai/model",
+        provider="litellm",
+        enable_images=True,
+        desktop_width=1280,
+        desktop_height=720,
+        window_width=1280,
+        window_height=720,
+    )
+    provider = agent._build_provider()
+    corner = _executed(provider, {"type": "click", "x": 999, "y": 999}, agent._desktop_geometry)
+
+    assert "1000x1000 pixels" in provider.record_text("Click Start.")
+    assert (corner.x, corner.y) == (1279, 719)
 
 
 def test_a_reply_without_an_action_is_still_retried(provider):
