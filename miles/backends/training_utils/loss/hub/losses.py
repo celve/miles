@@ -171,6 +171,7 @@ def policy_loss_function(
             full_old_log_probs=full_old_log_probs,
             advantages=advantages_list,
             loss_masks=batch["loss_masks"],
+            denominators=batch.get("rollout_mask_sums", None),
         )
 
     # Compute KL divergence (GSPO uses sequence-level KL, others use per-token KL)
@@ -298,6 +299,7 @@ def policy_loss_function(
         qkv_format=args.qkv_format,
         max_seq_lens=max_seq_lens,
         calculate_per_token_loss=args.calculate_per_token_loss,
+        denominators=batch.get("rollout_mask_sums", None),
     )
 
     pg_loss = pg_loss_reducer(pg_loss)

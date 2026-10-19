@@ -40,12 +40,15 @@ def compute_ess_ratio_contribution(
     qkv_format: str,
     max_seq_lens: list[int] | None,
     calculate_per_token_loss: bool,
+    denominators: list[torch.Tensor] | torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Return an ESS contribution compatible with ``aggregate_train_losses``.
 
     ESS needs full-sample sums before applying the nonlinear ratio.  Under CP we
     reconstruct those sums first, then let only CP rank 0 emit the final
     contribution so the generic CP metric aggregation does not double count it.
+    ``denominators`` (``rollout_mask_sums``) weight each sample by its share of
+    its rollout's loss tokens, so a rollout of several samples adds one term.
     """
     parallel_state = get_parallel_state()
     cp_size = parallel_state.cp.size
@@ -77,7 +80,12 @@ def compute_ess_ratio_contribution(
         sum_w = partial_sums[i, 0]
         sum_w2 = partial_sums[i, 1]
         ess_ratio = (sum_w * sum_w) / (num_valid_tokens * torch.clamp_min(sum_w2, 1e-8))
-        ess_ratio_sum += ess_ratio * num_valid_tokens if calculate_per_token_loss else ess_ratio
+        if calculate_per_token_loss:
+            ess_ratio_sum += ess_ratio * num_valid_tokens
+        elif denominators is not None:
+            ess_ratio_sum += ess_ratio * num_valid_tokens / torch.clamp_min(denominators[i], 1)
+        else:
+            ess_ratio_sum += ess_ratio
 
     if cp_size > 1 and parallel_state.cp.rank != 0:
         ess_ratio_sum = ess_ratio_sum * 0
@@ -186,6 +194,7 @@ def compute_opsm_mask(
     full_old_log_probs: list[torch.Tensor],
     advantages: list[torch.Tensor],
     loss_masks: list[torch.Tensor],
+    denominators: list[torch.Tensor] | torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute Off-Policy Sequence Masking (OPSM) mask.
 
@@ -195,25 +204,29 @@ def compute_opsm_mask(
         full_old_log_probs: Old policy log-probs per sample.
         advantages: Advantage values per sample.
         loss_masks: Loss masks per sample.
+        denominators: Each sample's rollout loss-token total (`rollout_mask_sums`);
+            None uses the sample's own.
 
     Returns:
         Tuple of `(opsm_mask, opsm_clipfrac)` where `opsm_mask` is a
         concatenated tensor of per-token masks and
-        `opsm_clipfrac` is the count of masked sequences.
+        `opsm_clipfrac` is the count of masked sequences, or of masked
+        rollouts when `denominators` spreads each rollout over its samples.
     """
     opsm_mask_list = []
     device = advantages[0].device
     opsm_clipfrac = torch.tensor(0.0, device=device)
 
-    for full_log_prob, full_old_log_prob, advantage, loss_mask in zip(
-        full_log_probs, full_old_log_probs, advantages, loss_masks, strict=False
+    for i, (full_log_prob, full_old_log_prob, advantage, loss_mask) in enumerate(
+        zip(full_log_probs, full_old_log_probs, advantages, loss_masks, strict=False)
     ):
         # Calculate sequence-level KL
         seq_kl = ((full_old_log_prob - full_log_prob) * loss_mask).sum() / torch.clamp_min(loss_mask.sum(), 1)
 
         # Create mask: 0 if (advantage < 0 and seq_kl > delta), else 1
         mask = ((advantage < 0) & (seq_kl > args.opsm_delta)).float()
-        opsm_clipfrac += mask.sum() / torch.clamp_min(loss_mask.sum(), 1)
+        denominator = loss_mask.sum() if denominators is None else denominators[i]
+        opsm_clipfrac += mask.sum() / torch.clamp_min(denominator, 1)
 
         opsm_mask_list.append(1 - mask)
 

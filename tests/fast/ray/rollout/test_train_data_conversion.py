@@ -9,6 +9,7 @@ from hypothesis import strategies as st
 from tests.fast.ray.rollout.conftest import make_args, make_sample, make_samples_grouped
 from tests.fast.train_parallel_config_utils import make_train_parallel_config
 
+from miles.backends.training_utils.data.multimodal import INKLING_IMAGE_SENTINEL_ID, KIMI_VL_MEDIA_TOKEN_ID
 from miles.ray.rollout import train_data_conversion
 from miles.ray.rollout.train_data_conversion import (
     ROLLOUT_DATA_VALUE_SPEC,
@@ -996,11 +997,20 @@ class TestCanPrecomputeDpSchedule:
             args=args, data=_make_split_data(8), train_parallel_config=FULL_SCHEDULE_CONFIG
         )
 
-    def test_rejects_multimodal(self):
+    @pytest.mark.parametrize(
+        "multimodal_train_inputs",
+        [
+            {"pixel_values": torch.zeros(4, 3), "image_grid_thw": torch.tensor([[1, 2, 2]])},
+            {"grid_thws": torch.tensor([[1, 4, 4]])},
+            {"mm_vision_num_patches": torch.tensor([4])},
+        ],
+        ids=["qwen_vl", "kimi", "inkling"],
+    )
+    def test_accepts_image_batches(self, multimodal_train_inputs):
         args = make_args(balance_data=False, micro_batch_size=1, multi_lora=False)
         data = _make_split_data(8)
-        data["multimodal_train_inputs"] = [None] * 8
-        assert not can_precompute_dp_schedule(args=args, data=data, train_parallel_config=FULL_SCHEDULE_CONFIG)
+        data["multimodal_train_inputs"] = [multimodal_train_inputs] * 8
+        assert can_precompute_dp_schedule(args=args, data=data, train_parallel_config=FULL_SCHEDULE_CONFIG)
 
     def test_rejects_fewer_rollouts_than_gbs(self):
         args = make_args(balance_data=False, micro_batch_size=1, multi_lora=False)  # global_batch_size=8
@@ -1111,6 +1121,58 @@ class TestSplitTrainDataByDpScheduled:
                 total = sum(lengths[partition[i]] for i in mbs)
                 assert total <= 6 or len(mbs) == 1
 
+    def test_image_rollouts_of_several_samples_stay_whole_per_step(self):
+        args = make_args(
+            balance_data=False,
+            micro_batch_size=1,
+            use_dynamic_batch_size=True,
+            max_tokens_per_gpu=8,
+            global_batch_size=2,
+        )
+        rollout_ids = [0, 0, 0, 1, 1, 1, 2, 2, 3, 3]
+        data = _make_split_data(10, rollout_ids=rollout_ids)
+        data["multimodal_train_inputs"] = [{"pixel_values": torch.full((1, 3), float(i))} for i in range(10)]
+
+        shards = split_train_data_by_dp_scheduled_raw(args, data, train_parallel_config=FULL_SCHEDULE_CONFIG)
+
+        steps = _rollouts_per_step(shards, rollout_ids)
+        assert [len(step) for step in steps] == [2, 2]
+        assert sorted(rollout for step in steps for rollout in step) == [0, 1, 2, 3]
+        assert all(shard["num_rollouts"] == [2, 2] for shard in shards)
+        assert sorted(j for shard in shards for j in shard["partition"]) == list(range(10))
+        for shard in shards:
+            assert all(
+                mm is data["multimodal_train_inputs"][j]
+                for mm, j in zip(shard["multimodal_train_inputs"], shard["partition"], strict=True)
+            )
+
+    @pytest.mark.parametrize(
+        ("media_token", "multimodal_train_inputs"),
+        [
+            (KIMI_VL_MEDIA_TOKEN_ID, {"grid_thws": torch.tensor([[1, 8, 8]])}),
+            (INKLING_IMAGE_SENTINEL_ID, {"mm_vision_num_patches": torch.tensor([16])}),
+        ],
+        ids=["kimi", "inkling"],
+    )
+    def test_media_expanded_in_training_is_planned_at_its_trained_length(self, media_token, multimodal_train_inputs):
+        args = make_args(
+            balance_data=False,
+            micro_batch_size=1,
+            use_dynamic_batch_size=True,
+            max_tokens_per_gpu=40,
+            global_batch_size=4,
+        )
+        data = _make_split_data(4, lengths=[10] * 4)
+        for tokens in data["tokens"]:
+            tokens[0] = media_token
+        data["multimodal_train_inputs"] = [dict(multimodal_train_inputs) for _ in range(4)]
+
+        shards = split_train_data_by_dp_scheduled_raw(args, data, train_parallel_config=FULL_SCHEDULE_CONFIG)
+
+        for shard in shards:
+            assert shard["total_lengths"] == [10] * 4
+            assert all(len(micro_batch) * 25 <= 40 for micro_batch in shard["micro_batch_indices"])
+
     def test_dynamic_gbs_multi_step(self):
         """16 samples with dynamic_global_batch_size=8 -> 2 steps."""
         args = make_args(balance_data=False, micro_batch_size=2, use_dynamic_batch_size=False)
@@ -1121,6 +1183,42 @@ class TestSplitTrainDataByDpScheduled:
         assert shards[0]["num_microbatches"] == [2, 2]
         assert shards[0]["dynamic_global_batch_size"] == 8
         assert shards[0]["num_rollouts"] == [8, 8]
+
+
+def _rollouts_per_step(shards: list[dict], rollout_ids: list[int]) -> list[set[int]]:
+    steps = [set() for _ in shards[0]["num_microbatches"]]
+    for shard in shards:
+        micro_batches = iter(shard["micro_batch_indices"])
+        for step, count in zip(steps, shard["num_microbatches"], strict=True):
+            for _ in range(count):
+                step.update(rollout_ids[shard["partition"][i]] for i in next(micro_batches))
+    return steps
+
+
+class TestSplitTrainDataRawRolloutCount:
+    def test_stamps_the_rollout_count_of_a_single_step(self):
+        args = make_args(balance_data=False, multi_lora=False, global_batch_size=5)
+        data = _make_split_data(5, rollout_ids=[7, 7, 7, 9, 9])
+
+        shards = split_train_data_by_dp_raw(args, data, dp_size=2)
+
+        assert [shard["num_rollouts"] for shard in shards] == [[2], [2]]
+
+    def test_refuses_several_steps_of_multi_sample_rollouts(self):
+        args = make_args(balance_data=False, multi_lora=False, global_batch_size=2)
+        data = _make_split_data(5, rollout_ids=[7, 7, 7, 9, 9])
+
+        with pytest.raises(ValueError, match="can_precompute_dp_schedule") as error:
+            split_train_data_by_dp_raw(args, data, dp_size=2)
+        assert "--use-dynamic-global-batch-size" not in str(error.value)
+
+    def test_single_sample_rollouts_and_multi_lora_keep_the_sample_count(self):
+        args = make_args(balance_data=False, multi_lora=False, global_batch_size=2)
+        assert "num_rollouts" not in split_train_data_by_dp_raw(args, _make_split_data(4), dp_size=2)[0]
+
+        args = make_args(balance_data=False, multi_lora=True, global_batch_size=2)
+        data = _make_split_data(5, rollout_ids=[7, 7, 7, 9, 9])
+        assert "num_rollouts" not in split_train_data_by_dp_raw(args, data, dp_size=2)[0]
 
 
 def test_delayed_dp_split_preserves_the_tinker_loss_vectors():
