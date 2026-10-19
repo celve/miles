@@ -93,3 +93,32 @@ def test_opsm_clipfrac_counts_a_masked_rollout_once_however_it_is_split() -> Non
     assert _opsm_clipfrac(loss_masks, -1.0, denominators=denominators) == pytest.approx(2.0)
     assert _opsm_clipfrac(loss_masks, 1.0, denominators=denominators) == 0.0
     assert _opsm_clipfrac(loss_masks, -1.0) == pytest.approx(4.0)
+
+
+def test_opsm_clipfrac_ignores_the_masked_prefix_of_a_later_piece() -> None:
+    loss_masks = [torch.ones(3), torch.tensor([0.0, 0.0, 0.0, 1.0, 1.0, 1.0])]
+
+    assert _opsm_clipfrac(loss_masks, -1.0, denominators=_rollout_mask_sums([0, 0], loss_masks)) == pytest.approx(1.0)
+    assert _opsm_clipfrac(loss_masks, -1.0) == pytest.approx(2.0)
+
+
+def test_opsm_clipfrac_sums_to_one_rollout_across_context_parallel_ranks() -> None:
+    loss_masks = [torch.ones(3), torch.tensor([0.0, 0.0, 0.0, 1.0, 1.0, 1.0])]
+    denominators = _rollout_mask_sums([0, 0], loss_masks)
+    halves = [(slice(0, mask.numel() // 2), slice(mask.numel() // 2, None)) for mask in loss_masks]
+
+    total = 0.0
+    for rank in range(2):
+        local_masks = [mask[halves[i][rank]] for i, mask in enumerate(loss_masks)]
+        _, clipfrac = compute_opsm_mask(
+            args=Namespace(opsm_delta=0.5),
+            full_log_probs=[torch.zeros(mask.numel()) for mask in loss_masks],
+            full_old_log_probs=[torch.ones(mask.numel()) for mask in loss_masks],
+            advantages=[torch.full((local.numel(),), -1.0) for local in local_masks],
+            loss_masks=loss_masks,
+            denominators=denominators,
+            local_loss_masks=local_masks,
+        )
+        total += clipfrac.item()
+
+    assert total == pytest.approx(1.0)

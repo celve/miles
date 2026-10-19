@@ -52,13 +52,12 @@ def _kimi_vl_splices(
         # rollout batch may pass through multiple normalization paths.
         return []
     if len(placeholder_positions) != len(num_image_tokens):
-        logger.warning(
-            "K25 multimodal token mismatch before training: placeholders=%s, grids=%s",
-            len(placeholder_positions),
-            len(num_image_tokens),
+        # A partial expansion would be expanded again by get_batch's safety net.
+        raise ValueError(
+            f"K25 multimodal sample has {len(placeholder_positions)} media placeholders for {len(num_image_tokens)} "
+            f"grids ({sum(num_image_tokens)} image tokens); expected one placeholder per grid or the expanded count"
         )
-    # Placeholders beyond the last grid stay single tokens.
-    return list(zip(placeholder_positions, num_image_tokens, strict=False))
+    return list(zip(placeholder_positions, num_image_tokens, strict=True))
 
 
 def _expand_image_tokens_for_sample(

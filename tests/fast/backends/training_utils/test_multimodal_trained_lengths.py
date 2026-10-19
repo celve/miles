@@ -11,6 +11,7 @@ from miles.backends.training_utils.data.multimodal import (
     expand_multimodal_rollout_data_in_place,
     trained_total_lengths,
 )
+from miles.backends.training_utils.data.rollout import DataIterator
 from miles.backends.training_utils.parallel import GroupInfo, ParallelState
 
 
@@ -23,15 +24,23 @@ def _single_rank(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(multimodal, "get_parallel_state", lambda: state)
 
 
-def _expanded_lengths(samples: list[tuple[list[int], int, dict | None]]) -> list[int]:
-    rollout_data = {
+def _rollout_data(samples: list[tuple[list[int], int, dict | None]]) -> dict:
+    return {
         "tokens": [torch.tensor(tokens) for tokens, _, _ in samples],
         "loss_masks": [torch.ones(response_length, dtype=torch.int32) for _, response_length, _ in samples],
         "total_lengths": [len(tokens) for tokens, _, _ in samples],
         "response_lengths": [response_length for _, response_length, _ in samples],
         "multimodal_train_inputs": [None if mm is None else dict(mm) for _, _, mm in samples],
     }
+
+
+def _expanded_lengths(samples: list[tuple[list[int], int, dict | None]]) -> list[int]:
+    """Lengths after get_data_iterator's expansion and then get_batch's safety-net pass over a micro-batch."""
+    rollout_data = _rollout_data(samples)
     expand_multimodal_rollout_data_in_place(rollout_data)
+    batch = DataIterator(rollout_data, micro_batch_size=len(samples)).get_next(list(rollout_data))
+    expand_multimodal_rollout_data_in_place(batch)
+    assert [len(tokens) for tokens in batch["tokens"]] == rollout_data["total_lengths"]
     return rollout_data["total_lengths"]
 
 
@@ -45,14 +54,12 @@ def _place(rng: random.Random, tokens: list[int], token_id: int, count: int, *, 
 
 
 def _kimi_sample(rng: random.Random) -> tuple[list[int], int, dict | None]:
-    prompt_length, response_length = rng.randint(4, 20), rng.randint(1, 20)
-    tokens = [rng.randint(1, 1000) for _ in range(prompt_length + response_length)]
     grids = [[1, rng.choice([2, 4, 6, 8]), rng.choice([2, 4, 6, 8])] for _ in range(rng.randint(0, 3))]
+    placeholders = rng.choice([0, len(grids), sum((h // 2) * (w // 2) for _, h, w in grids)])
+    prompt_length, response_length = rng.randint(4, 20) + placeholders, rng.randint(1, 20)
+    tokens = [rng.randint(1, 1000) for _ in range(prompt_length + response_length)]
     if not grids:
         return tokens, response_length, rng.choice([None, {"pixel_values": torch.zeros(1, 3)}])
-    expanded_count = sum((h // 2) * (w // 2) for _, h, w in grids)
-    placeholders = rng.choice([len(grids), len(grids) + 1, len(grids) - 1, expanded_count])
-    placeholders = min(placeholders, len(tokens))
     _place(rng, tokens, KIMI_VL_MEDIA_TOKEN_ID, placeholders, end=len(tokens))
     return tokens, response_length, {"grid_thws": torch.tensor(grids)}
 
@@ -94,6 +101,16 @@ def test_inkling_batches_are_planned_at_their_expanded_lengths(seed: int) -> Non
     samples = [_inkling_sample(rng) for _ in range(rng.randint(1, 6))]
 
     assert _planned_lengths(samples) == _expanded_lengths(samples)
+
+
+@pytest.mark.parametrize("placeholders", [2, 3, 5])
+def test_kimi_rejects_placeholder_counts_that_match_neither_grids_nor_tokens(placeholders: int) -> None:
+    samples = [([1] + [KIMI_VL_MEDIA_TOKEN_ID] * placeholders + [2, 3], 1, {"grid_thws": torch.tensor([[1, 4, 4]])})]
+
+    with pytest.raises(ValueError, match="media placeholders"):
+        _planned_lengths(samples)
+    with pytest.raises(ValueError, match="media placeholders"):
+        expand_multimodal_rollout_data_in_place(_rollout_data(samples))
 
 
 def test_media_expanded_at_rollout_keeps_its_length() -> None:

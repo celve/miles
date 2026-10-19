@@ -195,6 +195,7 @@ def compute_opsm_mask(
     advantages: list[torch.Tensor],
     loss_masks: list[torch.Tensor],
     denominators: list[torch.Tensor] | torch.Tensor | None = None,
+    local_loss_masks: list[torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute Off-Policy Sequence Masking (OPSM) mask.
 
@@ -206,6 +207,7 @@ def compute_opsm_mask(
         loss_masks: Loss masks per sample.
         denominators: Each sample's rollout loss-token total (`rollout_mask_sums`);
             None uses the sample's own.
+        local_loss_masks: Loss masks aligned with `advantages` (CP-local); None uses `loss_masks`.
 
     Returns:
         Tuple of `(opsm_mask, opsm_clipfrac)` where `opsm_mask` is a
@@ -225,8 +227,9 @@ def compute_opsm_mask(
 
         # Create mask: 0 if (advantage < 0 and seq_kl > delta), else 1
         mask = ((advantage < 0) & (seq_kl > args.opsm_delta)).float()
+        local_loss_mask = loss_mask if local_loss_masks is None else local_loss_masks[i]
         denominator = loss_mask.sum() if denominators is None else denominators[i]
-        opsm_clipfrac += mask.sum() / torch.clamp_min(denominator, 1)
+        opsm_clipfrac += (mask * local_loss_mask.to(mask)).sum() / torch.clamp_min(denominator, 1)
 
         opsm_mask_list.append(1 - mask)
 
