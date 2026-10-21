@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CUA-PROGRESS 0/1</title>
+<style>
+  body { margin: 0; background: #f4f4f5; font: 18px system-ui, sans-serif; }
+  main { width: 760px; margin: 120px auto; text-align: center; }
+  input { font-size: 30px; padding: 14px; width: 420px; }
+  #state { margin-top: 24px; font-weight: 700; }
+</style>
+</head>
+<body>
+<main>
+  <p>Type the word <b>__WORD__</b> into the box and press Enter.</p>
+  <input id="box" autocomplete="off" spellcheck="false">
+  <div id="state">waiting</div>
+</main>
+<script>
+  const WORD = "__WORD__";
+  const box = document.getElementById("box");
+  const state = document.getElementById("state");
+  box.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    if (box.value.trim() === WORD) {
+      document.title = "CUA-PROGRESS 1/1";
+      state.textContent = "Done.";
+      box.style.outline = "6px solid #16a34a";
+    } else {
+      state.textContent = "Not that word.";
+    }
+  });
+</script>
+</body>
+</html>

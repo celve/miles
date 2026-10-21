@@ -1,0 +1,282 @@
+"""The recording proxy: what it asks the engine for, and what it keeps."""
+
+import base64
+import json
+
+import httpx
+import pytest
+
+from examples.experimental.harbor_cua.recorder import CallRecorder, parse_media
+from tests.fast.examples.experimental.harbor_cua.conftest import png_bytes
+
+
+def data_url(payload: bytes, media_type: str = "image/webp") -> str:
+    return f"data:{media_type};base64,{base64.b64encode(payload).decode()}"
+
+
+def chat_response(*, prompt_ids, output_ids, logprobs=None):
+    triples = [
+        (logprob, token, "") for logprob, token in zip(logprobs or [-0.5] * len(output_ids), output_ids, strict=True)
+    ]
+    return {
+        "model": "test-model",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": "{}"},
+                "finish_reason": "stop",
+                "prompt_token_ids": list(prompt_ids),
+                "response_token_ids": list(output_ids),
+                "meta_info": {"output_token_logprobs": triples, "weight_version": "3"},
+            }
+        ],
+    }
+
+
+def canned(recorder, response, *, status=200, seen=None):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if seen is not None:
+            seen.append(json.loads(request.content))
+        return httpx.Response(status, json=response)
+
+    recorder._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://upstream")
+    return recorder
+
+
+def client(recorder):
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=recorder._app), base_url="http://recorder")
+
+
+def messages_with(*images):
+    content = [{"type": "text", "text": "act"}]
+    content += [{"type": "image_url", "image_url": {"url": data_url(image)}} for image in images]
+    return [{"role": "user", "content": content}]
+
+
+async def post_chat(recorder, token, messages, headers=None, extra=None):
+    async with client(recorder) as http:
+        return await http.post(
+            f"/r/{token}/v1/chat/completions",
+            json={"model": "m", "messages": messages, **(extra or {})},
+            headers=headers or {},
+        )
+
+
+@pytest.fixture
+def recorder():
+    return CallRecorder(upstream="http://upstream")
+
+
+async def test_the_trace_flags_and_logprobs_are_added_outbound(recorder):
+    seen = []
+    canned(recorder, chat_response(prompt_ids=[1, 2], output_ids=[3]), seen=seen)
+    token = recorder.open_rollout()
+
+    await post_chat(recorder, token, messages_with(png_bytes((1, 1, 1))))
+
+    assert seen[0]["return_prompt_token_ids"] is True
+    assert seen[0]["return_token_ids"] is True
+    assert seen[0]["return_meta_info"] is True
+    assert seen[0]["logprobs"] is True
+
+
+async def test_a_call_is_kept_with_its_tokens_logprobs_and_media(recorder):
+    canned(recorder, chat_response(prompt_ids=[1, 2, 3], output_ids=[7, 8], logprobs=[-0.1, -0.2]))
+    token = recorder.open_rollout()
+    first, second = png_bytes((1, 0, 0)), png_bytes((2, 0, 0))
+
+    await post_chat(recorder, token, messages_with(first, second))
+    record = recorder.take(token)
+
+    assert len(record.calls) == 1
+    call = record.calls[0]
+    assert call.prompt_token_ids == (1, 2, 3)
+    assert call.output_token_ids == (7, 8)
+    assert call.output_logprobs == (-0.1, -0.2)
+    assert [record.arena.get(occurrence.asset_id) for occurrence in call.media] == [first, second]
+    assert call.finish_reason == "stop"
+    assert call.meta_info["weight_version"] == "3"
+    assert record.rejected == []
+
+
+async def test_repeated_images_dedupe_as_assets_but_stay_distinct_occurrences(recorder):
+    canned(recorder, chat_response(prompt_ids=[1], output_ids=[2]))
+    token = recorder.open_rollout()
+    same = png_bytes((4, 4, 4))
+
+    await post_chat(recorder, token, messages_with(same, same))
+    record = recorder.take(token)
+
+    assert len(record.calls[0].media) == 2
+    assert len(record.arena.assets) == 1
+
+
+async def test_meta_info_is_not_forwarded_but_token_ids_are(recorder):
+    canned(recorder, chat_response(prompt_ids=[1], output_ids=[2]))
+    token = recorder.open_rollout()
+
+    response = await post_chat(recorder, token, messages_with(png_bytes((3, 3, 3))))
+
+    choice = response.json()["choices"][0]
+    assert "meta_info" not in choice
+    assert choice["prompt_token_ids"] == [1]
+    assert choice["response_token_ids"] == [2]
+
+
+async def test_a_session_id_header_marks_the_call_auxiliary(recorder):
+    canned(recorder, chat_response(prompt_ids=[1], output_ids=[2]))
+    token = recorder.open_rollout()
+
+    await post_chat(recorder, token, messages_with(png_bytes((5, 5, 5))), headers={"X-Session-ID": "abc"})
+    record = recorder.take(token)
+
+    assert record.calls[0].auxiliary is True
+    assert record.trained_calls() == []
+    assert len(record.compactor_calls()) == 1
+
+
+async def test_a_call_without_prompt_token_ids_is_refused_not_guessed(recorder):
+    response = chat_response(prompt_ids=[1], output_ids=[2])
+    response["choices"][0].pop("prompt_token_ids")
+    canned(recorder, response)
+    token = recorder.open_rollout()
+
+    await post_chat(recorder, token, messages_with(png_bytes((6, 6, 6))))
+    record = recorder.take(token)
+
+    assert record.calls == []
+    assert "return_prompt_token_ids" in record.rejected[0]
+    assert record.unrecorded_policy_calls == record.rejected
+
+
+async def test_a_refused_compactor_call_is_not_an_unrecorded_action(recorder):
+    response = chat_response(prompt_ids=[1], output_ids=[2])
+    response["choices"][0].pop("prompt_token_ids")
+    canned(recorder, response)
+    token = recorder.open_rollout()
+
+    await post_chat(recorder, token, messages_with(png_bytes((6, 6, 7))), headers={"X-Session-ID": "abc"})
+    record = recorder.take(token)
+
+    assert len(record.rejected) == 1
+    assert record.unrecorded_policy_calls == []
+
+
+async def test_a_remote_image_url_is_refused_rather_than_fetched(recorder):
+    canned(recorder, chat_response(prompt_ids=[1], output_ids=[2]))
+    token = recorder.open_rollout()
+    messages = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "https://x/y.webp"}}]}]
+
+    await post_chat(recorder, token, messages)
+    record = recorder.take(token)
+
+    assert record.calls == []
+    assert "not an inline data URL" in record.rejected[0]
+
+
+async def test_streaming_is_refused(recorder):
+    canned(recorder, chat_response(prompt_ids=[1], output_ids=[2]))
+    token = recorder.open_rollout()
+
+    response = await post_chat(recorder, token, messages_with(png_bytes((7, 7, 7))), extra={"stream": True})
+
+    assert response.status_code == 400
+
+
+async def test_an_unknown_rollout_token_is_rejected(recorder):
+    canned(recorder, chat_response(prompt_ids=[1], output_ids=[2]))
+
+    response = await post_chat(recorder, "nope", messages_with(png_bytes((8, 8, 8))))
+
+    assert response.status_code == 404
+
+
+async def test_an_engine_error_is_passed_through_and_noted(recorder):
+    canned(recorder, {"error": {"message": "boom"}}, status=500)
+    token = recorder.open_rollout()
+
+    response = await post_chat(recorder, token, messages_with(png_bytes((9, 9, 9))))
+    record = recorder.take(token)
+
+    assert response.status_code == 500
+    assert record.calls == []
+    assert "engine returned 500" in record.rejected[0]
+    assert record.unrecorded_policy_calls == []
+
+
+async def test_calls_are_numbered_in_the_order_they_arrive(recorder):
+    canned(recorder, chat_response(prompt_ids=[1], output_ids=[2]))
+    token = recorder.open_rollout()
+
+    for _ in range(3):
+        await post_chat(recorder, token, messages_with(png_bytes((1, 2, 3))))
+    record = recorder.take(token)
+
+    assert [call.index for call in record.calls] == [0, 1, 2]
+
+
+def test_media_parsing_keeps_occurrence_order_across_messages():
+    first, second = png_bytes((1, 1, 1)), png_bytes((2, 2, 2))
+    messages = [
+        {"role": "user", "content": [{"type": "image_url", "image_url": {"url": data_url(first)}}]},
+        {"role": "assistant", "content": "ok"},
+        {"role": "user", "content": [{"type": "image_url", "image_url": {"url": data_url(second)}}]},
+    ]
+
+    media, problems = parse_media(messages)
+
+    assert [payload for payload, _ in media] == [first, second]
+    assert problems == []
+
+
+async def test_token_ids_hoisted_to_the_envelope_are_still_read(recorder):
+    """A proxy in front of the engine may answer there instead of on the choice."""
+    response = chat_response(prompt_ids=[1, 2], output_ids=[9])
+    choice = response["choices"][0]
+    response["prompt_token_ids"] = choice.pop("prompt_token_ids")
+    response["response_token_ids"] = choice.pop("response_token_ids")
+    response["meta_info"] = choice.pop("meta_info")
+    canned(recorder, response)
+    token = recorder.open_rollout()
+
+    await post_chat(recorder, token, messages_with(png_bytes((2, 4, 6))))
+    record = recorder.take(token)
+
+    assert record.rejected == []
+    assert record.calls[0].prompt_token_ids == (1, 2)
+    assert record.calls[0].output_token_ids == (9,)
+    assert len(record.calls[0].output_logprobs) == 1
+
+
+async def test_a_proxys_weight_versions_reach_the_call(recorder):
+    """A proxy answers with its own metadata.weight_versions instead of meta_info."""
+    response = chat_response(prompt_ids=[1, 2], output_ids=[7, 8])
+    choice = response["choices"][0]
+    choice.pop("meta_info")
+    choice["logprobs"] = {"content": [{"logprob": -0.4}, {"logprob": -0.6}]}
+    response["metadata"] = {"weight_version": "3", "weight_versions": [{"version": "3", "start": 0, "end": 2}]}
+    canned(recorder, response)
+    token = recorder.open_rollout()
+
+    await post_chat(recorder, token, messages_with(png_bytes((1, 3, 5))))
+    call = recorder.take(token).calls[0]
+
+    assert call.meta_info["weight_versions"] == [{"version": "3", "start": 0, "end": 2}]
+    # from_meta_info sizes the output region from this list, so it has to be present.
+    assert len(call.meta_info["output_token_logprobs"]) == 2
+    assert call.output_logprobs == (-0.4, -0.6)
+
+
+async def test_the_request_is_retained_without_the_image_bytes(recorder):
+    canned(recorder, chat_response(prompt_ids=[1], output_ids=[2]))
+    token = recorder.open_rollout()
+    image = png_bytes((6, 6, 6))
+
+    await post_chat(recorder, token, messages_with(image), extra={"temperature": 0.7})
+    call = recorder.take(token).calls[0]
+
+    serialized = json.dumps(call.request)
+    assert "base64" not in serialized
+    assert call.media[0].asset_id in serialized
+    assert call.request["sampling"]["temperature"] == 0.7
+    assert "return_prompt_token_ids" not in call.request["sampling"]

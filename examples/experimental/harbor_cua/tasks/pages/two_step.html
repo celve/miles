@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CUA-PROGRESS 0/2</title>
+<style>
+  body { margin: 0; background: #f4f4f5; font: 18px system-ui, sans-serif; }
+  main { width: 860px; margin: 90px auto; text-align: center; }
+  button { font-size: 28px; padding: 20px 30px; border-radius: 10px; }
+  #second { display: none; margin-top: 60px; }
+  #state { margin-top: 30px; font-weight: 700; }
+</style>
+</head>
+<body>
+<main>
+  <p>Click <b>__FIRST__</b>, then click the button that appears.</p>
+  <button id="first">__FIRST__</button>
+  <div id="second"><button id="second-button">__SECOND__</button></div>
+  <div id="state">waiting</div>
+</main>
+<script>
+  const state = document.getElementById("state");
+  document.getElementById("first").addEventListener("click", () => {
+    document.title = "CUA-PROGRESS 1/2";
+    state.textContent = "One done.";
+    document.getElementById("second").style.display = "block";
+  });
+  document.getElementById("second-button").addEventListener("click", () => {
+    if (!document.title.startsWith("CUA-PROGRESS 1/2")) return;
+    document.title = "CUA-PROGRESS 2/2";
+    state.textContent = "Done.";
+  });
+</script>
+</body>
+</html>
