@@ -163,6 +163,14 @@ def policy_loss_function(
                 )
             ]
 
+    local_loss_mask_list = get_local_response_loss_masks(
+        total_lengths,
+        response_lengths,
+        batch["loss_masks"],
+        args.qkv_format,
+        max_seq_lens,
+    )
+
     # Compute OPSM mask if enabled
     if args.use_opsm:
         opsm_mask, opsm_clipfrac = compute_opsm_mask(
@@ -171,6 +179,8 @@ def policy_loss_function(
             full_old_log_probs=full_old_log_probs,
             advantages=advantages_list,
             loss_masks=batch["loss_masks"],
+            denominators=batch.get("rollout_mask_sums", None),
+            local_loss_masks=local_loss_mask_list,
         )
 
     # Compute KL divergence (GSPO uses sequence-level KL, others use per-token KL)
@@ -188,13 +198,6 @@ def policy_loss_function(
         log_probs = torch.cat(log_probs, dim=0)
         ppo_kl = old_log_probs - log_probs
 
-    local_loss_mask_list = get_local_response_loss_masks(
-        total_lengths,
-        response_lengths,
-        batch["loss_masks"],
-        args.qkv_format,
-        max_seq_lens,
-    )
     local_loss_masks = torch.cat(local_loss_mask_list, dim=0).to(device=ppo_kl.device)
     active_tokens = local_loss_masks.bool()
     ppo_kl = torch.where(
@@ -298,6 +301,7 @@ def policy_loss_function(
         qkv_format=args.qkv_format,
         max_seq_lens=max_seq_lens,
         calculate_per_token_loss=args.calculate_per_token_loss,
+        denominators=batch.get("rollout_mask_sums", None),
     )
 
     pg_loss = pg_loss_reducer(pg_loss)
