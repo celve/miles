@@ -511,6 +511,16 @@ class TestPutTimeFilters:
         assert under_test.unused == [(group, UnusedReason.ABORTED)]
         assert under_test.buffer.get_metrics()["rollout/fully_async/aborted_groups_filtered"] == 1
 
+    async def test_an_aborted_group_is_counted_under_the_cause_it_recorded(self) -> None:
+        under_test = _make_buffer()
+        group = _make_finished_group(1)
+        group[0].status = Sample.Status.ABORTED
+        group[0].metadata = {"exit_status": "SandboxUnavailable"}
+
+        await _put(under_test.buffer, group)
+
+        assert under_test.buffer.get_metrics()["rollout/aborted/drop_SandboxUnavailable"] == 1
+
     async def test_a_group_with_one_aborted_sample_among_finished_ones_is_refused_whole(self) -> None:
         """The group is the training unit, so a partial one is not something the trainer can use."""
         under_test = _make_buffer()

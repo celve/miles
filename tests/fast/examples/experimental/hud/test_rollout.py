@@ -220,3 +220,44 @@ def test_failed_sample_still_exercises_the_vision_tower():
     # fake grid (1,4,4), merge 2 -> 4 image tokens + vision_start/end
     assert len(sample.tokens) == 6
     assert len(sample.tokens) >= sample.response_length
+
+
+def test_aborted_sample_drops_its_group_and_names_its_cause():
+    from examples.experimental.hud.rollout import _aborted
+
+    from miles.utils.types import Sample
+
+    sample = SimpleNamespace(metadata={}, status=None, remove_sample=False)
+    _aborted(sample, "boom", "NoModelCalls", state=_fake_state())
+    assert sample.status == Sample.Status.ABORTED
+    assert sample.metadata["exit_status"] == "NoModelCalls"
+
+
+def test_a_run_that_never_launched_has_no_model_response():
+    from examples.experimental.hud.rollout import _no_response_cause
+    from hud.eval.run import Run
+
+    assert _no_response_cause(Run.failed("[provisioning] daytona quota exceeded")) == "SandboxUnavailable"
+
+
+def test_a_first_model_request_that_failed_has_no_model_response():
+    from examples.experimental.hud.rollout import _no_response_cause
+    from hud.agents.types import AgentStep
+    from hud.types import Trace
+
+    failed_first_request = AgentStep(error="Error getting response Connection error.", done=True)
+    run = SimpleNamespace(runtime="http://sandbox", trace=Trace(status="error", steps=[failed_first_request]))
+    assert _no_response_cause(run) == "NoModelCalls"
+
+
+def test_a_run_whose_policy_got_a_response_is_scored():
+    from examples.experimental.hud.rollout import _no_response_cause
+    from hud.agents.types import AgentStep
+    from hud.types import Step, Trace
+
+    answered = SimpleNamespace(runtime="http://sandbox", trace=Trace(steps=[AgentStep(raw={"id": "r"})]))
+    crashed_parsing_it = SimpleNamespace(
+        runtime="http://sandbox", trace=Trace(status="error", steps=[Step(source="system", error="Expecting value")])
+    )
+    assert _no_response_cause(answered) is None
+    assert _no_response_cause(crashed_parsing_it) is None

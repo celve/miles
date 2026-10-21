@@ -14,8 +14,8 @@ from packaging.version import parse
 from tqdm import tqdm
 
 from miles.rollout.base_types import GenerateFnInput, RolloutFnEvalOutput, RolloutFnTrainOutput
-from miles.rollout.filter_hub.base_types import MetricGatherer
-from miles.rollout.filter_hub.common_filters import apply_preput_filters
+from miles.rollout.filter_hub.base_types import MetricGatherer, group_has_aborted
+from miles.rollout.filter_hub.common_filters import aborted_streak_error, apply_preput_filters, count_aborted_streak
 from miles.rollout.generate_utils.rollout_topk_logprobs import (
     append_rollout_topk_logprobs,
     configure_rollout_topk_logprobs_request,
@@ -504,6 +504,7 @@ async def generate_rollout_async(
 
     data = []
     all_data = []
+    aborted_streak = 0
     do_print = True
     pbar = tqdm(total=target_data_size * args.n_samples_per_prompt, desc="Rollout generation")
     while len(data) < target_data_size:
@@ -529,10 +530,17 @@ async def generate_rollout_async(
 
             assert len(group) == args.n_samples_per_prompt
             all_data.append(group)
+            aborted_streak = count_aborted_streak(group, aborted_streak)
+            if (error := aborted_streak_error(args, group, aborted_streak)) is not None:
+                await abort(args, rollout_id)
+                state.reset()
+                raise error
             metric_gatherer.on_group_before_dynamic_filter(args, group)
             filter_output = apply_preput_filters(args, dynamic_filter, group)
             if not filter_output.keep:
                 metric_gatherer.on_dynamic_filter_drop(reason=filter_output.reason)
+                if group_has_aborted(group):
+                    metric_gatherer.on_aborted_group_drop(group)
                 SampleOwnershipRecorder.log_dropped_groups(args=args, before=group, after=[], reason="dynamic_filter")
                 state.remaining_batch_size -= 1
                 continue

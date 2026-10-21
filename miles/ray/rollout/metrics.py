@@ -1,4 +1,5 @@
 import logging
+from collections import Counter
 from collections.abc import Callable
 from numbers import Number
 from typing import Any
@@ -21,6 +22,8 @@ from miles.utils.types import Sample, WeightVersionSpan, compute_numeric_version
 
 logger = logging.getLogger(__name__)
 
+_EVAL_SAMPLE_COLUMNS = ("rewards", "truncated", "samples")
+
 
 def log_eval_rollout_data(rollout_id, args, data, extra_metrics: dict[str, Any] | None = None):
     if (x := args.custom_eval_rollout_log_function_path) is not None:
@@ -30,28 +33,7 @@ def log_eval_rollout_data(rollout_id, args, data, extra_metrics: dict[str, Any] 
 
     log_dict = extra_metrics or {}
     for key in data.keys():
-        rewards = data[key]["rewards"]
-        num_none = sum(1 for r in rewards if r is None)
-        log_dict[f"eval/{key}-none_reward_ratio"] = num_none / len(rewards) if len(rewards) > 0 else 0.0
-        if num_none:
-            logger.warning(
-                f"eval/{key}: {num_none}/{len(rewards)} samples have reward=None (likely errored/aborted trials); treating as 0.0 for metrics."
-            )
-            rewards = [0.0 if r is None else r for r in rewards]
-        log_dict[f"eval/{key}"] = sum(rewards) / len(rewards) if len(rewards) > 0 else 0.0
-        if (samples := data[key].get("samples")) is not None:
-            log_dict |= dict_add_prefix(_compute_metrics_from_samples(args, samples), f"eval/{key}/")
-        if "truncated" in data[key]:
-            truncated = data[key]["truncated"]
-            log_dict[f"eval/{key}-truncated_ratio"] = sum(truncated) / len(truncated)
-        if args.log_passrate:
-            log_dict |= dict_add_prefix(
-                compute_pass_rate(
-                    flat_rewards=rewards,
-                    group_size=args.n_samples_per_eval_prompt,
-                ),
-                f"eval/{key}-",
-            )
+        log_dict |= _compute_eval_dataset_metrics(args, key, data[key])
 
     logger.info(f"eval {rollout_id}: {log_dict}")
 
@@ -60,6 +42,97 @@ def log_eval_rollout_data(rollout_id, args, data, extra_metrics: dict[str, Any] 
     tracking.log(args, log_dict, step_key="eval/step")
 
     return log_dict
+
+
+def _compute_eval_dataset_metrics(args, key: str, dataset: dict) -> dict[str, Any]:
+    log_dict = {}
+    has_aborted = False
+    if (samples := dataset.get("samples")) is not None:
+        attempts = [_get_rollout_key(sample, position) for position, sample in enumerate(samples)]
+        aborted = {a: s for a, s in zip(attempts, samples, strict=True) if s.status == Sample.Status.ABORTED}
+        log_dict |= _compute_eval_aborted_metrics(key, num_attempts=len(set(attempts)), aborted=list(aborted.values()))
+        if has_aborted := bool(aborted):
+            dataset = _keep_eval_rows(dataset, keep=[a not in aborted for a in attempts])
+            if not dataset["rewards"]:
+                logger.warning(f"eval/{key}: every attempt was aborted; logging no score rather than 0")
+                return log_dict
+
+    rewards = dataset["rewards"]
+    num_none = sum(1 for r in rewards if r is None)
+    log_dict[f"eval/{key}-none_reward_ratio"] = num_none / len(rewards) if len(rewards) > 0 else 0.0
+    if num_none:
+        logger.warning(
+            f"eval/{key}: {num_none}/{len(rewards)} samples have reward=None (likely errored trials); treating as 0.0 for metrics."
+        )
+        rewards = [0.0 if r is None else r for r in rewards]
+    log_dict[f"eval/{key}"] = sum(rewards) / len(rewards) if len(rewards) > 0 else 0.0
+    if (samples := dataset.get("samples")) is not None:
+        log_dict |= dict_add_prefix(_compute_metrics_from_samples(args, samples), f"eval/{key}/")
+    if "truncated" in dataset:
+        truncated = dataset["truncated"]
+        log_dict[f"eval/{key}-truncated_ratio"] = sum(truncated) / len(truncated)
+    if args.log_passrate:
+        log_dict |= dict_add_prefix(
+            _compute_eval_passrate(
+                rewards,
+                samples,
+                group_size=_eval_samples_per_prompt(args, key),
+                complete_prompts_only=has_aborted,
+            ),
+            f"eval/{key}-",
+        )
+    return log_dict
+
+
+def _eval_samples_per_prompt(args, key: str) -> int:
+    return next(
+        (cfg.n_samples_per_eval_prompt for cfg in args.eval_datasets if cfg.name == key),
+        args.n_samples_per_eval_prompt,
+    )
+
+
+def _keep_eval_rows(dataset: dict, keep: list[bool]) -> dict:
+    return {
+        column: (
+            [value for value, kept in zip(values, keep, strict=True) if kept]
+            if column in _EVAL_SAMPLE_COLUMNS
+            else values
+        )
+        for column, values in dataset.items()
+    }
+
+
+def _compute_eval_aborted_metrics(key: str, *, num_attempts: int, aborted: list[Sample]) -> dict[str, Any]:
+    causes = Counter(str(s.metadata.get("exit_status") or "unknown") for s in aborted)
+    if aborted:
+        logger.warning(
+            f"eval/{key}: left {len(aborted)}/{num_attempts} aborted attempts out of the score: {dict(causes)}"
+        )
+    return {
+        f"eval/{key}-aborted_ratio": len(aborted) / num_attempts if num_attempts else 0.0,
+        **{f"eval/{key}-aborted/{cause}": count for cause, count in causes.items()},
+    }
+
+
+def _compute_eval_passrate(
+    rewards: list[float], samples: list[Sample] | None, *, group_size: int, complete_prompts_only: bool
+) -> dict[str, float]:
+    if not complete_prompts_only:
+        return compute_pass_rate(flat_rewards=rewards, group_size=group_size)
+    if any(sample.index is None for sample in samples):
+        logger.warning("eval pass@k: skipped, samples carry no index to group their attempts by prompt.")
+        return {}
+    attempts: dict[tuple, tuple[int, float]] = {}
+    for position, (reward, sample) in enumerate(zip(rewards, samples, strict=True)):
+        # Both eval loops number a prompt's attempts contiguously, so index // group_size names the prompt.
+        attempts.setdefault(_get_rollout_key(sample, position), (sample.index // group_size, reward))
+    by_prompt = group_by(attempts.values(), lambda attempt: attempt[0])
+    complete = [[reward for _, reward in group] for group in by_prompt.values() if len(group) == group_size]
+    if len(complete) < len(by_prompt):
+        logger.warning(f"eval pass@k: excluding {len(by_prompt) - len(complete)}/{len(by_prompt)} incomplete prompts.")
+    if not complete:
+        return {}
+    return compute_pass_rate(flat_rewards=[r for rs in complete for r in rs], group_size=group_size)
 
 
 def log_eval_skip(rollout_id, args, reason: str):
