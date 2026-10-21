@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -9,7 +10,10 @@ from hypothesis import strategies as st
 from tests.fast.ray.rollout.conftest import make_args, make_sample, make_samples_grouped
 from tests.fast.train_parallel_config_utils import make_train_parallel_config
 
+from miles.backends.training_utils.data import context_parallel
+from miles.backends.training_utils.data import rollout as data_rollout
 from miles.backends.training_utils.data.multimodal import INKLING_IMAGE_SENTINEL_ID, KIMI_VL_MEDIA_TOKEN_ID
+from miles.backends.training_utils.data.rollout import DataIterator
 from miles.ray.rollout import train_data_conversion
 from miles.ray.rollout.train_data_conversion import (
     ROLLOUT_DATA_VALUE_SPEC,
@@ -1183,6 +1187,57 @@ class TestSplitTrainDataByDpScheduled:
         assert shards[0]["num_microbatches"] == [2, 2]
         assert shards[0]["dynamic_global_batch_size"] == 8
         assert shards[0]["num_rollouts"] == [8, 8]
+
+
+def _tagged_image_rollouts(samples_per_rollout: list[int]) -> dict:
+    data = _make_split_data(
+        sum(samples_per_rollout), rollout_ids=[r for r, n in enumerate(samples_per_rollout) for _ in range(n)]
+    )
+    data["tokens"] = [[i, i + 1000] for i in range(len(data["tokens"]))]
+    data["multimodal_train_inputs"] = [
+        {"image_grid_thw": torch.tensor([[1, 2, 2]]), "tag": torch.tensor([[i]])} for i in range(len(data["tokens"]))
+    ]
+    return data
+
+
+def test_each_scheduled_micro_batch_carries_its_own_samples_images():
+    args = make_args(balance_data=False, micro_batch_size=1, use_dynamic_batch_size=False, global_batch_size=2)
+    shards = split_train_data_by_dp_scheduled_raw(
+        args, _tagged_image_rollouts([3, 3, 2, 2]), train_parallel_config=FULL_SCHEDULE_CONFIG
+    )
+
+    for shard in shards:
+        iterator = DataIterator(shard, micro_batch_indices=shard["micro_batch_indices"])
+        for _ in shard["micro_batch_indices"]:
+            batch = iterator.get_next(["tokens", "multimodal_train_inputs"])
+            assert [mm["tag"].item() for mm in batch["multimodal_train_inputs"]] == [t[0] for t in batch["tokens"]]
+
+
+def test_get_batch_concatenates_images_in_micro_batch_order(monkeypatch):
+    state = SimpleNamespace(cp=SimpleNamespace(rank=0, size=1), tp=SimpleNamespace(rank=0, size=1))
+    monkeypatch.setattr(data_rollout, "get_parallel_state", lambda: state)
+    monkeypatch.setattr(context_parallel, "get_parallel_state", lambda: state)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: torch.device("cpu"))
+    lengths = [3, 2, 4]
+    rollout = {
+        "tokens": [torch.full((n,), i) for i, n in enumerate(lengths)],
+        "loss_masks": [torch.ones(1, dtype=torch.int) for _ in lengths],
+        "total_lengths": lengths,
+        "response_lengths": [1] * 3,
+        "multimodal_train_inputs": [
+            {"image_grid_thw": torch.tensor([[1, 2, 2]]), "tag": torch.tensor([[i], [i]])} for i in range(3)
+        ],
+    }
+    iterator = DataIterator(rollout, micro_batch_indices=[[2, 0], [1]])
+    keys = ["tokens", "loss_masks", "total_lengths", "response_lengths", "multimodal_train_inputs"]
+
+    first = data_rollout.get_batch(iterator, keys)
+    second = data_rollout.get_batch(iterator, keys)
+
+    assert first["multimodal_train_inputs"]["tag"].flatten().tolist() == [2, 2, 0, 0]
+    assert first["multimodal_num_items"]["tag"] == [2, 2]
+    assert [t[0].item() for t in first["unconcat_tokens"]] == [2, 0]
+    assert second["multimodal_train_inputs"]["tag"].flatten().tolist() == [1, 1]
 
 
 def _rollouts_per_step(shards: list[dict], rollout_ids: list[int]) -> list[set[int]]:
