@@ -1344,6 +1344,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Directory shared with every SGLang engine; media that is not a file path yet is written here.",
             )
             parser.add_argument(
+                "--multimodal-token-space-processing",
+                action="store_true",
+                default=False,
+                help="SGLang expands media placeholders and the trainer builds the processor inputs (models with an SGLang token-space strategy).",
+            )
+            parser.add_argument(
                 "--chat-template-path",
                 type=str,
                 default=None,
@@ -4220,6 +4226,21 @@ def miles_validate_args(args):
 
     _resolve_event_logging(args)
     _resolve_sample_ownership_check(args)
+
+    if args.multimodal_token_space_processing:
+        # SGLang registers --sglang-enable-token-space-processor only in builds with the token-space processor.
+        if not hasattr(
+            args, "sglang_enable_token_space_processor"
+        ):  # config-access-exempt: SGLang builds without the token-space processor do not register this flag
+            raise ValueError(
+                "--multimodal-token-space-processing needs an SGLang build with the token-space processor; "
+                "update SGLang to a version that has --enable-token-space-processor."
+            )
+        if not args.sglang_enable_token_space_processor:
+            raise ValueError(
+                "--multimodal-token-space-processing needs the SGLang engines to expand media placeholders in token "
+                "space; set --sglang-enable-token-space-processor."
+            )
 
     if args.use_rollout_indexer_replay:
         args.use_indexer_replay = True
