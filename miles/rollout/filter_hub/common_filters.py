@@ -3,7 +3,13 @@ from dataclasses import dataclass
 
 import torch
 
-from miles.rollout.filter_hub.base_types import FilterOutput, call_dynamic_filter, iter_samples
+from miles.rollout.filter_hub.base_types import (
+    FilterOutput,
+    aborted_exit_status,
+    call_dynamic_filter,
+    group_has_aborted,
+    iter_samples,
+)
 from miles.utils.types import Sample
 
 Group = list[Sample | list[Sample]]
@@ -84,6 +90,19 @@ def apply_aborted_filter(args: Namespace, samples: Group, **kwargs) -> FilterOut
     if any(sample.status == Sample.Status.ABORTED for sample in iter_samples(samples)):
         return FilterOutput(keep=False, reason="group_has_aborted")
     return FilterOutput(keep=True)
+
+
+def count_aborted_streak(args: Namespace, group: Group, streak: int) -> int:
+    """Groups aborted in a row, this one included; raises once that reaches --max-consecutive-aborted-groups."""
+    if not group_has_aborted(group):
+        return 0
+    streak += 1
+    if args.max_consecutive_aborted_groups and streak >= args.max_consecutive_aborted_groups:
+        raise RuntimeError(
+            f"{streak} rollout groups in a row aborted, the last with exit_status {aborted_exit_status(group)!r}, "
+            "so the environment looks unavailable. Raise --max-consecutive-aborted-groups, or set it to 0, to keep going."
+        )
+    return streak
 
 
 def apply_missing_reward_filter(args: Namespace, samples: Group, **kwargs) -> FilterOutput:

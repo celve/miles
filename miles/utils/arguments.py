@@ -886,6 +886,16 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--max-consecutive-aborted-groups",
+                type=int,
+                default=None,
+                help=(
+                    "Fail a synchronous rollout once this many groups in a row come back aborted, as when the "
+                    "sandbox service is down, rather than drawing new prompts forever. Defaults to "
+                    "4 * rollout_batch_size; 0 disables it."
+                ),
+            )
+            parser.add_argument(
                 "--rollout-submission-granularity",
                 type=str,
                 choices=["group", "sample"],
@@ -4099,6 +4109,8 @@ def miles_validate_args(args):
 
         if args.over_sampling_batch_size is None:
             args.over_sampling_batch_size = args.rollout_batch_size
+        if args.max_consecutive_aborted_groups is None:
+            args.max_consecutive_aborted_groups = 4 * args.rollout_batch_size
 
         assert args.over_sampling_batch_size >= args.rollout_batch_size, (
             f"over_sampling_batch_size {args.over_sampling_batch_size} should be greater than or equal to "

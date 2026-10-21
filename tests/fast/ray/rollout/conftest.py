@@ -42,6 +42,7 @@ def make_args(**overrides: Any) -> Namespace:
         rollout_sampling_logprobs_mode="selected",
         use_sampling_support_replay=False,
         over_sampling_batch_size=None,
+        max_consecutive_aborted_groups=None,
         rollout_global_dataset=False,
         num_rollout=1,
         update_weights_interval=1,

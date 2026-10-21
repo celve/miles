@@ -345,7 +345,12 @@ rollout/fully_async/token_weighted_staleness
 rollout/fully_async/weight_version_sample_coverage
 rollout/fully_async/buffer_avg_staleness, rollout/fully_async/buffer_max_staleness
 rollout/dynamic_filter/drop_<reason>
+rollout/aborted/drop_<exit_status>
 ```
+
+`rollout/aborted/drop_<exit_status>` splits `aborted_groups_filtered` by the cause
+the aborted sample recorded, such as an agent function's `InfraAbort` or
+`NoModelCalls`; the synchronous rollout reports it too.
 
 Staleness is measured in published rollout weight versions: with
 `--update-weights-interval 1`, one version normally corresponds to one optimizer step;

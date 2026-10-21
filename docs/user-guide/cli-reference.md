@@ -280,6 +280,7 @@ Sections mirror the launch-script argument groups.
 | `--group-rm` | flag | off | Batched reward computation. |
 | `--custom-rm-path` | str | – | Custom reward function (see [Customization](/user-guide/customization)). |
 | `--dynamic-sampling-filter-path` | str | – | Group filter (DAPO-style). |
+| `--max-consecutive-aborted-groups` | int | 4 × rollout batch | Fail a synchronous rollout after this many aborted groups in a row; `0` disables. |
 | `--rollout-submission-granularity` | enum | driver | `group` or `sample`: what frees rollout submission capacity. Unset means `sample` under `--fully-async`, `group` otherwise. |
 | `--buffer-filter-path` | str | – | Buffer dequeue filter. |
 | `--rollout-sample-filter-path` | str | – | Per-sample filter. |

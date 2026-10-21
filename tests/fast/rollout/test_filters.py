@@ -8,12 +8,13 @@ from argparse import Namespace
 import pytest
 
 from miles.rollout.filter_hub import dynamic_sampling_filters
-from miles.rollout.filter_hub.base_types import DynamicFilterOutput, FilterOutput, iter_samples
+from miles.rollout.filter_hub.base_types import DynamicFilterOutput, FilterOutput, MetricGatherer, iter_samples
 from miles.rollout.filter_hub.common_filters import (
     apply_aborted_filter,
     apply_missing_reward_filter,
     apply_preput_filters,
     apply_reward_nonzero_std_filter,
+    count_aborted_streak,
     group_staleness,
     group_weight_version_stats,
 )
@@ -273,3 +274,43 @@ def test_group_weight_version_stats_preserve_sample_and_token_populations():
     assert stats.token_weighted_lag(current_version=10) == 5.5
     assert stats.oldest_lag(current_version=None) is None
     assert stats.token_weighted_lag(current_version=None) is None
+
+
+def _aborted_group(exit_status=None) -> list[Sample]:
+    sample = make_sample(reward=None, status=Sample.Status.ABORTED)
+    if exit_status:
+        sample.metadata = {"exit_status": exit_status}
+    return [sample, make_sample()]
+
+
+def test_a_group_that_did_not_abort_resets_the_aborted_streak():
+    args = Namespace(max_consecutive_aborted_groups=2)
+    streak = count_aborted_streak(args, _aborted_group(), 0)
+    streak = count_aborted_streak(args, [make_sample()], streak)
+    assert count_aborted_streak(args, _aborted_group(), streak) == 1
+
+
+def test_the_aborted_streak_fails_the_rollout_at_its_limit():
+    args = Namespace(max_consecutive_aborted_groups=2)
+    streak = count_aborted_streak(args, _aborted_group(), 0)
+    with pytest.raises(RuntimeError, match="2 rollout groups in a row aborted.*'SandboxUnavailable'"):
+        count_aborted_streak(args, _aborted_group("SandboxUnavailable"), streak)
+
+
+@pytest.mark.parametrize("limit", [None, 0])
+def test_an_unset_or_zero_limit_never_fails_the_rollout(limit):
+    args = Namespace(max_consecutive_aborted_groups=limit)
+    streak = 0
+    for _ in range(100):
+        streak = count_aborted_streak(args, _aborted_group(), streak)
+    assert streak == 100
+
+
+def test_aborted_drops_are_counted_by_the_cause_they_recorded():
+    gatherer = MetricGatherer()
+    gatherer.on_aborted_group_drop(_aborted_group("SandboxUnavailable"))
+    gatherer.on_aborted_group_drop(_aborted_group("SandboxUnavailable"))
+    gatherer.on_aborted_group_drop(_aborted_group())
+    metrics = gatherer.collect()
+    assert metrics["rollout/aborted/drop_SandboxUnavailable"] == 2
+    assert metrics["rollout/aborted/drop_unknown"] == 1
