@@ -11,6 +11,7 @@ from miles.backends.torchtitan_utils.hf_weight_iterator import TitanHfWeightIter
 from miles.backends.torchtitan_utils.parallel import create_titan_parallel_state, parallel_dims_from_config
 from miles.backends.torchtitan_utils.routing_replay import install as install_routing_replay
 from miles.backends.torchtitan_utils.trainer import TitanTrainer
+from miles.backends.training_utils.data.rollout import get_steps_per_rollout
 from miles.backends.training_utils.parallel import get_parallel_state, set_parallel_state
 from miles.backends.training_utils.replay.routing_replay import enable as enable_routing_replay
 from miles.backends.training_utils.torch_native.actor import TorchNativeTrainRayActor
@@ -23,10 +24,6 @@ from miles.utils.tracking_utils.tracking import init_tracking
 from miles.utils.workers.rpc.common.wire_types import Pickled
 
 logger = logging.getLogger(__name__)
-
-
-def _steps_per_rollout(args: Namespace) -> int:
-    return max(args.rollout_batch_size * args.n_samples_per_prompt // args.global_batch_size, 1)
 
 
 class TorchtitanTrainRayActor(TorchNativeTrainRayActor):
@@ -55,7 +52,7 @@ class TorchtitanTrainRayActor(TorchNativeTrainRayActor):
         config = build_trainer_config(
             args,
             hf_assets_path=args.hf_checkpoint,
-            lr_total_steps=args.num_rollout * _steps_per_rollout(args),
+            lr_total_steps=args.num_rollout * get_steps_per_rollout(args),
             dump_subdir="actor",
         )
 
@@ -84,7 +81,7 @@ class TorchtitanTrainRayActor(TorchNativeTrainRayActor):
             init_tracking(args, primary=False)
 
         self.trainer.checkpointer.load()
-        start_rollout_id = self.trainer.step // _steps_per_rollout(args)
+        start_rollout_id = self.trainer.step // get_steps_per_rollout(args)
 
         if with_ref:
             self.ref_runner = self._build_ref_runner(args)
