@@ -1,0 +1,85 @@
+### 0
+pkill -9 sglang; sleep 3; ray stop
+  --force; pkill -9 ray; pkill -9 miles; sleep 3; pkill -9 ray; pkill -9 miles; pkill -9 redis; true; 
+
+### 1
+export PYTHONUNBUFFERED=1 && ray start
+  --head
+  --node-ip-address 127.0.0.1
+  --num-gpus 4
+  --disable-usage-stats
+
+### 2
+nvidia-smi topo -m 2>/dev/null | grep -o 'NV[0-9][0-9]*' | wc -l
+
+### 3
+export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && ray job submit
+  --address="http://127.0.0.1:8265"
+  --runtime-env-json='{"env_vars": {"PYTHONUNBUFFERED": "1", "NCCL_NVLS_ENABLE": "0", "no_proxy": "127.0.0.1,127.0.0.1", "MASTER_ADDR": "127.0.0.1", "CUDA_DEVICE_MAX_CONNECTIONS": "1", "MILES_SCRIPT_GYM_URL": "http://127.0.0.1:11001", "MILES_SCRIPT_OSWORLD_SAMPLES_PER_EPISODE": "15", "MILES_SCRIPT_OSWORLD_MAX_SANDBOXES": "8", "MILES_SCRIPT_OSWORLD_EPISODE_TIMEOUT_S": "2400", "MILES_SCRIPT_OSWORLD_MAX_OUTPUT_TOKENS": "1500", "PYTHONPATH": "<REPO_ROOT>:/root/Megatron-LM:/frozen/pythonpath"}}'
+  -- python3 <REPO_ROOT>/train.py 
+  --hf-checkpoint /root/models/Qwen3-VL-4B-Instruct
+  --ref-load /root/models/Qwen3-VL-4B-Instruct 
+  --prompt-data /root/datasets/osworld/train.jsonl
+  --input-key prompt
+  --label-key label
+  --metadata-key metadata
+  --apply-chat-template
+  --rollout-shuffle
+  --num-rollout 20
+  --rollout-max-response-len 12288
+  --rollout-max-context-len 16384
+  --rollout-temperature 1.0 
+  --eval-interval 10
+  --eval-prompt-data osworld_held_out /root/datasets/osworld/held_out.jsonl
+  --n-samples-per-eval-prompt 1
+  --eval-max-response-len 12288 
+  --custom-generate-function-path examples.experimental.osworld.rollout.generate
+  --custom-rm-path examples.experimental.osworld.rollout.reward_func 
+  --advantage-estimator grpo
+  --kl-loss-coef 0.00
+  --kl-loss-type low_var_kl
+  --kl-coef 0.00
+  --entropy-coef 0.00
+  --eps-clip 0.2
+  --eps-clip-high 0.28 
+  --optimizer adam
+  --lr 1e-6
+  --lr-decay-style constant
+  --weight-decay 0.1
+  --adam-beta1 0.9
+  --adam-beta2 0.98
+  --lr-decay-iters 20 
+  --use-wandb
+  --wandb-project miles-run_qwen3_vl_4b_osworld
+  --wandb-group 260101-000000-000
+  --wandb-key 'frozen-wandb-api-key'
+  --disable-wandb-random-suffix 
+  --train-backend fsdp
+  --gradient-checkpointing
+  --update-weight-buffer-size 536870912
+  --distributed-timeout-minutes 60
+  --attn-implementation flash_attention_3 
+  --sglang-router-port 31000
+  --pin-rollout-manager-to-head
+  --rollout-num-gpus-per-engine 1
+  --sglang-mem-fraction-static 0.6
+  --sglang-decode-log-interval 1000
+  --sglang-enable-metrics
+  --sglang-attention-backend fa3 
+  --use-miles-dashboard
+  --dashboard-gpu-sample-interval 5
+  --log-multi-turn
+  --log-passrate 
+  --colocate
+  --save /root/shared_data/ckpt
+  --save-interval 5
+  --dump-details /root/shared_data/dump
+  --custom-eval-rollout-log-function-path examples.experimental.osworld.rollout.log_eval_rollout_data  
+  --rollout-batch-size 2
+  --n-samples-per-prompt 4
+  --global-batch-size 120
+  --micro-batch-size 1
+  --actor-num-nodes 1
+  --actor-num-gpus-per-node 4
+  --num-gpus-per-node 4  
+  --deploy-component all
