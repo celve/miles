@@ -220,3 +220,25 @@ def test_failed_sample_still_exercises_the_vision_tower():
     # fake grid (1,4,4), merge 2 -> 4 image tokens + vision_start/end
     assert len(sample.tokens) == 6
     assert len(sample.tokens) >= sample.response_length
+
+
+def test_aborted_sample_drops_its_group_and_names_its_cause():
+    from examples.experimental.hud.rollout import _aborted
+
+    from miles.utils.types import Sample
+
+    sample = SimpleNamespace(metadata={}, status=None, remove_sample=False)
+    _aborted(sample, "boom", "NoModelCalls", state=_fake_state())
+    assert sample.status == Sample.Status.ABORTED
+    assert sample.metadata["exit_status"] == "NoModelCalls"
+
+
+def test_a_run_that_failed_before_launch_made_no_model_call():
+    from examples.experimental.hud.rollout import _made_a_model_call
+    from hud.agents.types import AgentStep
+    from hud.types import Step, Trace
+
+    failed = SimpleNamespace(trace=Trace(status="error", steps=[Step(source="system", error="[provisioning] boom")]))
+    played = SimpleNamespace(trace=Trace(steps=[AgentStep()]))
+    assert not _made_a_model_call(failed)
+    assert _made_a_model_call(played)
