@@ -9,7 +9,7 @@ from tqdm import tqdm
 
 from miles.rollout.base_types import RolloutFnTrainOutput, stamp_kv_cache_namespace
 from miles.rollout.filter_hub.base_types import MetricGatherer, group_has_aborted
-from miles.rollout.filter_hub.common_filters import apply_preput_filters, count_aborted_streak
+from miles.rollout.filter_hub.common_filters import aborted_streak_error, apply_preput_filters, count_aborted_streak
 from miles.rollout.generate_utils.prefill_logprobs import recompute_samples_rollout_logprobs_via_prefill
 from miles.rollout.generate_utils.sample_utils import reward_log_summary, sample_text_preview
 from miles.rollout.inference_rollout.inference_rollout_common import GenerateState, generate_and_rm_group
@@ -156,7 +156,11 @@ async def generate_rollout_async(
 
             assert len(group) == args.n_samples_per_prompt
             all_data.append(group)
-            aborted_streak = count_aborted_streak(args, group, aborted_streak)
+            aborted_streak = count_aborted_streak(group, aborted_streak)
+            if (error := aborted_streak_error(args, group, aborted_streak)) is not None:
+                await abort(state, pendings, rollout_id)
+                state.reset()
+                raise error
             metric_gatherer.on_group_before_dynamic_filter(args, group)
             filter_output = apply_preput_filters(args, dynamic_filter, group)
             if not filter_output.keep:

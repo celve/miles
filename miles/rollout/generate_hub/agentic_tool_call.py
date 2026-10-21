@@ -119,6 +119,11 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
         except (TimeoutError, httpx.TransportError) as e:
             collect_failed = True
             logger.warning(f"{log_prefix} Failed collecting samples: {e!r}", exc_info=True)
+        except Exception as e:
+            if infra_abort is None:
+                raise
+            collect_failed = True
+            logger.warning(f"{log_prefix} Failed collecting samples after the agent's InfraAbort: {e!r}")
         else:
             logger.debug(
                 f"{log_prefix} collect_samples done: {len(result.samples)} samples, "

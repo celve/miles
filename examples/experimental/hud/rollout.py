@@ -137,10 +137,16 @@ def _collect_turns(run) -> list:
     return [s for s in samples if s is not None and s.output_token_ids]
 
 
-def _made_a_model_call(run) -> bool:
+def _no_response_cause(run) -> str | None:
+    """Why the policy never got a model response back, or None once it got one."""
     from hud.agents.types import AgentStep  # noqa: PLC0415
 
-    return bool(run.trace.collect(lambda s: s if isinstance(s, AgentStep) else None))
+    steps = run.trace.collect(lambda s: s if isinstance(s, AgentStep) else None)
+    if not steps:
+        # HUD returns a run without a runtime, not an exception, when provisioning, connecting or starting fails.
+        return "SandboxUnavailable" if run.runtime is None else None
+    # HUD records a failed model request as an AgentStep with an error and no response.
+    return "NoModelCalls" if steps[0].raw is None and steps[0].error else None
 
 
 def _collect_images(run) -> list[PILImage.Image]:
@@ -431,9 +437,8 @@ async def generate(args: Any, sample: Sample, sampling_params) -> Sample:
     sample.metadata["reward"] = float(run.reward or 0.0)
     sample.metadata["hud_trace_status"] = str(run.trace.status)
 
-    if not _made_a_model_call(run):
-        # HUD returns a failed run, not an exception, when provisioning, connecting or starting the task fails.
-        return _aborted(sample, "hud episode recorded no model call", "NoModelCalls", state)
+    if (cause := _no_response_cause(run)) is not None:
+        return _aborted(sample, f"hud episode got no model response ({cause})", cause, state)
     turns = _collect_turns(run)
     stitched = _stitch(turns, state.tokenizer) if turns else None
     if stitched is None:

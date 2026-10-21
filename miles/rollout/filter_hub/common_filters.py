@@ -92,17 +92,19 @@ def apply_aborted_filter(args: Namespace, samples: Group, **kwargs) -> FilterOut
     return FilterOutput(keep=True)
 
 
-def count_aborted_streak(args: Namespace, group: Group, streak: int) -> int:
-    """Groups aborted in a row, this one included; raises once that reaches --max-consecutive-aborted-groups."""
-    if not group_has_aborted(group):
-        return 0
-    streak += 1
-    if args.max_consecutive_aborted_groups and streak >= args.max_consecutive_aborted_groups:
-        raise RuntimeError(
-            f"{streak} rollout groups in a row aborted, the last with exit_status {aborted_exit_status(group)!r}, "
-            "so the environment looks unavailable. Raise --max-consecutive-aborted-groups, or set it to 0, to keep going."
-        )
-    return streak
+def count_aborted_streak(group: Group, streak: int) -> int:
+    """Groups aborted in a row, this one included."""
+    return streak + 1 if group_has_aborted(group) else 0
+
+
+def aborted_streak_error(args: Namespace, group: Group, streak: int) -> RuntimeError | None:
+    """The error that stops a rollout once --max-consecutive-aborted-groups groups in a row aborted."""
+    if not args.max_consecutive_aborted_groups or streak < args.max_consecutive_aborted_groups:
+        return None
+    return RuntimeError(
+        f"{streak} rollout groups in a row aborted, the last with exit_status {aborted_exit_status(group)!r}, "
+        "so the environment looks unavailable. Raise --max-consecutive-aborted-groups, or set it to 0, to keep going."
+    )
 
 
 def apply_missing_reward_filter(args: Namespace, samples: Group, **kwargs) -> FilterOutput:

@@ -233,12 +233,31 @@ def test_aborted_sample_drops_its_group_and_names_its_cause():
     assert sample.metadata["exit_status"] == "NoModelCalls"
 
 
-def test_a_run_that_failed_before_launch_made_no_model_call():
-    from examples.experimental.hud.rollout import _made_a_model_call
+def test_a_run_that_never_launched_has_no_model_response():
+    from examples.experimental.hud.rollout import _no_response_cause
+    from hud.eval.run import Run
+
+    assert _no_response_cause(Run.failed("[provisioning] daytona quota exceeded")) == "SandboxUnavailable"
+
+
+def test_a_first_model_request_that_failed_has_no_model_response():
+    from examples.experimental.hud.rollout import _no_response_cause
+    from hud.agents.types import AgentStep
+    from hud.types import Trace
+
+    failed_first_request = AgentStep(error="Error getting response Connection error.", done=True)
+    run = SimpleNamespace(runtime="http://sandbox", trace=Trace(status="error", steps=[failed_first_request]))
+    assert _no_response_cause(run) == "NoModelCalls"
+
+
+def test_a_run_whose_policy_got_a_response_is_scored():
+    from examples.experimental.hud.rollout import _no_response_cause
     from hud.agents.types import AgentStep
     from hud.types import Step, Trace
 
-    failed = SimpleNamespace(trace=Trace(status="error", steps=[Step(source="system", error="[provisioning] boom")]))
-    played = SimpleNamespace(trace=Trace(steps=[AgentStep()]))
-    assert not _made_a_model_call(failed)
-    assert _made_a_model_call(played)
+    answered = SimpleNamespace(runtime="http://sandbox", trace=Trace(steps=[AgentStep(raw={"id": "r"})]))
+    crashed_parsing_it = SimpleNamespace(
+        runtime="http://sandbox", trace=Trace(status="error", steps=[Step(source="system", error="Expecting value")])
+    )
+    assert _no_response_cause(answered) is None
+    assert _no_response_cause(crashed_parsing_it) is None

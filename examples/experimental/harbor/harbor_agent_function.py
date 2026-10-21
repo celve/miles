@@ -54,8 +54,8 @@ Env vars (read on the rollout worker):
 
 Failure semantics: a verdict is returned as-is. A trial the policy cannot have
 failed is discarded with ``InfraAbort``: one that failed before its agent
-started (``SandboxUnavailable``, ``AgentSetupFailed``), or one whose agent lost
-the model service (``ServerUnreachable``). Every other episode that ends
+started (``SandboxUnavailable``, ``AgentSetupFailed``), or one whose in-process
+agent lost the model service (``ServerUnreachable``). Every other episode that ends
 without a verdict scores 0 with a named ``exit_status`` (``TimeLimitExceeded``,
 ``SequenceLengthLimitExceeded``, ``AgentError``), matching the agent-server
 path. Configuration errors (missing task dir, bad env vars) raise instead:
@@ -86,15 +86,9 @@ _SAFE_INSTANCE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # Harbor exception class names -> the exit_status vocabulary the reward path reads.
 _TIMEOUT_EXCEPTIONS = {"AgentTimeoutError", "VerifierTimeoutError", "EnvironmentStartTimeoutError"}
 _OUTPUT_LIMIT_EXCEPTIONS = {"MaxSeqLenExceededError", "SingleTurnMaxSeqLenExceededError"}
-# Harbor's typed provider failures for installed agents, and litellm's for in-process ones such as computer-1.
-_MODEL_SERVICE_EXCEPTIONS = {
-    "ApiConnectionClosedError",
-    "ApiInternalServerError",
-    "ApiOverloadedError",
-    "ApiResponseStalledError",
-    "APIConnectionError",
-    "ServiceUnavailableError",
-}
+# litellm's, raised by in-process agents such as computer-1; installed agents' Api* errors are regex matches on
+# their own output, which the policy writes, so those stay scored.
+_MODEL_SERVICE_EXCEPTIONS = {"APIConnectionError", "ServiceUnavailableError"}
 
 
 def _trial_timeout_s() -> int:
@@ -450,16 +444,26 @@ def _failed(exit_status: str) -> dict[str, Any]:
     return {"reward": 0.0, "exit_status": exit_status, "eval_report": {}, "agent_metrics": {}}
 
 
-def _discard_cause(result) -> str | None:
-    """The ``InfraAbort`` exit_status of a trial the policy cannot have failed, else None."""
-    exc = getattr(result, "exception_info", None)
-    if exc is None:
+def _discard_cause(result) -> tuple[str, Any] | None:
+    """The ``InfraAbort`` exit_status, and its exception, of a trial the policy cannot have failed."""
+    steps = getattr(result, "step_results", None) or []
+    failures = [
+        exc
+        for exc in (
+            getattr(result, "exception_info", None),
+            *(getattr(step, "exception_info", None) for step in steps),
+        )
+        if exc is not None
+    ]
+    if not failures:
         return None
     if not _agent_started(result):
         # Harbor stamps a phase's timing when the phase begins.
-        return "SandboxUnavailable" if getattr(result, "agent_setup", None) is None else "AgentSetupFailed"
-    if getattr(exc, "exception_type", "") in _MODEL_SERVICE_EXCEPTIONS:
-        return "ServerUnreachable"
+        cause = "SandboxUnavailable" if getattr(result, "agent_setup", None) is None else "AgentSetupFailed"
+        return cause, failures[0]
+    for exc in failures:
+        if getattr(exc, "exception_type", "") in _MODEL_SERVICE_EXCEPTIONS:
+            return "ServerUnreachable", exc
     return None
 
 
@@ -508,8 +512,8 @@ async def run(
         logger.error(f"Harbor trial for {instance_id} failed: {e}", exc_info=True)
         return _failed("AgentError")
 
-    if (cause := _discard_cause(result)) is not None:
-        exc = result.exception_info
+    if (discard := _discard_cause(result)) is not None:
+        cause, exc = discard
         raise InfraAbort(cause, f"Harbor trial for {instance_id}: {exc.exception_type}: {exc.exception_message}")
 
     out = trial_result_to_metadata(result)

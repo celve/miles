@@ -10,6 +10,7 @@ import pytest
 from miles.rollout.filter_hub import dynamic_sampling_filters
 from miles.rollout.filter_hub.base_types import DynamicFilterOutput, FilterOutput, MetricGatherer, iter_samples
 from miles.rollout.filter_hub.common_filters import (
+    aborted_streak_error,
     apply_aborted_filter,
     apply_missing_reward_filter,
     apply_preput_filters,
@@ -284,26 +285,22 @@ def _aborted_group(exit_status=None) -> list[Sample]:
 
 
 def test_a_group_that_did_not_abort_resets_the_aborted_streak():
-    args = Namespace(max_consecutive_aborted_groups=2)
-    streak = count_aborted_streak(args, _aborted_group(), 0)
-    streak = count_aborted_streak(args, [make_sample()], streak)
-    assert count_aborted_streak(args, _aborted_group(), streak) == 1
+    streak = count_aborted_streak(_aborted_group(), 0)
+    streak = count_aborted_streak([make_sample()], streak)
+    assert count_aborted_streak(_aborted_group(), streak) == 1
 
 
-def test_the_aborted_streak_fails_the_rollout_at_its_limit():
+def test_the_aborted_streak_stops_the_rollout_at_its_limit():
     args = Namespace(max_consecutive_aborted_groups=2)
-    streak = count_aborted_streak(args, _aborted_group(), 0)
-    with pytest.raises(RuntimeError, match="2 rollout groups in a row aborted.*'SandboxUnavailable'"):
-        count_aborted_streak(args, _aborted_group("SandboxUnavailable"), streak)
+    group = _aborted_group("SandboxUnavailable")
+    assert aborted_streak_error(args, group, 1) is None
+    error = aborted_streak_error(args, group, 2)
+    assert "2 rollout groups in a row aborted, the last with exit_status 'SandboxUnavailable'" in str(error)
 
 
 @pytest.mark.parametrize("limit", [None, 0])
-def test_an_unset_or_zero_limit_never_fails_the_rollout(limit):
-    args = Namespace(max_consecutive_aborted_groups=limit)
-    streak = 0
-    for _ in range(100):
-        streak = count_aborted_streak(args, _aborted_group(), streak)
-    assert streak == 100
+def test_an_unset_or_zero_limit_never_stops_the_rollout(limit):
+    assert aborted_streak_error(Namespace(max_consecutive_aborted_groups=limit), _aborted_group(), 100) is None
 
 
 def test_aborted_drops_are_counted_by_the_cause_they_recorded():

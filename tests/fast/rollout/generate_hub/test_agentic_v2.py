@@ -170,8 +170,11 @@ async def test_infra_abort_discards_the_sample_with_its_cause(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_infra_abort_cause_outranks_a_failed_collection(monkeypatch):
-    tracer = _Tracer(error=TimeoutError("samples unavailable"))
+@pytest.mark.parametrize(
+    "collect_error", [TimeoutError("samples unavailable"), RuntimeError("HTTP 503 from /samples")]
+)
+async def test_infra_abort_cause_outranks_a_failed_collection(monkeypatch, collect_error):
+    tracer = _Tracer(error=collect_error)
     _patch_agent(monkeypatch, tracer)
     monkeypatch.setattr(agentic_tool_call, "load_function", lambda path: _abort_for_infra)
 

@@ -400,9 +400,7 @@ def test_run_discards_a_trial_that_failed_before_its_agent_started(tasks_dir, fa
     assert raised.value.exit_status == exit_status
 
 
-@pytest.mark.parametrize(
-    "exc_type", ["ApiInternalServerError", "ApiConnectionClosedError", "APIConnectionError", "ServiceUnavailableError"]
-)
+@pytest.mark.parametrize("exc_type", ["APIConnectionError", "ServiceUnavailableError"])
 def test_run_discards_a_trial_whose_agent_lost_the_model_service(tasks_dir, fake_harbor, exc_type):
     fake_harbor.result = _failed_trial(exc_type, agent_setup=True, agent_execution=True)
 
@@ -418,6 +416,8 @@ def test_run_discards_a_trial_whose_agent_lost_the_model_service(tasks_dir, fake
         ("AgentTimeoutError", "TimeLimitExceeded"),
         ("RuntimeError", "AgentError"),
         ("ApiRateLimitError", "AgentError"),
+        ("ApiInternalServerError", "AgentError"),
+        ("ApiConnectionClosedError", "AgentError"),
         ("InternalServerError", "AgentError"),
         ("Timeout", "AgentError"),
     ],
@@ -428,6 +428,22 @@ def test_run_scores_a_failure_after_the_agent_started_zero(tasks_dir, fake_harbo
     out = run_async(haf.run("http://s/sessions/s1", [], {}, {"instance_id": "task-1"}))
 
     assert out["reward"] == 0.0 and out["exit_status"] == exit_status
+
+
+def test_run_discards_a_multi_step_trial_whose_step_lost_the_model_service(tasks_dir, fake_harbor):
+    started = SimpleNamespace(started_at=datetime(2026, 1, 1), finished_at=datetime(2026, 1, 1))
+    step = SimpleNamespace(
+        agent_execution=started,
+        exception_info=SimpleNamespace(exception_type="APIConnectionError", exception_message="connection refused"),
+    )
+    fake_harbor.result = _verdict()
+    fake_harbor.result.agent_execution = None
+    fake_harbor.result.step_results = [step]
+
+    with pytest.raises(InfraAbort, match="APIConnectionError: connection refused") as raised:
+        run_async(haf.run("http://s/sessions/s1", [], {}, {"instance_id": "task-1"}))
+
+    assert raised.value.exit_status == "ServerUnreachable"
 
 
 def test_run_counts_a_multi_step_trial_whose_step_ran_as_started(tasks_dir, fake_harbor):
