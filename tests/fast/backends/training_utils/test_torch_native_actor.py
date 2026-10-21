@@ -219,7 +219,7 @@ def _train_one_dp_rank(rank: int, world_size: int, port: int) -> None:
     )
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(base_module, "get_batch", _cpu_batch)
-        patch.setattr(base_module, "aggregate_train_losses", lambda losses: {})
+        patch.setattr(base_module, "aggregate_train_losses", lambda losses, num_rollouts=None: {})
         patch.setattr(base_module, "log_train_step", lambda **kwargs: None)
         actor._optimizer_steps(runner, DataIterator(rollout_data, micro_batch_size=1), _NUM_MICROBATCHES, rollout_id=0)
 
