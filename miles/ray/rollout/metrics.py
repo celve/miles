@@ -73,10 +73,22 @@ def _compute_eval_dataset_metrics(args, key: str, dataset: dict) -> dict[str, An
         log_dict[f"eval/{key}-truncated_ratio"] = sum(truncated) / len(truncated)
     if args.log_passrate:
         log_dict |= dict_add_prefix(
-            _compute_eval_passrate(args, rewards, samples, complete_prompts_only=has_aborted),
+            _compute_eval_passrate(
+                rewards,
+                samples,
+                group_size=_eval_samples_per_prompt(args, key),
+                complete_prompts_only=has_aborted,
+            ),
             f"eval/{key}-",
         )
     return log_dict
+
+
+def _eval_samples_per_prompt(args, key: str) -> int:
+    return next(
+        (cfg.n_samples_per_eval_prompt for cfg in args.eval_datasets if cfg.name == key),
+        args.n_samples_per_eval_prompt,
+    )
 
 
 def _keep_eval_rows(dataset: dict, keep: list[bool]) -> dict:
@@ -103,14 +115,19 @@ def _compute_eval_aborted_metrics(key: str, *, num_attempts: int, aborted: list[
 
 
 def _compute_eval_passrate(
-    args, rewards: list[float], samples: list[Sample] | None, *, complete_prompts_only: bool
+    rewards: list[float], samples: list[Sample] | None, *, group_size: int, complete_prompts_only: bool
 ) -> dict[str, float]:
-    group_size = args.n_samples_per_eval_prompt
     if not complete_prompts_only:
         return compute_pass_rate(flat_rewards=rewards, group_size=group_size)
-    # Both eval loops number a prompt's attempts contiguously, so index // group_size names the prompt.
-    by_prompt = group_by(zip(rewards, samples, strict=True), lambda pair: pair[1].index // group_size)
-    complete = [[reward for reward, _ in pairs] for pairs in by_prompt.values() if len(pairs) == group_size]
+    if any(sample.index is None for sample in samples):
+        logger.warning("eval pass@k: skipped, samples carry no index to group their attempts by prompt.")
+        return {}
+    attempts: dict[tuple, tuple[int, float]] = {}
+    for position, (reward, sample) in enumerate(zip(rewards, samples, strict=True)):
+        # Both eval loops number a prompt's attempts contiguously, so index // group_size names the prompt.
+        attempts.setdefault(_get_rollout_key(sample, position), (sample.index // group_size, reward))
+    by_prompt = group_by(attempts.values(), lambda attempt: attempt[0])
+    complete = [[reward for _, reward in group] for group in by_prompt.values() if len(group) == group_size]
     if len(complete) < len(by_prompt):
         logger.warning(f"eval pass@k: excluding {len(by_prompt) - len(complete)}/{len(by_prompt)} incomplete prompts.")
     if not complete:

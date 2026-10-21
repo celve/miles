@@ -15,6 +15,7 @@ from miles.ray.rollout.metrics import (
     log_rollout_data,
 )
 from miles.rollout.session.v2.metrics import SESSION_ROLLOUT_METRICS_KEY
+from miles.utils.eval_config import EvalDatasetConfig
 from miles.utils.types import Sample, WeightVersionSpan, WeightVersionsPerCall
 
 
@@ -809,6 +810,64 @@ class TestEvalMetrics:
         assert payload["eval/osworld-pass@1"] == 1.0
         assert payload["eval/osworld-pass@2"] == 1.0
 
+    def test_an_attempt_with_one_aborted_sample_is_left_out_whole(self, monkeypatch):
+        samples = [
+            make_sample(index=0, rollout_id=0, reward=1.0),
+            _aborted_sample(index=0, rollout_id=0),
+            make_sample(index=1, reward=0.0),
+        ]
+
+        payload = _log_eval(monkeypatch, {"osworld": _eval_dataset(samples)})
+
+        assert payload["eval/osworld-aborted_ratio"] == 0.5
+        assert payload["eval/osworld"] == 0.0
+
+    def test_pass_at_k_counts_attempts_not_their_samples(self, monkeypatch):
+        samples = [
+            make_sample(index=0, rollout_id=0, reward=1.0),
+            make_sample(index=0, rollout_id=0, reward=1.0),
+            _aborted_sample(index=1),
+            make_sample(index=2, rollout_id=2, reward=1.0),
+            make_sample(index=2, rollout_id=2, reward=1.0),
+            make_sample(index=3, rollout_id=3, reward=0.0),
+            make_sample(index=3, rollout_id=3, reward=0.0),
+        ]
+
+        payload = _log_eval(
+            monkeypatch, {"osworld": _eval_dataset(samples)}, log_passrate=True, n_samples_per_eval_prompt=2
+        )
+
+        assert payload["eval/osworld-pass@1"] == 0.5
+        assert payload["eval/osworld-pass@2"] == 1.0
+
+    def test_pass_at_k_groups_attempts_by_the_dataset_s_own_sample_count(self, monkeypatch):
+        rewards = {0: 1.0, 2: 0.0, 3: 0.0, 4: 1.0, 5: 1.0, 6: 1.0, 7: 1.0}
+        samples = [
+            make_sample(index=i, reward=rewards[i]) if i in rewards else _aborted_sample(index=i) for i in range(8)
+        ]
+
+        payload = _log_eval(
+            monkeypatch,
+            {"osworld": _eval_dataset(samples)},
+            log_passrate=True,
+            n_samples_per_eval_prompt=2,
+            eval_datasets=[EvalDatasetConfig(name="osworld", path="osworld.jsonl", n_samples_per_eval_prompt=4)],
+        )
+
+        assert payload["eval/osworld-pass@1"] == 1.0
+        assert payload["eval/osworld-pass@4"] == 1.0
+
+    def test_pass_at_k_is_skipped_when_samples_carry_no_index(self, monkeypatch):
+        samples = [make_sample(index=None, reward=1.0), _aborted_sample(index=None)]
+
+        payload = _log_eval(
+            monkeypatch, {"custom": _eval_dataset(samples)}, log_passrate=True, n_samples_per_eval_prompt=1
+        )
+
+        assert payload["eval/custom"] == 1.0
+        assert payload["eval/custom-aborted_ratio"] == 0.5
+        assert not any("pass@" in key for key in payload)
+
     def test_without_samples_a_missing_reward_still_scores_zero(self, monkeypatch):
         payload = _log_eval(monkeypatch, {"gsm8k": {"rewards": [1.0, None]}})
 
@@ -817,9 +876,11 @@ class TestEvalMetrics:
         assert "eval/gsm8k-aborted_ratio" not in payload
 
 
-def _aborted_sample(*, index: int, exit_status: str | None = None) -> Sample:
+def _aborted_sample(*, index: int | None, exit_status: str | None = None, **overrides) -> Sample:
     metadata = {"exit_status": exit_status} if exit_status else {}
-    return make_sample(index=index, reward=None, status=Sample.Status.ABORTED, response_length=0, metadata=metadata)
+    return make_sample(
+        index=index, reward=None, status=Sample.Status.ABORTED, response_length=0, metadata=metadata, **overrides
+    )
 
 
 def _eval_dataset(samples: list[Sample]) -> dict:
