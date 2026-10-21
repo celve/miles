@@ -253,6 +253,27 @@ EXTERNAL_ARGS = [
 ]
 
 
+class TestMaxConsecutiveAbortedGroups:
+    def _validated(self, extra):
+        parser = argparse.ArgumentParser()
+        get_miles_extra_args_provider()(parser)
+        args = parser.parse_args(extra + ["--num-rollout", "1"] + REQUIRED_ARGS)
+        miles_validate_args(args)
+        return args
+
+    def test_the_default_is_four_rollout_batches(self):
+        args = self._validated([])
+
+        assert args.max_consecutive_aborted_groups == 4 * args.rollout_batch_size
+
+    def test_zero_is_kept_to_disable_the_guard(self):
+        assert self._validated(["--max-consecutive-aborted-groups", "0"]).max_consecutive_aborted_groups == 0
+
+    def test_a_negative_limit_is_refused_at_startup(self):
+        with pytest.raises(AssertionError, match="max-consecutive-aborted-groups takes 0"):
+            self._validated(["--max-consecutive-aborted-groups", "-1"])
+
+
 class TestExternalRolloutValidation:
     def _parse(self, extra):
         parser = argparse.ArgumentParser()

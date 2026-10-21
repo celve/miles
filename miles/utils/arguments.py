@@ -4111,6 +4111,10 @@ def miles_validate_args(args):
             args.over_sampling_batch_size = args.rollout_batch_size
         if args.max_consecutive_aborted_groups is None:
             args.max_consecutive_aborted_groups = 4 * args.rollout_batch_size
+        assert args.max_consecutive_aborted_groups >= 0, (
+            "--max-consecutive-aborted-groups takes 0, to disable the guard, or a positive count; "
+            f"got {args.max_consecutive_aborted_groups}"
+        )
 
         assert args.over_sampling_batch_size >= args.rollout_batch_size, (
             f"over_sampling_batch_size {args.over_sampling_batch_size} should be greater than or equal to "
