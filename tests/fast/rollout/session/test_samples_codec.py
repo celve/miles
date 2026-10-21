@@ -9,6 +9,7 @@ import json
 import numpy as np
 import pytest
 import safetensors.numpy
+import torch
 
 from miles.rollout.session.samples.codec import (
     COMPUTED_FIELDS,
@@ -410,3 +411,61 @@ class TestWeightVersionsOnTheSamplesWire:
 
         with pytest.raises(expected_error, match=match):
             decode_samples_and_merge_input_sample(payload, Sample())
+
+
+class TestMultimodalTrainInputsOnTheSamplesWire:
+    """The ``tensor_dict`` codec that carries a sample's image tensors to the trainer."""
+
+    @staticmethod
+    def _mm_sample(**overrides) -> Sample:
+        sample = _computed_sample(**overrides)
+        sample.multimodal_train_inputs = {
+            "pixel_values": torch.arange(12, dtype=torch.float32).reshape(6, 2),
+            "image_grid_thw": torch.tensor([[1, 2, 3], [1, 2, 3]], dtype=torch.int64),
+        }
+        return sample
+
+    def test_the_v1_wire_is_unchanged(self):
+        """A v1 payload must stay byte-identical: the new field is v2-only."""
+        sample = self._mm_sample()
+        assert "multimodal_train_inputs" not in COMPUTED_FIELDS
+        without = encode_samples([_computed_sample()], {}, fields=COMPUTED_FIELDS)
+        assert encode_samples([sample], {}, fields=COMPUTED_FIELDS) == without
+
+    def test_tensors_round_trip_as_torch_tensors(self):
+        """The trainer calls ``.to(device)`` on each value, so decode must not hand back numpy."""
+        sample = self._mm_sample()
+        payload = encode_samples([sample], {}, fields=COMPUTED_FIELDS_V2)
+        decoded = decode_samples_and_merge_input_sample(payload, Sample(), fields=COMPUTED_FIELDS_V2).samples[0]
+        assert set(decoded.multimodal_train_inputs) == {"pixel_values", "image_grid_thw"}
+        for key, value in sample.multimodal_train_inputs.items():
+            assert isinstance(decoded.multimodal_train_inputs[key], torch.Tensor)
+            assert torch.equal(decoded.multimodal_train_inputs[key], value)
+
+    def test_dim_zero_concatenation_still_works_after_decode(self):
+        """Two decoded samples must stack the way the trainer stacks a micro-batch."""
+        payload = encode_samples([self._mm_sample(), self._mm_sample()], {}, fields=COMPUTED_FIELDS_V2)
+        first, second = decode_samples_and_merge_input_sample(payload, Sample(), fields=COMPUTED_FIELDS_V2).samples
+        stacked = torch.cat(
+            [first.multimodal_train_inputs["pixel_values"], second.multimodal_train_inputs["pixel_values"]], dim=0
+        )
+        assert stacked.shape == (12, 2)
+
+    def test_a_text_only_sample_decodes_to_none(self):
+        payload = encode_samples([_computed_sample()], {}, fields=COMPUTED_FIELDS_V2)
+        decoded = decode_samples_and_merge_input_sample(payload, Sample(), fields=COMPUTED_FIELDS_V2).samples[0]
+        assert decoded.multimodal_train_inputs is None
+
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.int16])
+    def test_an_unsupported_dtype_is_refused_rather_than_silently_cast(self, dtype):
+        """Caught before ``.numpy()``, which raises its own unhelpful TypeError on bf16."""
+        sample = self._mm_sample()
+        sample.multimodal_train_inputs["pixel_values"] = torch.zeros(2, 2, dtype=dtype)
+        with pytest.raises(ValueError, match="samples wire cannot carry"):
+            encode_samples([sample], {}, fields=COMPUTED_FIELDS_V2)
+
+    def test_a_non_dict_value_is_refused(self):
+        sample = self._mm_sample()
+        sample.multimodal_train_inputs = [1, 2, 3]
+        with pytest.raises(TypeError, match="must be a dict of tensors"):
+            encode_samples([sample], {}, fields=COMPUTED_FIELDS_V2)

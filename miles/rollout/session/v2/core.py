@@ -16,6 +16,7 @@ from miles.rollout.session.core import (
     proxy_result_to_response,
 )
 from miles.rollout.session.errors import SessionNotFoundError, TokenizationError
+from miles.rollout.session.images.processing import assert_engine_expansion_matches, expand_input_ids
 from miles.rollout.session.request_args import filter_turn_args, parse_chat_request
 from miles.rollout.session.samples.codec import COMPUTED_FIELDS_V2, ROLLOUT_SAMPLING_MASK_FIELDS, encode_samples
 from miles.rollout.session.types import GetSessionResponse, SessionRecord
@@ -61,6 +62,10 @@ class SessionCoreV2(SessionCore):
         metadata["max_trim_tokens"] = self.registry.tito_tokenizer.max_trim_tokens
         metadata["tree"] = tree_metadata(session)
         metadata["turn_args"] = filter_turn_args(latest.turn_args) if latest is not None else {}
+        if self.registry.image_processor is not None:
+            # What bound this run's pixels. Launch-scoped, so one record per session
+            # and per sample says everything a per-request copy would.
+            metadata["image_provenance"] = self.registry.image_processor.provenance()
         return metadata
 
     async def get_session(self, session_id: str) -> Response:
@@ -164,6 +169,7 @@ class SessionCoreV2(SessionCore):
                 config=self.config,
                 tito_tokenizer=self.registry.tito_tokenizer,
                 message_matcher=self.registry.message_matcher,
+                image_processor=self.registry.image_processor,
             )
             request_body, tito_tokenizer = prepared.body, self.registry.tito_tokenizer
             response_intent = prepared.response_intent
@@ -175,8 +181,11 @@ class SessionCoreV2(SessionCore):
             self._maybe_request_addition_r3(request_body, checkpoint_token_ids, prompt_token_ids)
             _add_session_extra_key(request_body, session)
 
-            # orjson: the body carries the whole prompt's input_ids on every turn.
-            proxy_body = orjson.dumps(request_body)
+            # orjson: the body carries the whole prompt's input_ids on every turn. An image turn asks
+            # for the engine's expanded ids whatever the client sent, because the per-turn check needs them.
+            proxy_body = orjson.dumps(
+                {**request_body, "return_prompt_token_ids": True} if prepared.has_images else request_body
+            )
         # --- lock released ---
 
         # --- Phase 2: proxy to backend (NO lock held) ---
@@ -191,6 +200,8 @@ class SessionCoreV2(SessionCore):
             return proxy_result_to_response(result)
 
         response, choice, assistant_message, completion_token_ids = extract_completion(result)
+        if prepared.has_images:
+            self._check_engine_expansion(response, request_body, prepared)
         assistant_message = tito_tokenizer.postprocess_completion(
             choice=choice,
             assistant_message=assistant_message,
@@ -224,10 +235,27 @@ class SessionCoreV2(SessionCore):
                 response_id=response.get("id", ""),
                 finish_reason=choice.get("finish_reason") or "",
                 turn_args=request_body,
+                images=prepared.images,
             )
         # --- lock released ---
 
         return _chat_client_response(result, response, response_intent)
+
+    def _check_engine_expansion(self, response: dict, request_body: dict, prepared) -> None:
+        choices = response.get("choices") or [{}]
+        effective = choices[0].get("prompt_token_ids")
+        # The reply and the record keep the engine's ids only when the client asked SGLang for them.
+        if not (request_body.get("return_prompt_token_ids") or request_body.get("return_token_ids")):
+            for choice in choices:
+                choice.pop("prompt_token_ids", None)
+        assert_engine_expansion_matches(
+            effective,
+            expand_input_ids(
+                request_body["input_ids"], prepared.image_token_counts, self.registry.image_processor.placeholder_id
+            ),
+            prepared.images,
+            prepared.image_token_counts,
+        )
 
 
 def _add_session_extra_key(request_body: dict, session: SessionStateV2) -> None:

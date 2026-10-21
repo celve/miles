@@ -77,10 +77,16 @@ def setup_session_routes(app, backend, config: SessionServerConfig, *, use_addit
 
     use_v2 = config.use_session_server == "v2"
     if use_v2:
+        from miles.rollout.session.images.processing import build_session_image_processor
         from miles.rollout.session.v2.core import SessionCoreV2
         from miles.rollout.session.v2.session_state import SessionRegistryV2
 
-        registry = SessionRegistryV2(tokenizer, tito_tokenizer=tito_tokenizer, message_matcher=message_matcher)
+        registry = SessionRegistryV2(
+            tokenizer,
+            tito_tokenizer=tito_tokenizer,
+            message_matcher=message_matcher,
+            image_processor=build_session_image_processor(config, tokenizer),
+        )
         core = SessionCoreV2(backend, registry, config, config.instance_id, use_addition_r3=use_addition_r3)
     else:
         registry = SessionRegistry(tokenizer, tito_tokenizer=tito_tokenizer, message_matcher=message_matcher)

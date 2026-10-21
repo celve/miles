@@ -24,6 +24,7 @@ from miles.backends.sglang_utils.arguments import validate_args as sglang_valida
 from miles.dashboard.args import add_dashboard_arguments, validate_dashboard_args
 from miles.ray.specs.train import compute_trainer_ids, external_trainer_controller_addrs
 from miles.rollout.checkpoint_eval import is_checkpoint_eval_fn
+from miles.rollout.session.images.launch_settings import validate_session_image_args
 from miles.utils.audit_utils.event_logger.logger import EVENTS_DIRNAME
 from miles.utils.chat_template_utils.tito_tokenizer import TITOTokenizerType
 from miles.utils.env_report.launcher_report import LAUNCHER_REPORT_ENV_VAR
@@ -2804,6 +2805,35 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "the pretokenized prefix in multi-turn agentic sessions.",
             )
             parser.add_argument(
+                "--use-session-images",
+                action="store_true",
+                default=False,
+                help="v2 only. Carry images through the session server so a screenshot harness can "
+                "train through the agent-function interface. Off by default, which keeps the text-only "
+                "behavior and rejects image content. On, the session server loads the checkpoint's processor, "
+                "sends image-bearing turns through the router's chat route like text turns, and assembles "
+                "pixel_values / image_grid_thw per retained sample. Requires --use-session-server v2, "
+                "--tito-model qwen3_vl (the model family), an SGLang whose pretokenized chat branch keeps "
+                "message images, and a checkpoint whose processor produces image grids; incompatible with the "
+                "routing and indexer replay side channels, whose per-token rows are sized on the expanded "
+                "sequence. Checked at startup against the args Miles launches the policy engines with: every "
+                "engine group must serve --hf-checkpoint unpinned, loading its processor from it, with no "
+                "mm_process_config and image_processor_backend 'auto'; external engines and "
+                "prefill/decode disaggregation are refused.",
+            )
+            parser.add_argument(
+                "--session-image-text-only-samples",
+                type=str,
+                default="drop",
+                choices=["drop", "keep"],
+                help="v2 only, with --use-session-images. What to do with a training sample whose "
+                "retained tokens carry no image, such as one built from a text-only summary call. "
+                "'drop' (default) removes it: under FSDP the vision tower's weight all-gathers are "
+                "collectives, so a text-only sample in an image-bearing batch stalls the ranks that "
+                "issued them. 'keep' emits it, for a trainer that tolerates mixed modality. A "
+                "placeholder image is never injected into a real sampled context either way.",
+            )
+            parser.add_argument(
                 "--session-message-matcher",
                 type=str,
                 default="strict",
@@ -4241,6 +4271,9 @@ def miles_validate_args(args):
         raise ValueError("--mini-ft-controller-enable requires --api-server-port to be set (non-zero)")
 
     _validate_deploy_component(args)
+
+    # Last: it reads the derived engine topology (rollout_external, starts_inference_engines).
+    validate_session_image_args(args)
 
 
 def validate_skip_actor_forward_only(args) -> None:

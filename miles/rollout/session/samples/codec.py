@@ -23,7 +23,7 @@ from miles.utils.types import Sample, WeightVersionsPerCall
 class ValueSpec:
     """Wire contract of one computed field."""
 
-    codec: str  # "tensor" | "tensor_list" | "sampling_mask" | "json"
+    codec: str  # "tensor" | "tensor_list" | "sampling_mask" | "tensor_dict" | "json"
     dtype: np.dtype | None = None  # tensor codecs: pinned on both sides; a mismatch raises instead of converting
     strict: bool = False  # encode never converts, only validates (R3 replay tensors must arrive as int32)
     null: object = None  # decoded value for a null-marked field; copied per sample so no instance is shared
@@ -49,10 +49,11 @@ SAMPLES_VALUE_SPEC: dict[str, ValueSpec] = {
     "metadata": ValueSpec("json"),
 }
 
-# Tree-serving v2 adds `Sample.reward` to the wire.
+# Tree-serving v2 adds `Sample.reward` and the multimodal trainer inputs to the wire.
 SAMPLES_VALUE_SPEC_V2: dict[str, ValueSpec] = {
     **SAMPLES_VALUE_SPEC,
     "reward": ValueSpec("json"),
+    "multimodal_train_inputs": ValueSpec("tensor_dict"),
 }
 
 ROLLOUT_SAMPLING_MASK_FIELDS = ("rollout_sampling_mask",)
@@ -62,11 +63,12 @@ COMPUTED_FIELDS = tuple(field for field in SAMPLES_VALUE_SPEC if field not in RO
 COMPUTED_FIELDS_V2 = tuple(field for field in SAMPLES_VALUE_SPEC_V2 if field not in ROLLOUT_SAMPLING_MASK_FIELDS)
 
 assert all(
-    spec.codec in ("tensor", "tensor_list", "sampling_mask", "json") for spec in SAMPLES_VALUE_SPEC_V2.values()
+    spec.codec in ("tensor", "tensor_list", "sampling_mask", "tensor_dict", "json")
+    for spec in SAMPLES_VALUE_SPEC_V2.values()
 ), "unknown codec in SAMPLES_VALUE_SPEC"
 
 _TENSOR_FIELDS = frozenset(field for field, spec in SAMPLES_VALUE_SPEC_V2.items() if spec.codec != "json")
-assert _TENSOR_FIELDS <= set(COMPUTED_FIELDS + ROLLOUT_SAMPLING_MASK_FIELDS)
+assert _TENSOR_FIELDS <= set(COMPUTED_FIELDS_V2 + ROLLOUT_SAMPLING_MASK_FIELDS)
 
 _SAMPLES_META_KEY = "_samples_meta"
 _OPD_STUDENT_TOP_LOGPROBS_KEY = "opd_student_top_logprobs"
@@ -97,6 +99,13 @@ def _asarray_wire(field: str, value, dtype: np.dtype) -> np.ndarray:
 # safetensors dtype names of every wire dtype in SAMPLES_VALUE_SPEC_V2 (incl. sampling-mask ids/offsets).
 # TODO: add "I16": np.int16 for #4035's int16 routed experts (past 256 experts), whichever lands second.
 _WIRE_DTYPES = {"I64": np.int64, "I32": np.int32, "U8": np.uint8, "F64": np.float64, "F32": np.float32}
+_TORCH_WIRE_DTYPES = {
+    torch.int64: np.dtype(np.int64),
+    torch.int32: np.dtype(np.int32),
+    torch.uint8: np.dtype(np.uint8),
+    torch.float64: np.dtype(np.float64),
+    torch.float32: np.dtype(np.float32),
+}
 
 
 def _load_tensor_views(payload: bytes | np.ndarray) -> dict[str, np.ndarray]:
@@ -124,6 +133,44 @@ def _load_tensor_views(payload: bytes | np.ndarray) -> dict[str, np.ndarray]:
             raise ValueError(f"invalid safetensors entry {name}: offsets {start}..{end}, shape {info['shape']}")
         tensors[name] = data[start:end].view(dtype).reshape(info["shape"])
     return tensors
+
+
+def _encode_tensor_dict(field: str, value: object, tensors: dict[str, np.ndarray], sample_index: int) -> list[str]:
+    """Pack a ``{kwarg: tensor}`` dict as one safetensors entry per key; return the key order."""
+    if not isinstance(value, dict):
+        raise TypeError(f"{field} must be a dict of tensors, got {type(value).__name__}")
+    keys = sorted(value)
+    for key in keys:
+        entry = value[key]
+        if isinstance(entry, torch.Tensor):
+            # Checked before .numpy(), which raises its own opaque TypeError on bf16/fp16.
+            _assert_wire_dtype(field, key, _TORCH_WIRE_DTYPES.get(entry.dtype))
+            # The trainer concatenates these along dim 0, so a non-contiguous view must be realized.
+            entry = entry.detach().cpu().numpy()
+        arr = np.ascontiguousarray(entry)
+        _assert_wire_dtype(field, key, arr.dtype if arr.dtype in _WIRE_DTYPES.values() else None)
+        tensors[f"{field}.{key}.{sample_index}"] = arr
+    return keys
+
+
+def _assert_wire_dtype(field: str, key: str, dtype: object) -> None:
+    if dtype is None:
+        raise ValueError(
+            f"{field}[{key!r}] has a dtype the samples wire cannot carry (supported: {sorted(_WIRE_DTYPES)})"
+        )
+
+
+def _decode_tensor_dict(
+    field: str, keys: object, tensors: dict[str, np.ndarray], sample_index: int
+) -> dict[str, torch.Tensor]:
+    """Rebuild a ``{kwarg: tensor}`` dict as torch tensors, which is what the trainer moves to the device."""
+    if not isinstance(keys, list) or not all(isinstance(key, str) for key in keys):
+        raise ValueError(f"{field} meta must be a list of key names, got {keys!r}")
+    decoded = {}
+    for key in keys:
+        arr = tensors.pop(f"{field}.{key}.{sample_index}")  # KeyError propagates: a promised tensor must exist
+        decoded[key] = torch.from_numpy(arr)
+    return decoded
 
 
 def encode_samples(
@@ -170,6 +217,10 @@ def encode_samples(
                 ids, offsets = value._as_tensors()
                 tensors[f"{field}.ids.{sample_index}"] = np.ascontiguousarray(ids.numpy())
                 tensors[f"{field}.offsets.{sample_index}"] = np.ascontiguousarray(offsets.numpy())
+                continue
+            if spec.codec == "tensor_dict":
+                # The key list goes in the meta slot the field would use if it were json-coded.
+                sample_meta[field] = _encode_tensor_dict(field, value, tensors, sample_index)
                 continue
             if spec.strict:
                 arr = np.asarray(value)
@@ -246,6 +297,9 @@ def decode_samples_and_merge_input_sample(
                 # Older producers have no candidate fields; training validates
                 # their presence when the new loss is actually selected.
                 setattr(sample, field, None)
+                continue
+            if spec.codec == "tensor_dict":
+                setattr(sample, field, _decode_tensor_dict(field, sample_meta[field], tensors, sample_index))
                 continue
             if spec.codec == "sampling_mask":
                 ids = tensors.pop(f"{field}.ids.{sample_index}")
