@@ -1218,6 +1218,7 @@ def test_get_batch_concatenates_images_in_micro_batch_order(monkeypatch):
     monkeypatch.setattr(data_rollout, "get_parallel_state", lambda: state)
     monkeypatch.setattr(context_parallel, "get_parallel_state", lambda: state)
     monkeypatch.setattr(torch.cuda, "current_device", lambda: torch.device("cpu"))
+    monkeypatch.setattr(torch.Tensor, "cuda", lambda self, *args, **kwargs: self)
     lengths = [3, 2, 4]
     rollout = {
         "tokens": [torch.full((n,), i) for i, n in enumerate(lengths)],
