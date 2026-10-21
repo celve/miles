@@ -1338,6 +1338,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             # Temporarily be JSON-serialized str, will be a real dict after using Omegaconf
             parser.add_argument("--apply-chat-template-kwargs", type=json.loads, default="{}")
             parser.add_argument(
+                "--shared-media-dir",
+                type=str,
+                default=None,
+                help="Directory shared with every SGLang engine; media that is not a file path yet is written here.",
+            )
+            parser.add_argument(
                 "--chat-template-path",
                 type=str,
                 default=None,
