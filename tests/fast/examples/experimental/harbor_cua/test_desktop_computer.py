@@ -171,18 +171,50 @@ def _image_turn(text):
     }
 
 
-@pytest.mark.parametrize(("keep", "images_sent"), [(1, 0), (2, 1), (None, 3)])
-def test_a_request_carries_at_most_keep_screenshots(tmp_path, monkeypatch, keep, images_sent):
+def _images(messages):
+    return sum(
+        part.get("type") == "image_url"
+        for m in messages
+        for part in (m["content"] if isinstance(m.get("content"), list) else [])
+    )
+
+
+_PARSE_RETRY = "Previous response had parsing errors"
+
+
+@pytest.mark.parametrize(
+    ("keep", "prompt", "carried"),
+    [
+        (1, [_image_turn("now")], 1),
+        (1, _PARSE_RETRY, 1),
+        (2, [_image_turn("now")], 2),
+        (2, _PARSE_RETRY, 2),
+        (None, [_image_turn("now")], 4),
+    ],
+)
+def test_a_request_carries_at_most_keep_screenshots(tmp_path, monkeypatch, keep, prompt, carried):
     seen = {}
 
     async def fake_query(self, chat, prompt, *args, **kwargs):
-        seen["images"] = sum(part.get("type") == "image_url" for m in chat.messages for part in m["content"])
+        seen["images"] = _images(chat.messages) + (_images(prompt) if isinstance(prompt, list) else 0)
 
     monkeypatch.setattr(Computer1, "_query_litellm", fake_query)
     chat = SimpleNamespace(messages=[_image_turn("t0"), _image_turn("t1"), _image_turn("t2")])
-    asyncio.run(_agent(tmp_path, keep_screenshots=keep)._query_litellm(chat, "next"))
+    asyncio.run(_agent(tmp_path, keep_screenshots=keep)._query_litellm(chat, prompt))
 
-    assert seen["images"] == images_sent
+    assert seen["images"] == carried
+
+
+@pytest.mark.parametrize(("latest", "history_images"), [("/logs/agent/screenshot_ep1.png", 0), (None, 1)])
+def test_the_turn_cap_fallback_carries_one_screen(tmp_path, latest, history_images):
+    agent = _agent(tmp_path, keep_screenshots=1)
+    agent._chat = SimpleNamespace(
+        messages=[_image_turn("t0"), {"role": "assistant", "content": "a"}, _image_turn("t1")]
+    )
+    agent._latest_screenshot_path = latest
+
+    assert _images(agent._fallback_message_history()) == history_images
+    assert _images(agent._chat.messages) == 2
 
 
 @pytest.mark.parametrize(

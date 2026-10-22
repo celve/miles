@@ -8,6 +8,7 @@ the session is alive.
 import asyncio
 import shlex
 from pathlib import PurePosixPath
+from types import SimpleNamespace
 from typing import Any
 
 from examples.experimental.harbor_cua.qwen_computer import Qwen3VLComputer1, Qwen3VLJsonProvider
@@ -37,6 +38,15 @@ _PROMPT_CUTS = (
     "\n  Use this to inspect a small UI area at native pixel density.",
     '\n- For "navigate": provide the destination URL in "url".',
 )
+
+
+def _images_in(prompt: Any) -> int:
+    turns = [prompt] if isinstance(prompt, dict) else prompt if isinstance(prompt, list) else []
+    return sum(
+        isinstance(part, dict) and part.get("type") == "image_url"
+        for turn in turns
+        for part in (turn.get("content") if isinstance(turn, dict) and isinstance(turn.get("content"), list) else [])
+    )
 
 
 def desktop_prompt_template(template: str) -> str:
@@ -160,8 +170,18 @@ class DesktopQwen3VLComputer1(Qwen3VLComputer1):
         )
         await self._session.start()
 
-    async def _query_litellm(self, chat: Any, prompt: Any, *args: Any, **kwargs: Any) -> Any:
-        # The new screen rides ``prompt``, so the history keeps one fewer.
+    def _trim_history(self, messages: Any, prompt_images: int) -> None:
         if self._keep_screenshots is not None:
-            self._compactor._trim_old_screenshots(chat, keep_last=self._keep_screenshots - 1)
+            keep = max(0, self._keep_screenshots - prompt_images)
+            self._compactor._trim_old_screenshots(SimpleNamespace(messages=messages), keep_last=keep)
+
+    async def _query_litellm(self, chat: Any, prompt: Any, *args: Any, **kwargs: Any) -> Any:
+        # A parse-error retry carries no screen of its own, so the history keeps the current one.
+        self._trim_history(chat.messages, _images_in(prompt))
         return await super()._query_litellm(chat, prompt, *args, **kwargs)
+
+    def _fallback_message_history(self) -> list[Any]:
+        # The turn-cap fallback sends this history with the latest screen attached whenever images are on.
+        history = super()._fallback_message_history()
+        self._trim_history(history, int(self._enable_images and self._latest_screenshot_path is not None))
+        return history
