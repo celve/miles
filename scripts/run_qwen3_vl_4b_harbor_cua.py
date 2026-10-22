@@ -32,11 +32,17 @@ Args:
         which evaluates once before the first update and every
         ``--eval-interval`` rollouts after it, so a before/after pair comes out
         of one run.
+    --rollout-path: ``generate`` records each trial through this recipe's own
+        generate function; ``session`` runs it through Miles's agent function
+        and the TITO session server with images, which assembles the samples.
+        ``--max-sandboxes``, ``--recorder-upstream`` and the OSWorld runner
+        belong to ``generate``.
 
 Usage:
     python3 scripts/run_qwen3_vl_4b_harbor_cua.py --harbor-env-type e2b
     python3 scripts/run_qwen3_vl_4b_harbor_cua.py --harbor-env-type e2b --mode rollout
     python3 scripts/run_qwen3_vl_4b_harbor_cua.py --harbor-env-type e2b --mode eval
+    python3 scripts/run_qwen3_vl_4b_harbor_cua.py --harbor-env-type e2b --rollout-path session
 """
 
 import os
@@ -46,7 +52,7 @@ from typing import Literal
 
 import typer
 
-from examples.experimental.harbor.launch_common import harbor_env_vars
+from examples.experimental.harbor.launch_common import agentic_pythonpath_dirs, agentic_train_args, harbor_env_vars
 from miles.utils.external_utils import command_utils
 
 HF_REPO = "Qwen/Qwen3-VL-4B-Instruct"
@@ -99,6 +105,8 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     recorder_advertise_host: str = ""
     history_n: int = 4
     mode: Literal["train", "rollout", "eval"] = "train"
+    rollout_path: Literal["generate", "session"] = "generate"
+    session_server_workers: int = 4
     # megatron by default because LIN-2046 measured FSDP training Qwen3-VL with linear
     # 1-D positions, so its multimodal RoPE never runs (max |logit diff| 32.72 on a
     # three-image sample) while megatron-bridge reconstructs the 3-D positions itself.
@@ -176,22 +184,31 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
         f"--global-batch-size {args.global_batch_size} "
     )
 
-    cua_args = (
-        f"--custom-generate-function-path {GENERATE_FN} "
-        f"--harbor-cua-max-turns {args.max_turns} "
-        f"--harbor-cua-max-sandboxes {args.max_sandboxes} "
-        "--harbor-cua-write-off-mode abort_group "
-        + f"--harbor-cua-upstream {args.recorder_upstream} "
-        + (
-            f"--harbor-cua-runner-url {args.osworld_runner_url} "
-            f"--harbor-cua-recorder-host {args.recorder_host} "
-            f"--harbor-cua-recorder-advertise-host {args.recorder_advertise_host} "
-            f"--harbor-cua-history-n {args.history_n} "
-            if args.osworld_runner_url
-            else ""
+    if args.rollout_path == "session":
+        cua_args = (
+            agentic_train_args(
+                tito_model="qwen3_vl", session_server_workers=args.session_server_workers, session_images=True
+            )
+            # The session server's per-sample cap, where the generate path caps by --rollout-max-context-len.
+            + "--max-seq-len 32768 "
         )
-        + ("--debug-rollout-only " if args.mode == "rollout" else "")
-    )
+    else:
+        cua_args = (
+            f"--custom-generate-function-path {GENERATE_FN} "
+            f"--harbor-cua-max-turns {args.max_turns} "
+            f"--harbor-cua-max-sandboxes {args.max_sandboxes} "
+            "--harbor-cua-write-off-mode abort_group "
+            + f"--harbor-cua-upstream {args.recorder_upstream} "
+            + (
+                f"--harbor-cua-runner-url {args.osworld_runner_url} "
+                f"--harbor-cua-recorder-host {args.recorder_host} "
+                f"--harbor-cua-recorder-advertise-host {args.recorder_advertise_host} "
+                f"--harbor-cua-history-n {args.history_n} "
+                if args.osworld_runner_url
+                else ""
+            )
+        )
+    cua_args += "--debug-rollout-only " if args.mode == "rollout" else ""
 
     eval_args = (
         f"--eval-prompt-data harbor_cua {args.data_dir}/eval.jsonl "
@@ -317,8 +334,11 @@ def _megatron_model_type(args: ScriptArgs) -> str | None:
 
 
 def _worker_env(args: ScriptArgs, harbor_env: dict[str, str]) -> dict:
+    pythonpath = [str(command_utils.repo_base_dir)]
+    if args.rollout_path == "session":
+        pythonpath = [*agentic_pythonpath_dirs(), *pythonpath]
     env = {
-        "PYTHONPATH": str(command_utils.repo_base_dir),
+        "PYTHONPATH": ":".join(pythonpath),
         # The trainer actors resolve the attention kernel through the hub cache, which is
         # read-only on some images unless this is forwarded.
         **({"HF_HOME": os.environ["HF_HOME"]} if os.environ.get("HF_HOME") else {}),
@@ -327,6 +347,8 @@ def _worker_env(args: ScriptArgs, harbor_env: dict[str, str]) -> dict:
         "AGENT_MAX_INPUT_TOKENS": os.environ.get("AGENT_MAX_INPUT_TOKENS", "32768"),
         "AGENT_MAX_OUTPUT_TOKENS": os.environ.get("AGENT_MAX_OUTPUT_TOKENS", "2048"),
     }
+    if args.rollout_path == "session":
+        env["HARBOR_AGENT_MAX_ITERATIONS"] = str(args.max_turns)
     env.update(harbor_env)
     return env
 
@@ -337,6 +359,10 @@ def main(args: ScriptArgs):
         raise typer.BadParameter(
             "--harbor-env-type is required: in-process trials need a sandbox backend the "
             "rollout worker can reach, such as e2b"
+        )
+    if args.rollout_path == "session" and args.osworld_runner_url:
+        raise typer.BadParameter(
+            "--rollout-path session runs computer-1 in the rollout worker, not the OSWorld runner"
         )
     args.agent_model_name = args.served_model_name
     harbor_env = harbor_env_vars(args)

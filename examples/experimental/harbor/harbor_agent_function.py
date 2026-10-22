@@ -51,11 +51,14 @@ Env vars (read on the rollout worker):
                          same meaning as on the agent server
   HARBOR_OVERRIDE_STORAGE_MB
                          per-sandbox disk, Harbor's ``override_storage_mb``
+  HARBOR_CUA_DESKTOP_WIDTH / HARBOR_CUA_DESKTOP_HEIGHT
+                         computer-1's desktop size (Harbor's default 1024x900)
 
 Failure semantics: a verdict is returned as-is. A trial the policy cannot have
 failed is discarded with ``InfraAbort``: one that failed before its agent
-started (``SandboxUnavailable``, ``AgentSetupFailed``), or one whose in-process
-agent lost the model service (``ServerUnreachable``). Every other episode that ends
+started (``SandboxUnavailable``, ``AgentSetupFailed``), one whose in-process
+agent lost the model service (``ServerUnreachable``), or a computer-1 trial whose
+own in-sandbox command failed mid-episode (``SandboxLost``). Every other episode that ends
 without a verdict scores 0 with a named ``exit_status`` (``TimeLimitExceeded``,
 ``SequenceLengthLimitExceeded``, ``AgentError``), matching the agent-server
 path. Configuration errors (missing task dir, bad env vars) raise instead:
@@ -132,6 +135,11 @@ class HarnessBinding:
     env: Callable[[str, str], dict[str, str]]
     # the model name Harbor passes to the harness
     model_name: Callable[[str], str] = lambda model: model
+    # the agent class Harbor builds instead of the one registered under the name
+    import_path: str | None = None
+    accepts_max_seq_len: bool = True
+    # exception types that, once the agent has started, only a lost sandbox raises
+    sandbox_loss_exceptions: frozenset[str] = frozenset()
 
 
 def _terminus_kwargs(
@@ -258,6 +266,34 @@ def _opencode_env(session_url: str, api_key: str) -> dict[str, str]:
     return {"OPENAI_BASE_URL": session_url, "OPENAI_API_BASE": session_url, "OPENAI_API_KEY": api_key}
 
 
+# Qwen3-VL clicks on a 0..999 grid whatever its prompt says; session images serve only Qwen3-VL.
+_QWEN3_VL_COMPUTER_1 = "examples.experimental.harbor_cua.qwen_computer:Qwen3VLComputer1"
+
+
+def _computer_1_kwargs(
+    session_url: str, api_key: str, sampling_params: dict[str, Any], model: str, max_seq_len: int | None
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "api_base": session_url,
+        # computer-1 would send 0.7, which the session server refuses for training.
+        "temperature": sampling_params.get("temperature"),
+        # LiteLLM sends these on every call, the compactor's included; llm_call_kwargs reaches the agent loop only.
+        "llm_kwargs": {**{k: v for k, v in sampling_params.items() if k != "temperature"}, "api_key": api_key},
+        "provider": "litellm",
+        "enable_images": True,
+    }
+    if max_turns := _env_int("HARBOR_AGENT_MAX_ITERATIONS"):
+        kwargs["max_turns"] = max_turns
+    for field, var in (("desktop_width", "HARBOR_CUA_DESKTOP_WIDTH"), ("desktop_height", "HARBOR_CUA_DESKTOP_HEIGHT")):
+        if (value := _env_int(var)) is not None:
+            kwargs[field] = value
+    return kwargs
+
+
+def _no_env(session_url: str, api_key: str) -> dict[str, str]:
+    return {}
+
+
 HARNESS_BINDINGS: dict[str, HarnessBinding] = {
     "terminus-2": HarnessBinding(kwargs=_terminus_kwargs, env=_openai_env),
     "terminus-1": HarnessBinding(kwargs=_terminus_kwargs, env=_openai_env),
@@ -269,6 +305,14 @@ HARNESS_BINDINGS: dict[str, HarnessBinding] = {
         model_name=lambda model: "/".join(_opencode_provider_model(model)),
     ),
     "mini-swe-agent": HarnessBinding(kwargs=_no_kwargs, env=_mini_swe_agent_env),
+    # Its actions' failures return to the policy as observations; an escaping runtime error is a harness command's.
+    "computer-1": HarnessBinding(
+        kwargs=_computer_1_kwargs,
+        env=_no_env,
+        import_path=_QWEN3_VL_COMPUTER_1,
+        accepts_max_seq_len=False,
+        sandbox_loss_exceptions=frozenset({"RuntimeRequestError"}),
+    ),
 }
 # Any other installed agent that speaks OpenAI chat completions.
 _DEFAULT_BINDING = HarnessBinding(kwargs=_no_kwargs, env=_openai_env)
@@ -343,14 +387,22 @@ def _environment_config():
     return EnvironmentConfig(type=env_type, delete=True, kwargs=kwargs, **overrides, **policies)
 
 
+def _agent_name(metadata: dict[str, Any]) -> str:
+    return str(metadata.get("agent_name") or "mini-swe-agent")
+
+
+def _binding(metadata: dict[str, Any]) -> HarnessBinding:
+    return HARNESS_BINDINGS.get(_agent_name(metadata), _DEFAULT_BINDING)
+
+
 def build_trial_config(metadata: dict[str, Any], session_url: str, request_kwargs: dict[str, Any]):
     from harbor.models.trial.config import AgentConfig, TaskConfig, TrialConfig, VerifierConfig
 
     tasks_dir = Path(os.environ["HARBOR_TASKS_DIR"])
-    agent_name = str(metadata.get("agent_name") or "mini-swe-agent")
+    agent_name = _agent_name(metadata)
     model = f"openai/{os.getenv('AGENT_MODEL_NAME', 'model')}"
     api_key = "dummy"
-    binding = HARNESS_BINDINGS.get(agent_name, _DEFAULT_BINDING)
+    binding = _binding(metadata)
 
     raw_max_seq_len = metadata.get("max_seq_len") or _env_int("HARBOR_MAX_SEQ_LEN")
     max_seq_len = int(raw_max_seq_len) if raw_max_seq_len is not None else None
@@ -361,7 +413,7 @@ def build_trial_config(metadata: dict[str, Any], session_url: str, request_kwarg
         "input_cost_per_token": 0.0,
         "output_cost_per_token": 0.0,
     }
-    if max_seq_len is not None:
+    if max_seq_len is not None and binding.accepts_max_seq_len:
         agent_kwargs["max_seq_len"] = max_seq_len
 
     extra: dict[str, Any] = {}
@@ -374,7 +426,9 @@ def build_trial_config(metadata: dict[str, Any], session_url: str, request_kwarg
     return TrialConfig(
         task=TaskConfig(path=_task_path(tasks_dir, str(metadata.get("instance_id", "")))),
         agent=AgentConfig(
-            name=agent_name,
+            # Harbor builds the registered class whenever the name is a registered one.
+            name=None if binding.import_path else agent_name,
+            import_path=binding.import_path,
             model_name=binding.model_name(model),
             override_timeout_sec=float(agent_timeout) if agent_timeout else None,
             env=binding.env(session_url, api_key),
@@ -444,7 +498,7 @@ def _failed(exit_status: str) -> dict[str, Any]:
     return {"reward": 0.0, "exit_status": exit_status, "eval_report": {}, "agent_metrics": {}}
 
 
-def _discard_cause(result) -> tuple[str, Any] | None:
+def _discard_cause(result, binding: HarnessBinding) -> tuple[str, Any] | None:
     """The ``InfraAbort`` exit_status, and its exception, of a trial the policy cannot have failed."""
     steps = getattr(result, "step_results", None) or []
     failures = [
@@ -462,8 +516,11 @@ def _discard_cause(result) -> tuple[str, Any] | None:
         cause = "SandboxUnavailable" if getattr(result, "agent_setup", None) is None else "AgentSetupFailed"
         return cause, failures[0]
     for exc in failures:
-        if getattr(exc, "exception_type", "") in _MODEL_SERVICE_EXCEPTIONS:
+        exc_type = getattr(exc, "exception_type", "")
+        if exc_type in _MODEL_SERVICE_EXCEPTIONS:
             return "ServerUnreachable", exc
+        if exc_type in binding.sandbox_loss_exceptions:
+            return "SandboxLost", exc
     return None
 
 
@@ -512,7 +569,7 @@ async def run(
         logger.error(f"Harbor trial for {instance_id} failed: {e}", exc_info=True)
         return _failed("AgentError")
 
-    if (discard := _discard_cause(result)) is not None:
+    if (discard := _discard_cause(result, _binding(metadata))) is not None:
         cause, exc = discard
         raise InfraAbort(cause, f"Harbor trial for {instance_id}: {exc.exception_type}: {exc.exception_message}")
 

@@ -267,6 +267,88 @@ def test_opencode_binding_remaps_the_openai_provider(tasks_dir, monkeypatch):
     assert "max_turns" not in cfg.agent.kwargs
 
 
+_SESSION_SAMPLING = {"temperature": 1.0, "top_p": 1.0, "top_k": -1, "max_tokens": 512, "stop_token_ids": [151645]}
+
+
+def _computer_1_config(**metadata):
+    return haf.build_trial_config(
+        {"instance_id": "task-1", "agent_name": "computer-1", **metadata}, "http://s/sessions/s1/v1", _SESSION_SAMPLING
+    )
+
+
+def test_computer_1_calls_the_session_from_the_worker(tasks_dir):
+    cfg = _computer_1_config()
+
+    assert cfg.agent.kwargs["api_base"] == "http://s/sessions/s1/v1"
+    assert cfg.agent.kwargs["llm_kwargs"]["api_key"] == "dummy"
+    assert cfg.agent.env == {}
+
+
+def test_computer_1_sends_miles_sampling_on_every_call(tasks_dir):
+    """The token cap rides llm_kwargs, which LiteLLM spreads into the compactor's calls as well."""
+    kwargs = _computer_1_config().agent.kwargs
+
+    assert kwargs["temperature"] == 1.0
+    assert kwargs["llm_kwargs"] == {
+        "top_p": 1.0,
+        "top_k": -1,
+        "max_tokens": 512,
+        "stop_token_ids": [151645],
+        "api_key": "dummy",
+    }
+    assert "llm_call_kwargs" not in kwargs
+
+
+def test_computer_1_leaves_an_unset_temperature_to_the_session(tasks_dir):
+    cfg = haf.build_trial_config(
+        {"instance_id": "task-1", "agent_name": "computer-1"}, "http://s/sessions/s1/v1", {"max_tokens": 64}
+    )
+
+    assert cfg.agent.kwargs["temperature"] is None
+
+
+def test_computer_1_never_receives_max_seq_len(tasks_dir, monkeypatch):
+    monkeypatch.setenv("HARBOR_MAX_SEQ_LEN", "8192")
+
+    assert "max_seq_len" not in _computer_1_config(max_seq_len=4096).agent.kwargs
+    assert "max_seq_len" not in _computer_1_config().agent.kwargs
+
+
+def test_computer_1_enables_images_on_the_generic_harness(tasks_dir):
+    kwargs = _computer_1_config().agent.kwargs
+
+    assert kwargs["enable_images"] is True
+    assert kwargs["provider"] == "litellm"
+
+
+def test_computer_1_is_built_from_the_qwen3_vl_class(tasks_dir):
+    """Harbor builds its own Computer1 whenever the config names a registered agent."""
+    cfg = _computer_1_config()
+
+    assert cfg.agent.import_path == "examples.experimental.harbor_cua.qwen_computer:Qwen3VLComputer1"
+    assert cfg.agent.name is None
+
+
+def test_computer_1_takes_its_turn_cap_and_desktop_from_the_env(tasks_dir, monkeypatch):
+    for var in ("HARBOR_AGENT_MAX_ITERATIONS", "HARBOR_CUA_DESKTOP_WIDTH", "HARBOR_CUA_DESKTOP_HEIGHT"):
+        monkeypatch.delenv(var, raising=False)
+    assert not {"max_turns", "desktop_width", "desktop_height"} & set(_computer_1_config().agent.kwargs)
+
+    monkeypatch.setenv("HARBOR_AGENT_MAX_ITERATIONS", "10")
+    monkeypatch.setenv("HARBOR_CUA_DESKTOP_WIDTH", "1280")
+    monkeypatch.setenv("HARBOR_CUA_DESKTOP_HEIGHT", "720")
+    kwargs = _computer_1_config().agent.kwargs
+
+    assert (kwargs["max_turns"], kwargs["desktop_width"], kwargs["desktop_height"]) == (10, 1280, 720)
+
+
+def test_other_bindings_keep_the_registered_class(tasks_dir):
+    cfg = haf.build_trial_config({"instance_id": "task-1", "agent_name": "terminus-2"}, "http://s/v1", {})
+
+    assert cfg.agent.name == "terminus-2"
+    assert cfg.agent.import_path is None
+
+
 @pytest.mark.parametrize(
     ("model", "expected"),
     [
@@ -428,6 +510,60 @@ def test_run_scores_a_failure_after_the_agent_started_zero(tasks_dir, fake_harbo
     out = run_async(haf.run("http://s/sessions/s1", [], {}, {"instance_id": "task-1"}))
 
     assert out["reward"] == 0.0 and out["exit_status"] == exit_status
+
+
+def test_run_discards_a_computer_1_trial_whose_own_sandbox_command_failed(tasks_dir, fake_harbor):
+    fake_harbor.result = _failed_trial("RuntimeRequestError", agent_setup=True, agent_execution=True)
+
+    with pytest.raises(InfraAbort, match="RuntimeRequestError: boom") as raised:
+        run_async(haf.run("http://s/sessions/s1", [], {}, {"instance_id": "task-1", "agent_name": "computer-1"}))
+
+    assert raised.value.exit_status == "SandboxLost"
+
+
+def test_run_scores_a_runtime_request_error_from_another_harness(tasks_dir, fake_harbor):
+    fake_harbor.result = _failed_trial("RuntimeRequestError", agent_setup=True, agent_execution=True)
+
+    out = run_async(haf.run("http://s/sessions/s1", [], {}, {"instance_id": "task-1", "agent_name": "mini-swe-agent"}))
+
+    assert out["reward"] == 0.0 and out["exit_status"] == "AgentError"
+
+
+@pytest.mark.parametrize(
+    ("exc_type", "exit_status"),
+    [
+        ("OutputLengthExceededError", "AgentError"),
+        ("ContextLengthExceededError", "AgentError"),
+        ("BadGatewayError", "AgentError"),
+        ("InternalServerError", "AgentError"),
+        ("BadRequestError", "AgentError"),
+        ("AgentTimeoutError", "TimeLimitExceeded"),
+    ],
+)
+def test_run_scores_the_computer_1_failures_the_policy_can_cause(tasks_dir, fake_harbor, exc_type, exit_status):
+    fake_harbor.result = _failed_trial(exc_type, agent_setup=True, agent_execution=True)
+
+    out = run_async(haf.run("http://s/sessions/s1", [], {}, {"instance_id": "task-1", "agent_name": "computer-1"}))
+
+    assert out["reward"] == 0.0 and out["exit_status"] == exit_status
+
+
+@pytest.mark.parametrize(
+    ("exc_type", "agent_setup", "agent_execution", "exit_status"),
+    [
+        ("RuntimeRequestError", True, False, "AgentSetupFailed"),
+        ("APIConnectionError", True, True, "ServerUnreachable"),
+    ],
+)
+def test_run_keeps_the_shared_discards_for_computer_1(
+    tasks_dir, fake_harbor, exc_type, agent_setup, agent_execution, exit_status
+):
+    fake_harbor.result = _failed_trial(exc_type, agent_setup=agent_setup, agent_execution=agent_execution)
+
+    with pytest.raises(InfraAbort) as raised:
+        run_async(haf.run("http://s/sessions/s1", [], {}, {"instance_id": "task-1", "agent_name": "computer-1"}))
+
+    assert raised.value.exit_status == exit_status
 
 
 def test_run_discards_a_multi_step_trial_whose_step_lost_the_model_service(tasks_dir, fake_harbor):
