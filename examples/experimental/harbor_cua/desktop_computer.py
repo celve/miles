@@ -92,19 +92,23 @@ class DesktopSession(Computer1Session):
             await asyncio.sleep(self._settle_sec)
         return result
 
+    def _capture_script(self, env_png: str) -> str:
+        """Shell that writes the desktop to ``env_png`` as a PNG, at ``screenshot_size`` when one is set."""
+        resize = ""
+        if self._screenshot_size is not None:
+            width, height = self._screenshot_size
+            resize = f" && convert {shlex.quote(env_png)} -resize {width}x{height}! {shlex.quote(env_png)}"
+        return f"import -window root {shlex.quote(env_png)}{resize}"
+
     async def fetch_screenshot(self, env_path: PurePosixPath | str) -> str:
         target = str(env_path)
         if PurePosixPath(target).suffix.lower() != ".png":
             raise ValueError(f"a desktop session writes PNG screenshots, not {target!r}")
         env_png = f"{_SCREENSHOT_DIR}/latest.png"
-        resize = ""
-        if self._screenshot_size is not None:
-            width, height = self._screenshot_size
-            resize = f" && convert {shlex.quote(env_png)} -resize {width}x{height}! {shlex.quote(env_png)}"
         script = (
             f"set -e; export DISPLAY={_DEFAULT_DISPLAY}; "
             f"mkdir -p {shlex.quote(_SCREENSHOT_DIR)} {shlex.quote(str(PurePosixPath(target).parent))}; "
-            f"import -window root {shlex.quote(env_png)}{resize}; "
+            f"{self._capture_script(env_png)}; "
             f"cp {shlex.quote(env_png)} {shlex.quote(target)}"
         )
         await self._exec(_bash_inline(script), timeout_sec=max(30, self._request_timeout_sec), label="screenshot")
@@ -113,6 +117,8 @@ class DesktopSession(Computer1Session):
 
 class DesktopQwen3VLComputer1(Qwen3VLComputer1):
     """``settle_sec`` waits after every screen-changing action; ``keep_screenshots`` caps the images a request carries."""
+
+    session_class: type[DesktopSession] = DesktopSession
 
     def __init__(
         self,
@@ -137,7 +143,7 @@ class DesktopQwen3VLComputer1(Qwen3VLComputer1):
 
     async def setup(self, environment: BaseEnvironment) -> None:
         geometry = self._desktop_geometry
-        self._session = DesktopSession(
+        self._session = self.session_class(
             environment=environment,
             agent_dir=self._env_io_dir,
             desktop_width=geometry.desktop_width,

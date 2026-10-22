@@ -138,12 +138,28 @@ def test_screenshots_are_shrunk_in_the_sandbox():
         asyncio.run(_session(env).fetch_screenshot("/logs/agent/screenshot_ep2.webp"))
 
 
+def test_an_image_without_imagemagick_can_bring_its_own_capture():
+    class OwnCapture(dc.DesktopSession):
+        def _capture_script(self, env_png):
+            return f"grab-screen {env_png}"
+
+    env = FakeEnvironment()
+    asyncio.run(
+        OwnCapture(environment=env, agent_dir="/logs/agent", settle_sec=0, screenshot_size=None).fetch_screenshot(
+            "/x/s.png"
+        )
+    )
+
+    assert "grab-screen /tmp/computer_1-screenshots/latest.png" in env.commands[0]
+    assert "import -window" not in env.commands[0]
+
+
 def test_setup_builds_a_desktop_session_from_the_agents_settings(tmp_path, sleeps):
     agent = _agent(tmp_path, settle_sec=1.5, screenshot_width=1280, screenshot_height=720)
     asyncio.run(agent.setup(FakeEnvironment()))
 
     session = agent._session
-    assert isinstance(session, dc.DesktopSession)
+    assert type(session) is agent.session_class is dc.DesktopSession
     assert (session._settle_sec, session._screenshot_size) == (1.5, (1280, 720))
     assert (session.geometry.window_width, session.geometry.window_height) == (1920, 1080)
 
