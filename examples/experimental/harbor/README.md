@@ -55,7 +55,7 @@ servers on the head node. On a multi-node job see the network note in
 ranges must route from the sandbox network: one
 session-server port per worker starting at `--session-server-port` (30000-30031
 for `run.py`'s 32 workers) and the SGLang router's 31000. Host-process agents
-(terminus-2) call the model from the worker and need no sandbox egress.
+(terminus-2, computer-1) call the model from the worker and need no sandbox egress.
 
 ## 3. Prepare data
 
@@ -105,6 +105,10 @@ keep the requested CPU guarantee while allowing burst capacity.
 Every remaining knob — timeouts and their layering, failure semantics, the
 full env-var reference — is documented in `harbor_agent_function.py`'s header,
 next to the code that reads it.
+
+Harbor's `computer-1` screenshot agent trains with Qwen3-VL through
+`scripts/run_qwen3_vl_4b_harbor_cua.py --rollout-path session`, which passes
+`--use-session-server v2 --use-session-images --tito-model qwen3_vl`.
 
 ## Validation
 

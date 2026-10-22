@@ -104,3 +104,14 @@ def test_agentic_wiring_is_the_shipped_wiring():
 
     for d in launch_common.agentic_pythonpath_dirs():
         assert Path(d).is_dir(), d
+
+
+def test_session_images_select_the_tree_server():
+    """A bare --use-session-server is v1, which refuses session images at startup."""
+    args = launch_common.agentic_train_args(tito_model="qwen3_vl", session_server_workers=4, session_images=True)
+    assert "--use-session-server v2 --use-session-images " in args
+    assert args.count("--use-session-server") == 1
+
+    assert "--use-session-server --session-server-port" in launch_common.agentic_train_args(
+        tito_model="qwen3", session_server_workers=4
+    )
