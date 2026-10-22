@@ -95,6 +95,13 @@ def tasks_dir(tmp_path, monkeypatch):
     monkeypatch.delenv("HARBOR_ENV_KWARGS", raising=False)
     monkeypatch.delenv("HARBOR_CPU_ENFORCEMENT_POLICY", raising=False)
     monkeypatch.delenv("HARBOR_MEMORY_ENFORCEMENT_POLICY", raising=False)
+    for var in (
+        "HARBOR_AGENT_IMPORT_PATH",
+        "HARBOR_AGENT_KWARGS",
+        "HARBOR_VERIFIER_IMPORT_PATH",
+        "HARBOR_VERIFIER_KWARGS",
+    ):
+        monkeypatch.delenv(var, raising=False)
     return tmp_path
 
 
@@ -347,6 +354,67 @@ def test_other_bindings_keep_the_registered_class(tasks_dir):
 
     assert cfg.agent.name == "terminus-2"
     assert cfg.agent.import_path is None
+
+
+@pytest.mark.parametrize("agent_name", ["computer-1", "terminus-2"])
+def test_an_agent_import_path_replaces_the_bindings_class(tasks_dir, monkeypatch, agent_name):
+    monkeypatch.setenv("HARBOR_AGENT_IMPORT_PATH", "pkg.agent:DesktopAgent")
+    cfg = haf.build_trial_config({"instance_id": "task-1", "agent_name": agent_name}, "http://s/v1", {})
+
+    assert cfg.agent.import_path == "pkg.agent:DesktopAgent"
+    assert cfg.agent.name is None
+
+
+def test_agent_kwargs_join_the_bindings_own(tasks_dir, monkeypatch):
+    monkeypatch.setenv("HARBOR_AGENT_KWARGS", '{"settle_sec": 2.0, "keep_screenshots": 1}')
+    kwargs = _computer_1_config().agent.kwargs
+
+    assert (kwargs["settle_sec"], kwargs["keep_screenshots"]) == (2.0, 1)
+    assert kwargs["api_base"] == "http://s/sessions/s1/v1"
+
+
+@pytest.mark.parametrize("owned", ["temperature", "llm_kwargs", "model_info"])
+def test_agent_kwargs_cannot_replace_what_the_binding_sets(tasks_dir, monkeypatch, owned):
+    monkeypatch.setenv("HARBOR_AGENT_KWARGS", f'{{"{owned}": 0.7}}')
+
+    with pytest.raises(ValueError, match=owned):
+        _computer_1_config()
+
+
+def test_a_verifier_class_reaches_harbor_with_its_kwargs(tasks_dir, monkeypatch):
+    monkeypatch.setenv("HARBOR_VERIFIER_IMPORT_PATH", "pkg.verify:HostVerifier")
+    monkeypatch.setenv("HARBOR_VERIFIER_KWARGS", '{"read_limit_mb": 64}')
+    monkeypatch.setenv("HARBOR_VERIFIER_TIMEOUT_SEC", "600")
+    verifier = _computer_1_config().verifier
+
+    assert (verifier.import_path, verifier.kwargs, verifier.override_timeout_sec) == (
+        "pkg.verify:HostVerifier",
+        {"read_limit_mb": 64},
+        600.0,
+    )
+
+
+def test_a_task_keeps_its_own_tests_without_a_verifier_class(tasks_dir, monkeypatch):
+    monkeypatch.delenv("HARBOR_VERIFIER_TIMEOUT_SEC", raising=False)
+    assert not hasattr(_computer_1_config(), "verifier")
+
+    monkeypatch.setenv("HARBOR_VERIFIER_TIMEOUT_SEC", "600")
+    assert _computer_1_config().verifier.import_path is None
+
+
+@pytest.mark.parametrize(
+    ("env", "match"),
+    [
+        ({"HARBOR_VERIFIER_KWARGS": '{"x": 1}'}, "HARBOR_VERIFIER_IMPORT_PATH"),
+        ({"HARBOR_AGENT_KWARGS": "[1]"}, "JSON object"),
+    ],
+)
+def test_malformed_agent_or_verifier_settings_stop_the_run(tasks_dir, monkeypatch, env, match):
+    for var, value in env.items():
+        monkeypatch.setenv(var, value)
+
+    with pytest.raises(ValueError, match=match):
+        _computer_1_config()
 
 
 @pytest.mark.parametrize(

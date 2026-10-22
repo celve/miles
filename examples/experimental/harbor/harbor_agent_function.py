@@ -53,6 +53,13 @@ Env vars (read on the rollout worker):
                          per-sandbox disk, Harbor's ``override_storage_mb``
   HARBOR_CUA_DESKTOP_WIDTH / HARBOR_CUA_DESKTOP_HEIGHT
                          computer-1's desktop size (Harbor's default 1024x900)
+  HARBOR_AGENT_IMPORT_PATH
+                         ``module:Class`` Harbor builds instead of the binding's agent
+  HARBOR_AGENT_KWARGS    JSON object added to ``AgentConfig.kwargs``; a key the
+                         binding sets is refused
+  HARBOR_VERIFIER_IMPORT_PATH / HARBOR_VERIFIER_KWARGS
+                         a Harbor verifier class, and its JSON kwargs, run in
+                         place of the task's ``tests/``
 
 Failure semantics: a verdict is returned as-is. A trial the policy cannot have
 failed is discarded with ``InfraAbort``: one that failed before its agent
@@ -110,6 +117,13 @@ def _env_int(var: str) -> int | None:
 
 def _allowed_hosts(var: str) -> list[str]:
     return [host for host in re.split(r"[,\s]+", os.getenv(var, "")) if host]
+
+
+def _env_json_object(var: str) -> dict[str, Any]:
+    value = json.loads(os.getenv(var, "") or "{}")
+    if not isinstance(value, dict):
+        raise ValueError(f"{var} must be a JSON object, got {type(value).__name__}")
+    return value
 
 
 # --- harness bindings -------------------------------------------------------
@@ -415,10 +429,24 @@ def build_trial_config(metadata: dict[str, Any], session_url: str, request_kwarg
     }
     if max_seq_len is not None and binding.accepts_max_seq_len:
         agent_kwargs["max_seq_len"] = max_seq_len
+    extra_agent_kwargs = _env_json_object("HARBOR_AGENT_KWARGS")
+    if clash := sorted(set(extra_agent_kwargs) & set(agent_kwargs)):
+        raise ValueError(f"HARBOR_AGENT_KWARGS sets {clash}, which the {agent_name} binding owns")
+    agent_kwargs.update(extra_agent_kwargs)
+    import_path = os.getenv("HARBOR_AGENT_IMPORT_PATH", "").strip() or binding.import_path
 
     extra: dict[str, Any] = {}
-    if verifier_timeout := os.getenv("HARBOR_VERIFIER_TIMEOUT_SEC"):
-        extra["verifier"] = VerifierConfig(override_timeout_sec=float(verifier_timeout))
+    verifier_timeout = os.getenv("HARBOR_VERIFIER_TIMEOUT_SEC")
+    verifier_import_path = os.getenv("HARBOR_VERIFIER_IMPORT_PATH", "").strip() or None
+    verifier_kwargs = _env_json_object("HARBOR_VERIFIER_KWARGS")
+    if verifier_kwargs and verifier_import_path is None:
+        raise ValueError("HARBOR_VERIFIER_KWARGS needs HARBOR_VERIFIER_IMPORT_PATH")
+    if verifier_timeout or verifier_import_path:
+        extra["verifier"] = VerifierConfig(
+            override_timeout_sec=float(verifier_timeout) if verifier_timeout else None,
+            import_path=verifier_import_path,
+            kwargs=verifier_kwargs,
+        )
     if build_mult := os.getenv("HARBOR_ENV_BUILD_TIMEOUT_MULTIPLIER"):
         extra["environment_build_timeout_multiplier"] = float(build_mult)
 
@@ -427,8 +455,8 @@ def build_trial_config(metadata: dict[str, Any], session_url: str, request_kwarg
         task=TaskConfig(path=_task_path(tasks_dir, str(metadata.get("instance_id", "")))),
         agent=AgentConfig(
             # Harbor builds the registered class whenever the name is a registered one.
-            name=None if binding.import_path else agent_name,
-            import_path=binding.import_path,
+            name=None if import_path else agent_name,
+            import_path=import_path,
             model_name=binding.model_name(model),
             override_timeout_sec=float(agent_timeout) if agent_timeout else None,
             env=binding.env(session_url, api_key),
