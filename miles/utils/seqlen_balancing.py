@@ -227,6 +227,14 @@ def expand_bins_by_splitting(bins: list[list[int]], target_count: int, lengths) 
         bins.append(right)
 
 
+def merge_bins_down(bins: list[list[int]], target_count: int, lengths) -> None:
+    """Shrink ``bins`` in place to ``target_count`` by merging the two bins with the fewest tokens."""
+    while len(bins) > target_count:
+        (_, first), (_, second) = sorted((sum(lengths[i] for i in b), idx) for idx, b in enumerate(bins))[:2]
+        low, high = sorted((first, second))
+        bins[low] += bins.pop(high)
+
+
 def get_reverse_idx(idx_map):
     reverse_idx_map = copy.deepcopy(idx_map)
 

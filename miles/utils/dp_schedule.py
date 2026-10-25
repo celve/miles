@@ -11,6 +11,7 @@ from miles.utils.seqlen_balancing import (
     expand_bins_by_splitting,
     first_fit_decreasing_pack,
     get_seqlen_balanced_partitions,
+    merge_bins_down,
 )
 
 logger = logging.getLogger(__name__)
@@ -118,6 +119,14 @@ def build_dp_schedule(
             target = max((len(step_micro_batches) + align_to - 1) // align_to * align_to, align_to)
             if target != len(step_micro_batches):
                 expand_bins_by_splitting(step_micro_batches, target, step_lengths)
+                # At one sample per micro-batch, merge the smallest pairs (over the cap) down to an aligned count.
+                if align_to <= len(step_micro_batches) < target:
+                    target = len(step_micro_batches) // align_to * align_to
+                    logger.info(
+                        f"dynamic path: step {step_i} holds one sample per micro-batch; merging the smallest "
+                        f"{len(step_micro_batches) - target} pair(s) to reach {target} micro-batches."
+                    )
+                    merge_bins_down(step_micro_batches, target, step_lengths)
                 assert len(step_micro_batches) == target, (
                     f"dynamic path: could only produce {len(step_micro_batches)} micro-batches after maximal "
                     f"splitting; need {target}. step {step_i} has {len(sample_indices)} samples, below the "

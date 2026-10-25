@@ -210,6 +210,29 @@ def test_dynamic_oversized_sample_lands_alone():
     assert found
 
 
+def test_dynamic_singletons_merge_smallest_down_to_alignment():
+    """No two samples fit under the cap and 9 is not a multiple of dp 4: the two smallest share a micro-batch."""
+    total_lengths = [60, 51, 70, 80, 90, 55, 65, 75, 85]
+    args = make_args(use_dynamic_batch_size=True, max_tokens_per_gpu=100)
+    tp = make_tp(dp_size=4)
+
+    partitions, mbi, nmb, _ = build_dp_schedule(
+        args, tp, total_lengths, global_batch_size=9, rollout_indices=list(range(9))
+    )
+
+    assert nmb == [2]
+    assert_invariants(
+        partitions, mbi, nmb, dp_size=4, expected_global_sample_indices=range(9), total_lengths=total_lengths
+    )
+    merged = [
+        sorted(total_lengths[partitions[r][i]] for i in micro_batch)
+        for r in range(4)
+        for micro_batch in mbi[r]
+        if len(micro_batch) > 1
+    ]
+    assert merged == [[51, 55]]
+
+
 def test_dynamic_with_vpp_rounds_to_mb_group():
     """num_microbatches per rank should be a multiple of mb_group when vpp_size > 1."""
     total_lengths = [4] * 32
