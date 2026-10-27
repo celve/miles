@@ -7,8 +7,9 @@ import torch.distributed as dist
 import torch.nn.functional as F
 
 from miles.backends.training_utils.data.context_parallel import slice_log_prob_with_cp, slice_with_cp
+from miles.backends.training_utils.data.decoded_media import DecodedImages
 from miles.backends.training_utils.data.multimodal import expand_multimodal_rollout_data_in_place
-from miles.backends.training_utils.data.token_space_media_process import compute_multimodal_train_inputs
+from miles.backends.training_utils.data.token_space_media_process import compute_multimodal_train_inputs, image_decoder
 from miles.backends.training_utils.parallel import get_parallel_state
 from miles.platforms import current_platform
 from miles.utils.audit_utils.witness.allocator import WitnessInfo
@@ -47,6 +48,14 @@ class LazyMultimodalTrainInputs(Sequence):
         self._multimodal_inputs = multimodal_inputs
         self._tokens = tokens
         self._dtype = torch.float16 if args.fp16 else torch.bfloat16
+        self._prefetch = args.multimodal_rebuild_prefetch
+        self._images = None
+        if args.multimodal_rebuild_decode_workers > 0:
+            self._images = DecodedImages(
+                image_decoder(args.hf_checkpoint, getattr(args, "sglang_mm_process_config", None)),
+                workers=args.multimodal_rebuild_decode_workers,
+                cache_bytes=args.multimodal_rebuild_cache_mb * 2**20,
+            )
 
     # Token-space ids are expanded by SGLang already, so no expansion pass has to read these.
     tokens_already_expanded = True
@@ -56,7 +65,7 @@ class LazyMultimodalTrainInputs(Sequence):
 
     def __getitem__(self, index):
         if isinstance(index, slice):
-            return [self[i] for i in range(*index.indices(len(self)))]
+            return self.get_many(range(*index.indices(len(self))))
         (mm,) = compute_multimodal_train_inputs(
             self._args.hf_checkpoint,
             # Pre-refactor args: the base engine flag; per-group overrides are not read on this branch.
@@ -64,9 +73,26 @@ class LazyMultimodalTrainInputs(Sequence):
             [self._multimodal_inputs[index]],
             [self._tokens[index]],
             device=current_platform.current_device(),
+            image_loader=self._images.get if self._images is not None else None,
         )
         # SGLang's processor returns fp32 pixels; held for every sample, they double the eager path's bf16 footprint.
         return _cast_floating(mm, self._dtype)
+
+    def _image_paths(self, indices) -> list[str]:
+        return [path for i in indices for path in (self._multimodal_inputs[i] or {}).get("images", [])]
+
+    def get_many(self, indices) -> list:
+        indices = list(indices)
+        if self._images is None:
+            return [self[i] for i in indices]
+        self._images.request(self._image_paths(indices))
+        out = [self[i] for i in indices]
+        self._images.trim(keep=set(self._image_paths(indices)))
+        return out
+
+    def prefetch(self, indices) -> None:
+        if self._prefetch and self._images is not None:
+            self._images.request(self._image_paths(indices))
 
 
 def get_rollout_data(
@@ -110,7 +136,10 @@ def get_rollout_data(
             rollout_data["multimodal_train_inputs"] = lazy
         else:
             with timer("multimodal_rebuild"):
-                rollout_data["multimodal_train_inputs"] = [lazy[i] for i in range(len(lazy))]
+                # Chunks bound the decoded images a parallel decode holds at once.
+                rollout_data["multimodal_train_inputs"] = [
+                    mm for start in range(0, len(lazy), 64) for mm in lazy.get_many(range(start, min(start + 64, len(lazy))))
+                ]
     elif "multimodal_train_inputs" in rollout_data:
         # Move multimodal training tensors to the device in advance
         rollout_data["multimodal_train_inputs"] = [
@@ -475,18 +504,27 @@ class DataIterator:
             else:
                 if self.micro_batch_indices is not None:
                     indices = self.micro_batch_indices[self.offset]
-                    batch[key] = [vals[i] for i in indices]
+                    batch[key] = vals.get_many(indices) if hasattr(vals, "get_many") else [vals[i] for i in indices]
                 else:
                     assert self.offset + self.micro_batch_size <= len(
                         vals
                     ), f"offset: {self.offset}, micro_batch_size: {self.micro_batch_size}, len(vals): {len(vals)}"
                     batch[key] = vals[self.offset : self.offset + self.micro_batch_size]
+                if hasattr(vals, "prefetch") and (next_indices := self._next_indices(len(vals))):
+                    vals.prefetch(next_indices)
 
         if self.micro_batch_indices is not None:
             self.offset += 1
         else:
             self.offset += self.micro_batch_size
         return batch
+
+    def _next_indices(self, size: int) -> list[int]:
+        if self.micro_batch_indices is not None:
+            following = self.offset + 1
+            return self.micro_batch_indices[following] if following < len(self.micro_batch_indices) else []
+        start = self.offset + self.micro_batch_size
+        return list(range(start, min(start + self.micro_batch_size, size)))
 
     def reset(self) -> "DataIterator":
         """Reset internal offset to the start and return self."""

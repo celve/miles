@@ -9,7 +9,8 @@ run on the device the engine uses, so training sees the features the rollout eng
 import asyncio
 import functools
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from typing import Any
 
 import torch
 
@@ -23,6 +24,7 @@ def compute_multimodal_train_inputs(
     tokens: Sequence[torch.Tensor],
     *,
     device: torch.device,
+    image_loader: Callable[[str], Any] | None = None,
 ) -> list[dict[str, torch.Tensor] | None]:
     """Rebuild each sample's processor tensors on the trainer from its media references and expanded tokens.
 
@@ -32,6 +34,7 @@ def compute_multimodal_train_inputs(
         multimodal_inputs: Each sample's media references, or None for a text-only sample.
         tokens: Each sample's tokens, with the media placeholders SGLang expanded.
         device: Where the image and video processors run, as on the engine, and where the tensors land.
+        image_loader: Returns an already decoded image for a path; None lets SGLang load the path itself.
 
     Returns:
         Each sample's ``multimodal_train_inputs``, or None for a text-only sample.
@@ -40,7 +43,9 @@ def compute_multimodal_train_inputs(
     processor = _token_space_processor(hf_checkpoint, json.dumps(mm_process_config or {}, sort_keys=True))
     return [
         (
-            _sample_train_inputs(processor, sample_multimodal_inputs, sample_tokens, device=device)
+            _sample_train_inputs(
+                processor, sample_multimodal_inputs, sample_tokens, device=device, image_loader=image_loader
+            )
             if sample_multimodal_inputs
             else None
         )
@@ -71,13 +76,33 @@ def _token_space_processor(hf_checkpoint: str, mm_process_config_json: str):
     )
 
 
+def image_decoder(hf_checkpoint: str, mm_process_config: dict | None) -> Callable[[str], Any]:
+    """SGLang's own image loader for this processor, so a pre-decoded image matches what SGLang would load."""
+    from sglang.srt.multimodal.modality import Modality
+
+    processor = _token_space_processor(hf_checkpoint, json.dumps(mm_process_config or {}, sort_keys=True))
+    return functools.partial(
+        type(processor)._load_single_item,
+        modality=Modality.IMAGE,
+        discard_alpha_channel=processor.strategy.discard_alpha_channel,
+    )
+
+
 def _sample_train_inputs(
-    processor, multimodal_inputs: dict[str, list[str]], tokens: torch.Tensor, *, device: torch.device
+    processor,
+    multimodal_inputs: dict[str, list[str]],
+    tokens: torch.Tensor,
+    *,
+    device: torch.device,
+    image_loader: Callable[[str], Any] | None = None,
 ):
     input_ids = tokens.tolist()
+    images = multimodal_inputs.get("images")
+    if images and image_loader is not None:
+        images = [image_loader(path) for path in images]
     batch_feature = asyncio.run(
         processor.process(
-            image_data=multimodal_inputs.get("images"),
+            image_data=images,
             video_data=multimodal_inputs.get("videos"),
             audio_data=multimodal_inputs.get("audios"),
             input_ids=input_ids,

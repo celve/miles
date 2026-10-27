@@ -1357,6 +1357,24 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "GPU memory stays bounded by the micro-batch, at the cost of one rebuild per forward pass.",
             )
             parser.add_argument(
+                "--multimodal-rebuild-decode-workers",
+                type=int,
+                default=0,
+                help="Threads that decode a rebuild's images in parallel before the processor runs; 0 lets SGLang load each sample's images itself.",
+            )
+            parser.add_argument(
+                "--multimodal-rebuild-prefetch",
+                action="store_true",
+                default=False,
+                help="Decode the next micro-batch's images while the current one computes (needs --multimodal-rebuild-decode-workers).",
+            )
+            parser.add_argument(
+                "--multimodal-rebuild-cache-mb",
+                type=int,
+                default=0,
+                help="Keep decoded images up to this many MiB across micro-batches, so a screenshot shared by samples or passes decodes once.",
+            )
+            parser.add_argument(
                 "--chat-template-path",
                 type=str,
                 default=None,
@@ -4236,6 +4254,8 @@ def miles_validate_args(args):
 
     if args.multimodal_rebuild_per_micro_batch and not args.multimodal_token_space_processing:
         raise ValueError("--multimodal-rebuild-per-micro-batch needs --multimodal-token-space-processing")
+    if (args.multimodal_rebuild_prefetch or args.multimodal_rebuild_cache_mb) and not args.multimodal_rebuild_decode_workers:
+        raise ValueError("--multimodal-rebuild-prefetch and --multimodal-rebuild-cache-mb need --multimodal-rebuild-decode-workers")
     if args.multimodal_token_space_processing:
         # SGLang registers --sglang-enable-token-space-processor only in builds with the token-space processor.
         if not hasattr(
