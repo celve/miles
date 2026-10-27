@@ -5,6 +5,7 @@ from pathlib import Path
 
 from miles.utils.data import Dataset
 from miles.utils.function_registry import load_function
+from miles.utils.media_refs import run_media_dir
 from miles.utils.processing_utils import load_processor, load_tokenizer
 from miles.utils.simple_checkpointer import load_simple_checkpoint, save_simple_checkpoint
 from miles.utils.types import Sample
@@ -74,7 +75,7 @@ class RolloutDataSource(DataSource):
                 max_length=args.rollout_max_prompt_len,
                 prompt_key=args.input_key,
                 multimodal_keys=args.multimodal_keys,
-                media_dir=args.shared_media_dir,
+                media_dir=run_media_dir(args),
                 label_key=args.label_key,
                 metadata_key=args.metadata_key,
                 tool_key=args.tool_key,

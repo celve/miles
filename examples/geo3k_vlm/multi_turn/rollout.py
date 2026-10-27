@@ -12,7 +12,7 @@ from examples.geo3k_vlm.multi_turn.base_env import BaseInteractionEnv
 # When executed as a module: python -m examples.geo3k_vlm.multi_turn.rollout
 from miles.rollout.sglang_rollout import GenerateState
 from miles.utils.http_utils import post
-from miles.utils.media_refs import load_media_for_processor, resolve_media_refs
+from miles.utils.media_refs import load_media_for_processor, resolve_media_refs, run_media_dir
 from miles.utils.types import Sample
 
 DEFAULT_ENV_MODULE = "examples.geo3k_vlm.multi_turn.env_geo3k"
@@ -215,7 +215,7 @@ def _process_env_step(env: BaseInteractionEnv, response_text: str, tokenizer, pr
             sample_metadata,
             args.apply_chat_template,
             args.apply_chat_template_kwargs,
-            args.shared_media_dir,
+            run_media_dir(args),
         )
     )
 

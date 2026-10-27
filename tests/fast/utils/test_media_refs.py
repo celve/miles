@@ -13,6 +13,7 @@ hash, the rejections, and that the Miles-side processor sees the original pixels
 import base64
 import io
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image
@@ -20,9 +21,11 @@ from PIL import Image
 from miles.utils.media_refs import (
     has_media,
     load_media_for_processor,
+    release_run_media,
     resolve_media_ref,
     resolve_media_refs,
     rollout_media_payload,
+    run_media_dir,
 )
 
 
@@ -129,3 +132,23 @@ def test_processor_loads_original_pixels_without_resizing(tmp_path):
     (image,) = loaded["images"]
     assert image.size == (37, 23) and image.mode == "RGBA"
     assert loaded["audios"] == [b"audio-bytes"]
+
+
+def test_run_media_is_written_under_the_run_and_released_without_touching_shared_paths(tmp_path):
+    shared = tmp_path / "dataset.png"
+    shared.write_bytes(_png_bytes("red"))
+    args = SimpleNamespace(shared_media_dir=str(tmp_path / "media"), run_uuid="run-1")
+
+    written = resolve_media_ref(_png_bytes("blue"), run_media_dir(args))
+    kept = resolve_media_ref(str(shared), run_media_dir(args))
+    assert Path(written).is_relative_to(tmp_path / "media" / "run-1")
+
+    release_run_media(args)
+    assert not Path(written).exists()
+    assert Path(kept).is_file()
+
+
+def test_runs_without_a_shared_media_dir_have_no_run_media():
+    args = SimpleNamespace(shared_media_dir=None, run_uuid="run-1")
+    assert run_media_dir(args) is None
+    release_run_media(args)
