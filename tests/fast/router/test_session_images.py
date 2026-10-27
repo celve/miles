@@ -84,7 +84,9 @@ def assistant(text: str) -> dict:
 class ScriptedChatBackend:
     """A mock router in front of SGLang's chat route, which attaches the messages' images to pretokenized ids."""
 
-    def __init__(self, vlm, replies: list[str], *, count_bias: int = 0, drop_images: bool = False):
+    def __init__(
+        self, vlm, replies: list[str], *, count_bias: int = 0, drop_images: bool = False, token_space: bool = False
+    ):
         self.vlm = vlm
         self.replies = replies
         # A nonzero bias makes the engine expand differently from the server, which
@@ -92,6 +94,9 @@ class ScriptedChatBackend:
         self.count_bias = count_bias
         # What an SGLang whose pretokenized chat branch drops message images does.
         self.drop_images = drop_images
+        # Rockdu's token-space SGLang attaches a pretokenized request's images only for a nonzero
+        # mm_token_expansion_start_len, and expands only the placeholders after it.
+        self.token_space = token_space
         self.calls: list[dict[str, Any]] = []
         self.paths: list[str] = []
         self.routing_keys: list[str | None] = []
@@ -162,9 +167,13 @@ class ScriptedChatBackend:
 
         index = len(self.calls) - 1
         effective = list(payload["input_ids"])
-        image_urls = self._images(payload["messages"])
+        start = payload.get("mm_token_expansion_start_len") or 0
+        image_urls = [] if self.token_space and not start else self._images(payload["messages"])
         if image_urls:
-            effective = BaseMultimodalProcessor._expand_input_ids(effective, self._counts(image_urls), self.vlm.pad_id)
+            expanded = BaseMultimodalProcessor._expand_input_ids(
+                effective[start:], self._counts(image_urls), self.vlm.pad_id
+            )
+            effective = effective[:start] + expanded
         output_ids = self._output_ids(index)
         choices = []
         for choice_index in range(payload.get("n") or 1):
@@ -257,7 +266,10 @@ def image_router(
     engine: dict | None = None,
     drop_images: bool = False,
 ):
-    backend = ScriptedChatBackend(vlm, replies, count_bias=count_bias, drop_images=drop_images)
+    token_space = bool((extra_args or {}).get("multimodal_token_space_processing"))
+    backend = ScriptedChatBackend(
+        vlm, replies, count_bias=count_bias, drop_images=drop_images, token_space=token_space
+    )
     backend.start()
     try:
         server_obj, port = build_server(image_server_args(engine, **(extra_args or {})), backend_url=backend.url)
@@ -606,8 +618,19 @@ class TestMediaRefs:
             image_call, text_call = env.backend.calls
             assert image_call["messages"][0]["content"][0] == image_part(SHOT1)
             assert image_token_runs(image_call["input_ids"], vlm.pad_id) == [1]
-            assert image_call["mm_token_expansion_start_len"] == 0
+            assert image_call["mm_token_expansion_start_len"] == image_call["input_ids"].index(vlm.pad_id)
             assert "mm_token_expansion_start_len" not in text_call
+
+    def test_a_zero_expansion_start_loses_the_images_on_a_token_space_engine(self, vlm, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "miles.rollout.session.v2.core.SessionCoreV2._image_turn_fields",
+            lambda self, input_ids: {"return_prompt_token_ids": True, "mm_token_expansion_start_len": 0},
+        )
+        with image_router(vlm, ["clicked"], extra_args=ref_args(tmp_path)) as env:
+            session_id = _create_session(env.url)
+            response = chat(env, session_id, [user_turn(SHOT1, "step 1")])
+            assert response.status_code >= 400
+            assert b"effective prompt ids differ" in response.content
 
     def test_dense_mode_sends_no_expansion_start(self, vlm):
         with image_router(vlm, ["clicked"]) as env:
