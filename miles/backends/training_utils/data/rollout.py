@@ -18,6 +18,7 @@ from miles.utils.ft_utils.process_group_utils import GeneralPGUtil
 from miles.utils.object_store import ObjectStoreGetResult
 from miles.utils.ray_utils import Box
 from miles.utils.seqlen_balancing import get_seqlen_balanced_partitions
+from miles.utils.timer import timer
 from miles.utils.types import RolloutBatch
 
 logger = logging.getLogger(__name__)
@@ -68,14 +69,15 @@ def get_rollout_data(
         ]
 
     if "multimodal_inputs" in rollout_data:
-        rollout_data["multimodal_train_inputs"] = compute_multimodal_train_inputs(
-            args.hf_checkpoint,
-            # Pre-refactor args: the base engine flag; per-group overrides are not read on this branch.
-            getattr(args, "sglang_mm_process_config", None),
-            rollout_data.pop("multimodal_inputs"),
-            rollout_data["tokens"],
-            device=current_platform.current_device(),
-        )
+        with timer("multimodal_rebuild"):
+            rollout_data["multimodal_train_inputs"] = compute_multimodal_train_inputs(
+                args.hf_checkpoint,
+                # Pre-refactor args: the base engine flag; per-group overrides are not read on this branch.
+                getattr(args, "sglang_mm_process_config", None),
+                rollout_data.pop("multimodal_inputs"),
+                rollout_data["tokens"],
+                device=current_platform.current_device(),
+            )
     elif "multimodal_train_inputs" in rollout_data:
         # Move multimodal training tensors to the device in advance
         rollout_data["multimodal_train_inputs"] = [
