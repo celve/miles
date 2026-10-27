@@ -23,7 +23,7 @@ class _RecordingProcessor:
 def test_trainer_rebuilds_tensors_without_expanding_the_rollout_tokens(monkeypatch):
     processor = _RecordingProcessor()
     monkeypatch.setattr(
-        token_space_media_process, "_token_space_processor", lambda hf_checkpoint, mm_process_config_json: processor
+        token_space_media_process, "_token_space_processor", lambda hf_checkpoint, mm_process_config_json, keep_on_device=False: processor
     )
     multimodal_inputs = [{"images": ["/shared/a.png", "/shared/b.png"]}, None]
     tokens = [torch.tensor([1, 9, 9, 9, 9, 2, 5]), torch.tensor([1, 2])]
@@ -51,7 +51,7 @@ def test_per_micro_batch_rebuild_matches_the_round_rebuild_and_skips_expansion(m
 
     processor = _RecordingProcessor()
     monkeypatch.setattr(
-        token_space_media_process, "_token_space_processor", lambda hf_checkpoint, mm_process_config_json: processor
+        token_space_media_process, "_token_space_processor", lambda hf_checkpoint, mm_process_config_json, keep_on_device=False: processor
     )
     monkeypatch.setattr(data_rollout.current_platform, "current_device", lambda: torch.device("cpu"))
     args = SimpleNamespace(
@@ -61,6 +61,7 @@ def test_per_micro_batch_rebuild_matches_the_round_rebuild_and_skips_expansion(m
         multimodal_rebuild_decode_workers=0,
         multimodal_rebuild_prefetch=False,
         multimodal_rebuild_cache_mb=0,
+        multimodal_rebuild_keep_on_device=False,
     )
     multimodal_inputs = [{"images": ["/shared/a.png"]}, None, {"images": ["/shared/b.png", "/shared/c.png"]}]
     tokens = [torch.tensor([1, 9, 2]), torch.tensor([1, 2]), torch.tensor([1, 9, 9, 2])]
@@ -106,7 +107,7 @@ def test_parallel_decode_and_prefetch_feed_the_processor_decoded_images(monkeypa
 
     processor = _RecordingProcessor()
     monkeypatch.setattr(
-        token_space_media_process, "_token_space_processor", lambda hf_checkpoint, mm_process_config_json: processor
+        token_space_media_process, "_token_space_processor", lambda hf_checkpoint, mm_process_config_json, keep_on_device=False: processor
     )
     monkeypatch.setattr(data_rollout, "image_decoder", lambda hf_checkpoint, mm_config: lambda path: SimpleNamespace(nbytes=10, path=path))
     monkeypatch.setattr(data_rollout.current_platform, "current_device", lambda: torch.device("cpu"))
@@ -117,6 +118,7 @@ def test_parallel_decode_and_prefetch_feed_the_processor_decoded_images(monkeypa
         multimodal_rebuild_decode_workers=2,
         multimodal_rebuild_prefetch=True,
         multimodal_rebuild_cache_mb=1,
+        multimodal_rebuild_keep_on_device=False,
     )
     multimodal_inputs = [{"images": ["/s/a.png", "/s/b.png"]}, {"images": ["/s/b.png", "/s/c.png"]}]
     tokens = [torch.tensor([1, 9, 9, 2]), torch.tensor([1, 9, 9, 2])]

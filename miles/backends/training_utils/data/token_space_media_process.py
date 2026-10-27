@@ -25,6 +25,7 @@ def compute_multimodal_train_inputs(
     *,
     device: torch.device,
     image_loader: Callable[[str], Any] | None = None,
+    keep_on_device: bool = False,
 ) -> list[dict[str, torch.Tensor] | None]:
     """Rebuild each sample's processor tensors on the trainer from its media references and expanded tokens.
 
@@ -35,12 +36,15 @@ def compute_multimodal_train_inputs(
         tokens: Each sample's tokens, with the media placeholders SGLang expanded.
         device: Where the image and video processors run, as on the engine, and where the tensors land.
         image_loader: Returns an already decoded image for a path; None lets SGLang load the path itself.
+        keep_on_device: Keep the processor's features on ``device`` instead of SGLang's copy to the CPU and back.
 
     Returns:
         Each sample's ``multimodal_train_inputs``, or None for a text-only sample.
     """
     # Canonical JSON so the config can key the processor cache.
-    processor = _token_space_processor(hf_checkpoint, json.dumps(mm_process_config or {}, sort_keys=True))
+    processor = _token_space_processor(
+        hf_checkpoint, json.dumps(mm_process_config or {}, sort_keys=True), keep_on_device=keep_on_device
+    )
     return [
         (
             _sample_train_inputs(
@@ -54,7 +58,7 @@ def compute_multimodal_train_inputs(
 
 
 @functools.cache
-def _token_space_processor(hf_checkpoint: str, mm_process_config_json: str):
+def _token_space_processor(hf_checkpoint: str, mm_process_config_json: str, keep_on_device: bool = False):
     # Deferred: only SGLang builds with the token-space processor provide these modules.
     from sglang.srt.multimodal.processors.processor_config import MultimodalProcessorConfig
     from sglang.srt.multimodal.token_space_mm_process.processor import TokenSpaceProcessor
@@ -71,7 +75,9 @@ def _token_space_processor(hf_checkpoint: str, mm_process_config_json: str):
         hf_config,
         hf_processor,
         processor_config=MultimodalProcessorConfig(
-            image_processor_backend="auto", mm_process_config=json.loads(mm_process_config_json)
+            image_processor_backend="auto",
+            mm_process_config=json.loads(mm_process_config_json),
+            keep_mm_features_on_device=keep_on_device,
         ),
     )
 

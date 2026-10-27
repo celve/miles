@@ -1357,6 +1357,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "GPU memory stays bounded by the micro-batch, at the cost of one rebuild per forward pass.",
             )
             parser.add_argument(
+                "--multimodal-rebuild-keep-on-device",
+                action="store_true",
+                default=False,
+                help="Keep rebuilt media features on the trainer's GPU instead of SGLang's serving-side copy to the CPU and back.",
+            )
+            parser.add_argument(
                 "--multimodal-rebuild-decode-workers",
                 type=int,
                 default=0,

@@ -74,6 +74,7 @@ class LazyMultimodalTrainInputs(Sequence):
             [self._tokens[index]],
             device=current_platform.current_device(),
             image_loader=self._images.get if self._images is not None else None,
+            keep_on_device=self._args.multimodal_rebuild_keep_on_device,
         )
         # SGLang's processor returns fp32 pixels; held for every sample, they double the eager path's bf16 footprint.
         return _cast_floating(mm, self._dtype)
