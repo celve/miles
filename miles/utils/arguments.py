@@ -2860,7 +2860,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "sends image-bearing turns through the router's chat route like text turns, and assembles "
                 "pixel_values / image_grid_thw per retained sample; with --multimodal-token-space-processing "
                 "it instead writes each retained image under --shared-media-dir and hands the trainer those "
-                "paths in multimodal_inputs. Requires --use-session-server v2, "
+                "paths in multimodal_inputs, and needs --use-miles-router. Requires --use-session-server v2, "
                 "--tito-model qwen3_vl (the model family), an SGLang whose pretokenized chat branch keeps "
                 "message images, and a checkpoint whose processor produces image grids; incompatible with the "
                 "routing and indexer replay side channels, whose per-token rows are sized on the expanded "

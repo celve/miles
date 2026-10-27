@@ -32,6 +32,12 @@ def validate_session_image_args(args) -> None:
         raise ValueError("--use-session-images requires --hf-checkpoint to load the processor")
     check_session_tito_model(args.tito_model)
     check_session_media_dir(args.multimodal_token_space_processing, args.shared_media_dir)
+    if args.multimodal_token_space_processing and not args.use_miles_router:
+        raise ValueError(
+            "--use-session-images with --multimodal-token-space-processing needs --use-miles-router: image turns "
+            "carry mm_token_expansion_start_len, which the SGLang router's chat route drops, so the engine would "
+            "drop the images and every image turn would fail the session server's expansion check"
+        )
     replays = [
         flag
         for enabled, flag in (

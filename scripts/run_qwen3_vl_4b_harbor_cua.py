@@ -40,7 +40,8 @@ Args:
     --media-refs: with ``--rollout-path session``, hand the trainer each retained
         screenshot as a file under ``--output-dir``/media instead of pixel tensors; the
         trainer rebuilds the pixels with SGLang's token-space processor, which the
-        engines' SGLang build must provide.
+        engines' SGLang build must provide. Routes through Miles's router, which
+        forwards the chat route's ``mm_token_expansion_start_len``.
 
 Usage:
     python3 scripts/run_qwen3_vl_4b_harbor_cua.py --harbor-env-type e2b
@@ -203,6 +204,7 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
                 "--multimodal-token-space-processing "
                 "--sglang-enable-token-space-processor "
                 f"--shared-media-dir {args.output_dir}/media "
+                "--use-miles-router "
             )
     else:
         cua_args = (

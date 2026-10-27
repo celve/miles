@@ -494,7 +494,12 @@ class TestMixedTextOnly:
 
 
 def ref_args(tmp_path, **extra) -> dict[str, Any]:
-    return {"multimodal_token_space_processing": True, "shared_media_dir": str(tmp_path), "run_uuid": "lin2295", **extra}
+    return {
+        "multimodal_token_space_processing": True,
+        "shared_media_dir": str(tmp_path),
+        "run_uuid": "lin2295",
+        **extra,
+    }
 
 
 def ref_bytes(sample: Sample) -> list[bytes]:
@@ -552,6 +557,25 @@ class TestMediaRefs:
             trimmed = collect(env.url, session_id, {"max_seq_len": budget})
             assert len(trimmed) == 1
             assert ref_bytes(trimmed[0]) == [SHOT1]
+
+    def test_a_rewrite_gives_each_branch_its_own_refs(self, vlm, tmp_path):
+        with image_router(vlm, ["a", "b", "c"], extra_args=ref_args(tmp_path)) as env:
+            session_id = _create_session(env.url)
+            first = [user_turn(SHOT1, "one")]
+            chat(env, session_id, first)
+            chat(env, session_id, first + [assistant("a"), user_turn(SHOT2, "two")])
+            rewritten = [
+                user_turn(None, "one"),
+                assistant("a"),
+                user_turn(SHOT2, "two"),
+                assistant("b"),
+                user_turn(SHOT1_TWIN, "three"),
+            ]
+            assert chat(env, session_id, rewritten).status_code == 200
+            samples = collect(env.url, session_id)
+            assert sorted(ref_bytes(s) for s in samples) == sorted([[SHOT1, SHOT2], [SHOT2, SHOT1_TWIN]])
+            for sample in samples:
+                assert image_token_runs(sample.tokens, vlm.pad_id) == expected_counts(vlm, ref_bytes(sample))
 
     def test_a_text_only_sample_carries_no_refs(self, vlm, tmp_path):
         extra_args = ref_args(tmp_path, session_image_text_only_samples="keep")

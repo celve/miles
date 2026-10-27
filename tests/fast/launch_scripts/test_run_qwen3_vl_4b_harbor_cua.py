@@ -60,6 +60,7 @@ def test_media_refs_hand_the_trainer_files_instead_of_pixels(monkeypatch, tmp_pa
 
     assert "--multimodal-token-space-processing --sglang-enable-token-space-processor" in command
     assert re.search(r"--shared-media-dir \S+/media ", command)
+    assert "--use-miles-router" in command
 
 
 def test_the_session_path_ships_pixels_by_default(monkeypatch, tmp_path):
@@ -67,6 +68,7 @@ def test_the_session_path_ships_pixels_by_default(monkeypatch, tmp_path):
 
     assert "--multimodal-token-space-processing" not in command
     assert "--shared-media-dir" not in command
+    assert "--use-miles-router" not in command
 
 
 def test_media_refs_refuse_the_generate_path():
