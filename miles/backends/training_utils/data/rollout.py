@@ -39,6 +39,36 @@ def _cast_floating(mm: dict[str, torch.Tensor] | None, dtype: torch.dtype) -> di
     return {key: value.to(dtype) if value.is_floating_point() else value for key, value in mm.items()}
 
 
+class LazyMultimodalTrainInputs(Sequence):
+    """Rebuilds a sample's processor tensors from its media refs each time a micro-batch indexes it, holding none."""
+
+    def __init__(self, args: Namespace, multimodal_inputs: list, tokens: list[torch.Tensor]) -> None:
+        self._args = args
+        self._multimodal_inputs = multimodal_inputs
+        self._tokens = tokens
+        self._dtype = torch.float16 if args.fp16 else torch.bfloat16
+
+    # Token-space ids are expanded by SGLang already, so no expansion pass has to read these.
+    tokens_already_expanded = True
+
+    def __len__(self) -> int:
+        return len(self._multimodal_inputs)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [self[i] for i in range(*index.indices(len(self)))]
+        (mm,) = compute_multimodal_train_inputs(
+            self._args.hf_checkpoint,
+            # Pre-refactor args: the base engine flag; per-group overrides are not read on this branch.
+            getattr(self._args, "sglang_mm_process_config", None),
+            [self._multimodal_inputs[index]],
+            [self._tokens[index]],
+            device=current_platform.current_device(),
+        )
+        # SGLang's processor returns fp32 pixels; held for every sample, they double the eager path's bf16 footprint.
+        return _cast_floating(mm, self._dtype)
+
+
 def get_rollout_data(
     args: Namespace,
     rollout_data_ref: Box,
@@ -75,19 +105,12 @@ def get_rollout_data(
         ]
 
     if "multimodal_inputs" in rollout_data:
-        with timer("multimodal_rebuild"):
-            rollout_data["multimodal_train_inputs"] = compute_multimodal_train_inputs(
-                args.hf_checkpoint,
-                # Pre-refactor args: the base engine flag; per-group overrides are not read on this branch.
-                getattr(args, "sglang_mm_process_config", None),
-                rollout_data.pop("multimodal_inputs"),
-                rollout_data["tokens"],
-                device=current_platform.current_device(),
-            )
-            # SGLang's processor returns fp32 pixels; held for every sample, they double the eager path's bf16 footprint.
-            rollout_data["multimodal_train_inputs"] = [
-                _cast_floating(mm, torch.float16 if args.fp16 else torch.bfloat16) for mm in rollout_data["multimodal_train_inputs"]
-            ]
+        lazy = LazyMultimodalTrainInputs(args, rollout_data.pop("multimodal_inputs"), rollout_data["tokens"])
+        if args.multimodal_rebuild_per_micro_batch:
+            rollout_data["multimodal_train_inputs"] = lazy
+        else:
+            with timer("multimodal_rebuild"):
+                rollout_data["multimodal_train_inputs"] = [lazy[i] for i in range(len(lazy))]
     elif "multimodal_train_inputs" in rollout_data:
         # Move multimodal training tensors to the device in advance
         rollout_data["multimodal_train_inputs"] = [

@@ -1350,6 +1350,13 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="SGLang expands media placeholders and the trainer builds the processor inputs (models with an SGLang token-space strategy).",
             )
             parser.add_argument(
+                "--multimodal-rebuild-per-micro-batch",
+                action="store_true",
+                default=False,
+                help="With --multimodal-token-space-processing, rebuild media tensors per micro-batch instead of once per round: "
+                "GPU memory stays bounded by the micro-batch, at the cost of one rebuild per forward pass.",
+            )
+            parser.add_argument(
                 "--chat-template-path",
                 type=str,
                 default=None,
@@ -4227,6 +4234,8 @@ def miles_validate_args(args):
     _resolve_event_logging(args)
     _resolve_sample_ownership_check(args)
 
+    if args.multimodal_rebuild_per_micro_batch and not args.multimodal_token_space_processing:
+        raise ValueError("--multimodal-rebuild-per-micro-batch needs --multimodal-token-space-processing")
     if args.multimodal_token_space_processing:
         # SGLang registers --sglang-enable-token-space-processor only in builds with the token-space processor.
         if not hasattr(
