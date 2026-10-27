@@ -33,6 +33,12 @@ def _rollout_logprob_dtype(args: Namespace) -> torch.dtype:
     return torch.float32
 
 
+def _cast_floating(mm: dict[str, torch.Tensor] | None, dtype: torch.dtype) -> dict[str, torch.Tensor] | None:
+    if mm is None:
+        return None
+    return {key: value.to(dtype) if value.is_floating_point() else value for key, value in mm.items()}
+
+
 def get_rollout_data(
     args: Namespace,
     rollout_data_ref: Box,
@@ -78,6 +84,10 @@ def get_rollout_data(
                 rollout_data["tokens"],
                 device=current_platform.current_device(),
             )
+            # SGLang's processor returns fp32 pixels; held for every sample, they double the eager path's bf16 footprint.
+            rollout_data["multimodal_train_inputs"] = [
+                _cast_floating(mm, torch.float16 if args.fp16 else torch.bfloat16) for mm in rollout_data["multimodal_train_inputs"]
+            ]
     elif "multimodal_train_inputs" in rollout_data:
         # Move multimodal training tensors to the device in advance
         rollout_data["multimodal_train_inputs"] = [
