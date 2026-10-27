@@ -30,6 +30,8 @@ def make_session_server_config(**overrides: Any) -> SessionServerConfig:
         use_session_images=False,
         session_image_engine_settings=None,
         session_image_text_only_samples="drop",
+        multimodal_token_space_processing=False,
+        run_media_dir=None,
         session_message_matcher="strict",
         pause_generation_mode=None,
         session_sample_picker_path=None,

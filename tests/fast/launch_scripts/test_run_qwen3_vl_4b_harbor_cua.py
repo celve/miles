@@ -53,3 +53,24 @@ def test_the_session_path_refuses_the_osworld_runner():
 
     with pytest.raises(typer.BadParameter, match="OSWorld runner"):
         launcher.main(harbor_env_type="e2b", rollout_path="session", osworld_runner_url="http://kvm:8000")
+
+
+def test_media_refs_hand_the_trainer_files_instead_of_pixels(monkeypatch, tmp_path):
+    command, _ = _train_command(monkeypatch, tmp_path, rollout_path="session", media_refs=True)
+
+    assert "--multimodal-token-space-processing --sglang-enable-token-space-processor" in command
+    assert re.search(r"--shared-media-dir \S+/media ", command)
+
+
+def test_the_session_path_ships_pixels_by_default(monkeypatch, tmp_path):
+    command, _ = _train_command(monkeypatch, tmp_path, rollout_path="session")
+
+    assert "--multimodal-token-space-processing" not in command
+    assert "--shared-media-dir" not in command
+
+
+def test_media_refs_refuse_the_generate_path():
+    launcher = import_launch_script(LAUNCHER)
+
+    with pytest.raises(typer.BadParameter, match="--rollout-path session only"):
+        launcher.main(harbor_env_type="e2b", media_refs=True)

@@ -1,5 +1,6 @@
 from typing import Any
 
+from miles.utils.media_refs import run_media_dir
 from miles.utils.pydantic_utils import FrozenStrictBaseModel
 
 
@@ -27,6 +28,8 @@ class SessionServerConfig(FrozenStrictBaseModel):
     use_session_images: bool
     session_image_engine_settings: dict[str, Any] | None
     session_image_text_only_samples: str
+    multimodal_token_space_processing: bool
+    run_media_dir: str | None
     session_message_matcher: str
     pause_generation_mode: str | None
     session_sample_picker_path: str | None
@@ -63,6 +66,8 @@ def compute_session_server_config(
         use_session_images=getattr(args, "use_session_images", False),
         session_image_engine_settings=getattr(args, "session_image_engine_settings", None),
         session_image_text_only_samples=getattr(args, "session_image_text_only_samples", "drop"),
+        multimodal_token_space_processing=getattr(args, "multimodal_token_space_processing", False),
+        run_media_dir=run_media_dir(args) if getattr(args, "shared_media_dir", None) is not None else None,
         session_message_matcher=getattr(args, "session_message_matcher", "strict"),
         pause_generation_mode=getattr(args, "pause_generation_mode", None),
         session_sample_picker_path=getattr(args, "session_sample_picker_path", None),

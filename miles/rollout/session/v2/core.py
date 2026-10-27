@@ -184,7 +184,7 @@ class SessionCoreV2(SessionCore):
             # orjson: the body carries the whole prompt's input_ids on every turn. An image turn asks
             # for the engine's expanded ids whatever the client sent, because the per-turn check needs them.
             proxy_body = orjson.dumps(
-                {**request_body, "return_prompt_token_ids": True} if prepared.has_images else request_body
+                {**request_body, **self._image_turn_fields()} if prepared.has_images else request_body
             )
         # --- lock released ---
 
@@ -240,6 +240,13 @@ class SessionCoreV2(SessionCore):
         # --- lock released ---
 
         return _chat_client_response(result, response, response_intent)
+
+    def _image_turn_fields(self) -> dict:
+        fields = {"return_prompt_token_ids": True}
+        if self.config.multimodal_token_space_processing:
+            # A token-space engine keeps an input_ids chat request's images only with this field; 0 expands them all.
+            fields["mm_token_expansion_start_len"] = 0
+        return fields
 
     def _check_engine_expansion(self, response: dict, request_body: dict, prepared) -> None:
         choices = response.get("choices") or [{}]

@@ -23,6 +23,8 @@ def _image_args(tmp_path=None, yaml_text: str | None = None, **overrides) -> Nam
         use_rollout_routing_replay=False,
         use_rollout_indexer_replay=False,
         rollout_external=False,
+        multimodal_token_space_processing=False,
+        shared_media_dir=None,
         sglang_revision=None,
         sglang_tokenizer_path=None,
         sglang_mm_process_config=None,
@@ -63,6 +65,13 @@ class TestSessionImageEngine:
         args = _image_args(use_session_images=False, rollout_external=True)
         validate_session_image_args(args)
         assert args.session_image_engine_settings is None
+
+    def test_media_refs_need_a_shared_media_dir(self):
+        with pytest.raises(ValueError, match="--shared-media-dir"):
+            validate_session_image_args(_image_args(multimodal_token_space_processing=True))
+
+    def test_media_refs_with_a_shared_media_dir_start(self, tmp_path):
+        validate_session_image_args(_image_args(multimodal_token_space_processing=True, shared_media_dir=str(tmp_path)))
 
     def test_a_base_flag_is_checked(self):
         with pytest.raises(ValueError, match="mm_process_config"):

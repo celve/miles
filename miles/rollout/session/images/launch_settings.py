@@ -31,6 +31,7 @@ def validate_session_image_args(args) -> None:
     if not args.hf_checkpoint:
         raise ValueError("--use-session-images requires --hf-checkpoint to load the processor")
     check_session_tito_model(args.tito_model)
+    check_session_media_dir(args.multimodal_token_space_processing, args.shared_media_dir)
     replays = [
         flag
         for enabled, flag in (
@@ -54,6 +55,14 @@ def check_session_tito_model(tito_model: str) -> None:
             f"--use-session-images requires --tito-model {TITOTokenizerType.QWEN3_VL.value}, got "
             f"{tito_model!r}: 'default' drops the newline Qwen3-VL's template puts after every <|im_end|>, and "
             "'qwen3' renders Qwen3's text template, which has no image parts"
+        )
+
+
+def check_session_media_dir(multimodal_token_space_processing: bool, media_dir: str | None) -> None:
+    if multimodal_token_space_processing and not media_dir:
+        raise ValueError(
+            "--use-session-images with --multimodal-token-space-processing hands the trainer each retained "
+            "image as a file, so it needs --shared-media-dir on a filesystem the trainers mount"
         )
 
 
