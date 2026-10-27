@@ -71,7 +71,7 @@ def convert_samples_to_train_data(
     Convert inference generated samples to training data.
     """
     if (f := custom_convert_samples_to_train_data_func) is not None:
-        return f(args, samples)
+        return _refuse_dense_alongside_refs(f(args, samples))
 
     raw_rewards, rewards = _post_process_rewards(
         args,
@@ -207,6 +207,16 @@ def convert_samples_to_train_data(
     if x is not None:
         train_data["dynamic_global_batch_size"] = x
 
+    return _refuse_dense_alongside_refs(train_data)
+
+
+def _refuse_dense_alongside_refs(train_data: dict) -> dict:
+    # Trainers rebuild tensors from the refs, so dense tensors shipped too would only cost the hand-off they replace.
+    if "multimodal_inputs" in train_data and "multimodal_train_inputs" in train_data:
+        raise ValueError(
+            "train data carries both media references and dense multimodal_train_inputs; with "
+            "--multimodal-token-space-processing a sample builder must leave multimodal_train_inputs unset"
+        )
     return train_data
 
 
