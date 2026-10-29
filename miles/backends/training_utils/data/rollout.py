@@ -1,3 +1,4 @@
+import functools
 import logging
 from argparse import Namespace
 from collections.abc import Sequence
@@ -34,6 +35,11 @@ def _rollout_logprob_dtype(args: Namespace) -> torch.dtype:
     return torch.float32
 
 
+def _use_device(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.set_device(device)
+
+
 def _cast_floating(mm: dict[str, torch.Tensor] | None, dtype: torch.dtype) -> dict[str, torch.Tensor] | None:
     if mm is None:
         return None
@@ -55,6 +61,8 @@ class LazyMultimodalTrainInputs(Sequence):
                 image_decoder(args.hf_checkpoint, getattr(args, "sglang_mm_process_config", None)),
                 workers=args.multimodal_rebuild_decode_workers,
                 cache_bytes=args.multimodal_rebuild_cache_mb * 2**20,
+                # A new thread starts on cuda:0; SGLang's GPU JPEG decode must land on this rank's device instead.
+                thread_initializer=functools.partial(_use_device, current_platform.current_device()),
             )
 
     # Token-space ids are expanded by SGLang already, so no expansion pass has to read these.

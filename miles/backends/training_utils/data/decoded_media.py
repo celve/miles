@@ -22,9 +22,18 @@ class DecodedImages:
     finished decodes, never one in ``keep``, so in-flight and prefetched micro-batches survive a zero-byte cache.
     """
 
-    def __init__(self, decode: Callable[[str], Any], *, workers: int, cache_bytes: int) -> None:
+    def __init__(
+        self,
+        decode: Callable[[str], Any],
+        *,
+        workers: int,
+        cache_bytes: int,
+        thread_initializer: Callable[[], None] | None = None,
+    ) -> None:
         self._decode = decode
-        self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="miles-media-decode")
+        self._pool = ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="miles-media-decode", initializer=thread_initializer
+        )
         # A round's rebuild owns one pool; stop its threads when the round's data is dropped.
         weakref.finalize(self, self._pool.shutdown, wait=False, cancel_futures=True)
         self._cache_bytes = cache_bytes

@@ -134,3 +134,18 @@ def test_parallel_decode_and_prefetch_feed_the_processor_decoded_images(monkeypa
         ["/s/b.png", "/s/c.png"],
     ]
     assert lazy._images.decodes == 3
+
+
+def test_decode_threads_run_the_initializer_before_decoding():
+    import threading
+
+    from miles.backends.training_utils.data.decoded_media import DecodedImages
+
+    initialized = set()
+    images = DecodedImages(
+        lambda path: (threading.get_ident() in initialized, torch.zeros(1)),
+        workers=2,
+        cache_bytes=0,
+        thread_initializer=lambda: initialized.add(threading.get_ident()),
+    )
+    assert images.get("a")[0] and images.get("b")[0]
