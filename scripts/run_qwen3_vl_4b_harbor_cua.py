@@ -37,12 +37,18 @@ Args:
         and the TITO session server with images, which assembles the samples.
         ``--max-sandboxes``, ``--recorder-upstream`` and the OSWorld runner
         belong to ``generate``.
+    --media-refs: with ``--rollout-path session``, hand the trainer each retained
+        screenshot as a file under ``--output-dir``/media instead of pixel tensors; the
+        trainer rebuilds the pixels with SGLang's token-space processor, which the
+        engines' SGLang build must provide. Routes through Miles's router, which
+        forwards the chat route's ``mm_token_expansion_start_len``.
 
 Usage:
     python3 scripts/run_qwen3_vl_4b_harbor_cua.py --harbor-env-type e2b
     python3 scripts/run_qwen3_vl_4b_harbor_cua.py --harbor-env-type e2b --mode rollout
     python3 scripts/run_qwen3_vl_4b_harbor_cua.py --harbor-env-type e2b --mode eval
     python3 scripts/run_qwen3_vl_4b_harbor_cua.py --harbor-env-type e2b --rollout-path session
+    python3 scripts/run_qwen3_vl_4b_harbor_cua.py --harbor-env-type e2b --rollout-path session --media-refs
 """
 
 import os
@@ -107,6 +113,7 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     mode: Literal["train", "rollout", "eval"] = "train"
     rollout_path: Literal["generate", "session"] = "generate"
     session_server_workers: int = 4
+    media_refs: bool = False
     # megatron by default because LIN-2046 measured FSDP training Qwen3-VL with linear
     # 1-D positions, so its multimodal RoPE never runs (max |logit diff| 32.72 on a
     # three-image sample) while megatron-bridge reconstructs the 3-D positions itself.
@@ -192,6 +199,13 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
             # The session server's per-sample cap, where the generate path caps by --rollout-max-context-len.
             + "--max-seq-len 32768 "
         )
+        if args.media_refs:
+            cua_args += (
+                "--multimodal-token-space-processing "
+                "--sglang-enable-token-space-processor "
+                f"--shared-media-dir {args.output_dir}/media "
+                "--use-miles-router "
+            )
     else:
         cua_args = (
             f"--custom-generate-function-path {GENERATE_FN} "
@@ -364,6 +378,8 @@ def main(args: ScriptArgs):
         raise typer.BadParameter(
             "--rollout-path session runs computer-1 in the rollout worker, not the OSWorld runner"
         )
+    if args.media_refs and args.rollout_path != "session":
+        raise typer.BadParameter("--media-refs is implemented for --rollout-path session only")
     args.agent_model_name = args.served_model_name
     harbor_env = harbor_env_vars(args)
     if not args.skip_prepare:

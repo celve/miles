@@ -90,7 +90,7 @@ def build_leaf_material(
             sample = merge_samples_with_addition_r3(args, turns, records, registry.tokenizer)
         else:
             sample = merge_samples(turns, registry.tokenizer)
-        if registry.image_processor is not None and not _add_pixels_or_drop(
+        if registry.image_processor is not None and not _add_images_or_drop(
             sample, leaf, leaf_counts, state, registry
         ):
             continue
@@ -157,7 +157,7 @@ def _expanded_path(
     return expanded_records, expand_input_ids(leaf.token_ids, leaf_counts, placeholder_id), leaf_counts
 
 
-def _add_pixels_or_drop(
+def _add_images_or_drop(
     sample: Sample,
     leaf: TrajectoryNode,
     leaf_counts: list[int],
@@ -185,8 +185,10 @@ def _add_pixels_or_drop(
             )
             return False
         return True
-    processed = image_processor.compute_pixels(
-        list(leaf.images.image_ids[:retained]), leaf_counts[:retained], state.session_images
-    )
+    image_ids = list(leaf.images.image_ids[:retained])
+    if image_processor.media_dir is not None:
+        sample.multimodal_inputs = {"images": image_processor.write_media_refs(image_ids, state.session_images)}
+        return True
+    processed = image_processor.compute_pixels(image_ids, leaf_counts[:retained], state.session_images)
     sample.multimodal_train_inputs = merge_train_inputs(processed)
     return True

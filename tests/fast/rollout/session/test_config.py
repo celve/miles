@@ -27,6 +27,7 @@ _ARGS_TO_CONFIG_FIELD = {
     "use_session_images": "use_session_images",
     "session_image_engine_settings": "session_image_engine_settings",
     "session_image_text_only_samples": "session_image_text_only_samples",
+    "multimodal_token_space_processing": "multimodal_token_space_processing",
     "session_message_matcher": "session_message_matcher",
     "pause_generation_mode": "pause_generation_mode",
     "session_sample_picker_path": "session_sample_picker_path",
@@ -37,6 +38,7 @@ _ARGS_TO_CONFIG_FIELD = {
 }
 
 _CALL_SITE_FIELDS = ("host", "port", "instance_id", "backend_url")
+_DERIVED_FIELDS = ("run_media_dir",)
 _OPTIONAL_ARGS_ATTRS = (
     "num_layers",
     "pause_generation_mode",
@@ -66,6 +68,9 @@ _DISTINCT_ARGS_VALUES = dict(
     use_session_images=True,
     session_image_engine_settings={"model_path": "/fake/ckpt", "image_processor_backend": "auto"},
     session_image_text_only_samples="keep",
+    multimodal_token_space_processing=True,
+    shared_media_dir="/fake/media",
+    run_uuid="fakerun",
     session_message_matcher="fake.matcher",
     pause_generation_mode="in_place",
     session_sample_picker_path="fake.picker",
@@ -85,7 +90,7 @@ def _make_args(**overrides) -> Namespace:
 class TestComputeSessionServerConfig:
     def test_every_config_field_has_a_known_source(self):
         """Adding a config field without extending this test's mapping must fail here."""
-        covered = set(_CALL_SITE_FIELDS) | set(_ARGS_TO_CONFIG_FIELD.values())
+        covered = set(_CALL_SITE_FIELDS) | set(_DERIVED_FIELDS) | set(_ARGS_TO_CONFIG_FIELD.values())
         assert covered == set(SessionServerConfig.model_fields)
 
     def test_call_site_fields_are_copied(self):
@@ -105,6 +110,18 @@ class TestComputeSessionServerConfig:
             _make_args(), host="10.0.0.1", port=5001, instance_id="abc", backend_url="http://10.0.0.2:3000"
         )
         assert getattr(config, config_field) == _DISTINCT_ARGS_VALUES[args_attr]
+
+    def test_the_run_media_dir_is_this_runs_directory_under_the_shared_one(self):
+        config = compute_session_server_config(
+            _make_args(), host="10.0.0.1", port=5001, instance_id="abc", backend_url="http://10.0.0.2:3000"
+        )
+        assert config.run_media_dir == "/fake/media/fakerun"
+
+    def test_no_shared_media_dir_means_no_run_media_dir(self):
+        config = compute_session_server_config(
+            _make_args(shared_media_dir=None), host="10.0.0.1", port=5001, instance_id="abc", backend_url="http://x"
+        )
+        assert config.run_media_dir is None
 
     @pytest.mark.parametrize("flag_value", [True, False])
     def test_a_boolean_session_server_flag_reaches_the_config_unchanged(self, flag_value: bool):
@@ -160,6 +177,8 @@ _COMPLETE_CONFIG_KWARGS = dict(
     use_session_images=False,
     session_image_engine_settings=None,
     session_image_text_only_samples="drop",
+    multimodal_token_space_processing=False,
+    run_media_dir=None,
     session_message_matcher="strict",
     pause_generation_mode=None,
     session_sample_picker_path=None,

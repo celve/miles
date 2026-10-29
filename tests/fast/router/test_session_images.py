@@ -15,11 +15,13 @@ import base64
 import io
 import uuid
 from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import requests
+import safetensors.numpy
 import torch
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -82,7 +84,9 @@ def assistant(text: str) -> dict:
 class ScriptedChatBackend:
     """A mock router in front of SGLang's chat route, which attaches the messages' images to pretokenized ids."""
 
-    def __init__(self, vlm, replies: list[str], *, count_bias: int = 0, drop_images: bool = False):
+    def __init__(
+        self, vlm, replies: list[str], *, count_bias: int = 0, drop_images: bool = False, token_space: bool = False
+    ):
         self.vlm = vlm
         self.replies = replies
         # A nonzero bias makes the engine expand differently from the server, which
@@ -90,6 +94,9 @@ class ScriptedChatBackend:
         self.count_bias = count_bias
         # What an SGLang whose pretokenized chat branch drops message images does.
         self.drop_images = drop_images
+        # Rockdu's token-space SGLang attaches a pretokenized request's images only for a nonzero
+        # mm_token_expansion_start_len, and expands only the placeholders after it.
+        self.token_space = token_space
         self.calls: list[dict[str, Any]] = []
         self.paths: list[str] = []
         self.routing_keys: list[str | None] = []
@@ -160,9 +167,13 @@ class ScriptedChatBackend:
 
         index = len(self.calls) - 1
         effective = list(payload["input_ids"])
-        image_urls = self._images(payload["messages"])
+        start = payload.get("mm_token_expansion_start_len") or 0
+        image_urls = [] if self.token_space and not start else self._images(payload["messages"])
         if image_urls:
-            effective = BaseMultimodalProcessor._expand_input_ids(effective, self._counts(image_urls), self.vlm.pad_id)
+            expanded = BaseMultimodalProcessor._expand_input_ids(
+                effective[start:], self._counts(image_urls), self.vlm.pad_id
+            )
+            effective = effective[:start] + expanded
         output_ids = self._output_ids(index)
         choices = []
         for choice_index in range(payload.get("n") or 1):
@@ -255,7 +266,10 @@ def image_router(
     engine: dict | None = None,
     drop_images: bool = False,
 ):
-    backend = ScriptedChatBackend(vlm, replies, count_bias=count_bias, drop_images=drop_images)
+    token_space = bool((extra_args or {}).get("multimodal_token_space_processing"))
+    backend = ScriptedChatBackend(
+        vlm, replies, count_bias=count_bias, drop_images=drop_images, token_space=token_space
+    )
     backend.start()
     try:
         server_obj, port = build_server(image_server_args(engine, **(extra_args or {})), backend_url=backend.url)
@@ -489,6 +503,145 @@ class TestMixedTextOnly:
             session_id = _create_session(env.url)
             assert chat(env, session_id, [user_turn(None, "no pictures")]).status_code == 200
             assert "return_prompt_token_ids" not in env.backend.calls[0]
+
+
+def ref_args(tmp_path, **extra) -> dict[str, Any]:
+    return {
+        "multimodal_token_space_processing": True,
+        "shared_media_dir": str(tmp_path),
+        "run_uuid": "lin2295",
+        **extra,
+    }
+
+
+def ref_bytes(sample: Sample) -> list[bytes]:
+    return [Path(path).read_bytes() for path in sample.multimodal_inputs["images"]]
+
+
+class TestMediaRefs:
+    """With --multimodal-token-space-processing a sample carries shared-file refs and the trainer builds the pixels."""
+
+    def test_refs_follow_occurrence_order_and_hold_the_clients_bytes(self, vlm, tmp_path):
+        with image_router(vlm, ["a", "b"], extra_args=ref_args(tmp_path)) as env:
+            session_id = _create_session(env.url)
+            first = [user_turn(SHOT1, "one")]
+            chat(env, session_id, first)
+            chat(env, session_id, first + [assistant("a"), user_turn(SHOT2, "two")])
+            sample = collect(env.url, session_id)[0]
+            assert ref_bytes(sample) == [SHOT1, SHOT2]
+            assert all(path.startswith(str(tmp_path.resolve())) for path in sample.multimodal_inputs["images"])
+            assert sample.multimodal_train_inputs is None
+            assert image_token_runs(sample.tokens, vlm.pad_id) == expected_counts(vlm, [SHOT1, SHOT2])
+
+    def test_the_tokens_and_masks_match_the_dense_sample(self, vlm, tmp_path):
+        def run(extra_args):
+            with image_router(vlm, ["a", "b"], extra_args=extra_args) as env:
+                session_id = _create_session(env.url)
+                first = [user_turn(SHOT1, "one")]
+                chat(env, session_id, first)
+                chat(env, session_id, first + [assistant("a"), user_turn(SHOT2, "two")])
+                return collect(env.url, session_id)[0]
+
+        dense, refs = run(None), run(ref_args(tmp_path))
+        assert refs.tokens == dense.tokens
+        assert refs.loss_mask == dense.loss_mask
+        assert refs.rollout_log_probs == dense.rollout_log_probs
+        assert refs.response_length == dense.response_length
+
+    def test_a_repeated_screenshot_is_two_refs_to_one_file(self, vlm, tmp_path):
+        with image_router(vlm, ["a", "b"], extra_args=ref_args(tmp_path)) as env:
+            session_id = _create_session(env.url)
+            first = [user_turn(SHOT1, "one")]
+            chat(env, session_id, first)
+            chat(env, session_id, first + [assistant("a"), user_turn(SHOT1, "again")])
+            refs = collect(env.url, session_id)[0].multimodal_inputs["images"]
+            assert len(refs) == 2 and refs[0] == refs[1]
+            assert len([path for path in tmp_path.rglob("*") if path.is_file()]) == 1
+
+    def test_a_cut_inside_an_image_drops_that_ref(self, vlm, tmp_path):
+        with image_router(vlm, ["a", "b"], extra_args=ref_args(tmp_path)) as env:
+            session_id = _create_session(env.url)
+            first = [user_turn(SHOT1, "one")]
+            chat(env, session_id, first)
+            chat(env, session_id, first + [assistant("a"), user_turn(SHOT2, "two")])
+            whole = collect(env.url, session_id)[0]
+            budget = len(whole.tokens) - expected_counts(vlm, [SHOT1, SHOT2])[1] // 2
+            trimmed = collect(env.url, session_id, {"max_seq_len": budget})
+            assert len(trimmed) == 1
+            assert ref_bytes(trimmed[0]) == [SHOT1]
+
+    def test_a_rewrite_gives_each_branch_its_own_refs(self, vlm, tmp_path):
+        with image_router(vlm, ["a", "b", "c"], extra_args=ref_args(tmp_path)) as env:
+            session_id = _create_session(env.url)
+            first = [user_turn(SHOT1, "one")]
+            chat(env, session_id, first)
+            chat(env, session_id, first + [assistant("a"), user_turn(SHOT2, "two")])
+            rewritten = [
+                user_turn(None, "one"),
+                assistant("a"),
+                user_turn(SHOT2, "two"),
+                assistant("b"),
+                user_turn(SHOT1_TWIN, "three"),
+            ]
+            assert chat(env, session_id, rewritten).status_code == 200
+            samples = collect(env.url, session_id)
+            assert sorted(ref_bytes(s) for s in samples) == sorted([[SHOT1, SHOT2], [SHOT2, SHOT1_TWIN]])
+            for sample in samples:
+                assert image_token_runs(sample.tokens, vlm.pad_id) == expected_counts(vlm, ref_bytes(sample))
+
+    def test_a_text_only_sample_carries_no_refs(self, vlm, tmp_path):
+        extra_args = ref_args(tmp_path, session_image_text_only_samples="keep")
+        with image_router(vlm, ["a", "summary"], extra_args=extra_args) as env:
+            session_id = _create_session(env.url)
+            assert chat(env, session_id, [user_turn(SHOT1, "look")]).status_code == 200
+            assert chat(env, session_id, [user_turn(None, "summarize")]).status_code == 200
+            samples = collect(env.url, session_id)
+            assert len(samples) == 2
+            text_only = [s for s in samples if s.multimodal_inputs is None]
+            assert len(text_only) == 1
+            assert all(s.multimodal_train_inputs is None for s in samples)
+
+    def test_the_samples_reply_carries_no_pixels(self, vlm, tmp_path):
+        with image_router(vlm, ["a"], extra_args=ref_args(tmp_path)) as env:
+            session_id = _create_session(env.url)
+            chat(env, session_id, [user_turn(SHOT1, "one")])
+            response = requests.post(f"{env.url}/sessions/{session_id}/samples", json={}, timeout=20.0)
+            assert response.status_code == 200
+            names = safetensors.numpy.load(response.content).keys()
+            assert not [name for name in names if name.startswith("multimodal_train_inputs.")]
+
+    def test_the_engine_is_asked_to_expand_every_placeholder(self, vlm, tmp_path):
+        with image_router(vlm, ["clicked"], extra_args=ref_args(tmp_path)) as env:
+            session_id = _create_session(env.url)
+            assert chat(env, session_id, [user_turn(SHOT1, "step 1")]).status_code == 200
+            assert chat(env, session_id, [user_turn(None, "no pictures")]).status_code == 200
+            image_call, text_call = env.backend.calls
+            assert image_call["messages"][0]["content"][0] == image_part(SHOT1)
+            assert image_token_runs(image_call["input_ids"], vlm.pad_id) == [1]
+            assert image_call["mm_token_expansion_start_len"] == image_call["input_ids"].index(vlm.pad_id)
+            assert "mm_token_expansion_start_len" not in text_call
+
+    def test_a_zero_expansion_start_loses_the_images_on_a_token_space_engine(self, vlm, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "miles.rollout.session.v2.core.SessionCoreV2._image_turn_fields",
+            lambda self, input_ids: {"return_prompt_token_ids": True, "mm_token_expansion_start_len": 0},
+        )
+        with image_router(vlm, ["clicked"], extra_args=ref_args(tmp_path)) as env:
+            session_id = _create_session(env.url)
+            response = chat(env, session_id, [user_turn(SHOT1, "step 1")])
+            assert response.status_code >= 400
+            assert b"effective prompt ids differ" in response.content
+
+    def test_dense_mode_sends_no_expansion_start(self, vlm):
+        with image_router(vlm, ["clicked"]) as env:
+            session_id = _create_session(env.url)
+            assert chat(env, session_id, [user_turn(SHOT1, "step 1")]).status_code == 200
+            assert "mm_token_expansion_start_len" not in env.backend.calls[0]
+
+    def test_refs_without_a_shared_media_dir_refuse_to_start(self, vlm):
+        args = image_server_args(multimodal_token_space_processing=True, shared_media_dir=None)
+        with pytest.raises(ValueError, match="--shared-media-dir"):
+            build_server(args, backend_url="http://127.0.0.1:1")
 
 
 class TestExactnessGate:

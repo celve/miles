@@ -15,7 +15,7 @@ from miles.rollout.session.core import (
     extract_completion,
     proxy_result_to_response,
 )
-from miles.rollout.session.errors import SessionNotFoundError, TokenizationError
+from miles.rollout.session.errors import MessageValidationError, SessionNotFoundError, TokenizationError
 from miles.rollout.session.images.processing import assert_engine_expansion_matches, expand_input_ids
 from miles.rollout.session.request_args import filter_turn_args, parse_chat_request
 from miles.rollout.session.samples.codec import COMPUTED_FIELDS_V2, ROLLOUT_SAMPLING_MASK_FIELDS, encode_samples
@@ -184,7 +184,7 @@ class SessionCoreV2(SessionCore):
             # orjson: the body carries the whole prompt's input_ids on every turn. An image turn asks
             # for the engine's expanded ids whatever the client sent, because the per-turn check needs them.
             proxy_body = orjson.dumps(
-                {**request_body, "return_prompt_token_ids": True} if prepared.has_images else request_body
+                {**request_body, **self._image_turn_fields(prompt_token_ids)} if prepared.has_images else request_body
             )
         # --- lock released ---
 
@@ -240,6 +240,17 @@ class SessionCoreV2(SessionCore):
         # --- lock released ---
 
         return _chat_client_response(result, response, response_intent)
+
+    def _image_turn_fields(self, input_ids: list[int]) -> dict:
+        fields = {"return_prompt_token_ids": True}
+        if self.config.multimodal_token_space_processing:
+            # A token-space engine attaches an input_ids chat request's images only when this is nonzero; the prefix
+            # before the first placeholder holds none, so starting there expands exactly what a start of 0 would.
+            first = input_ids.index(self.registry.image_processor.placeholder_id)
+            if first == 0:
+                raise MessageValidationError("an image placeholder at position 0 cannot be expanded in token space")
+            fields["mm_token_expansion_start_len"] = first
+        return fields
 
     def _check_engine_expansion(self, response: dict, request_body: dict, prepared) -> None:
         choices = response.get("choices") or [{}]

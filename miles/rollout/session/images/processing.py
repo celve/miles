@@ -1,4 +1,4 @@
-"""Turn immutable image bytes into token counts and trainer tensors.
+"""Turn immutable image bytes into token counts and trainer tensors or media refs.
 
 The session server renders prompts with the plain tokenizer, so an image is one
 placeholder token in the rendered ids. SGLang expands the i-th placeholder into
@@ -22,8 +22,13 @@ import torch
 
 from miles.rollout.session.config import SessionServerConfig
 from miles.rollout.session.errors import UpstreamResponseError
-from miles.rollout.session.images.launch_settings import check_engine_launch_settings, check_session_tito_model
+from miles.rollout.session.images.launch_settings import (
+    check_engine_launch_settings,
+    check_session_media_dir,
+    check_session_tito_model,
+)
 from miles.rollout.session.images.store import NO_IMAGES, ImageBlob, ImageOccurrences, ImageStore, intern_images
+from miles.utils.media_refs import resolve_media_ref
 from miles.utils.processing_utils import call_processor, extract_multimodal_train_inputs, load_processor
 
 logger = logging.getLogger(__name__)
@@ -205,7 +210,8 @@ def assert_engine_expansion_matches(
         f"the session server expected {len(expected_ids)} (first difference at index {first_diff}); "
         f"images={list(images.image_ids)} counts={counts} — the engine's processor settings or image "
         "decoding disagree with this run's pinned processor, or its chat route dropped the images "
-        "(an SGLang whose pretokenized chat branch does not keep message images)"
+        "(an SGLang whose pretokenized chat branch does not keep message images, or, in token space, a "
+        "router that does not forward mm_token_expansion_start_len on the chat route)"
     )
 
 
@@ -307,6 +313,7 @@ class SessionImageProcessor:
     processor_settings: ImageProcessorSettings
     engine_settings: EngineLaunchSettings
     text_only_samples: str  # "drop" | "keep"
+    media_dir: str | None  # set: samples carry media refs written here and the trainer builds the tensors
 
     @property
     def placeholder_id(self) -> int:
@@ -322,6 +329,9 @@ class SessionImageProcessor:
     def compute_pixels(self, image_ids: list[str], counts: list[int], images: "SessionImages") -> list[ProcessedImage]:
         blobs = [images.store.get(image_id) for image_id in image_ids]
         return process_images(self.hf_processor, blobs, self.processor_settings, counts)
+
+    def write_media_refs(self, image_ids: list[str], images: "SessionImages") -> list[str]:
+        return [resolve_media_ref(images.store.get(image_id).data, self.media_dir) for image_id in image_ids]
 
 
 @dataclass
@@ -353,6 +363,7 @@ def build_session_image_processor(config: SessionServerConfig, tokenizer: Any) -
         )
     # Checked again here because a config can also be built by hand, as scripts and tests do.
     check_session_tito_model(config.tito_model)
+    check_session_media_dir(config.multimodal_token_space_processing, config.run_media_dir)
     check_engine_launch_settings(config.session_image_engine_settings, checkpoint=config.hf_checkpoint)
     hf_processor = load_processor(config.hf_checkpoint, trust_remote_code=True)
     if hf_processor is None:
@@ -365,16 +376,19 @@ def build_session_image_processor(config: SessionServerConfig, tokenizer: Any) -
             "counts cannot be derived without processing every image on every turn"
         )
     processor_settings = read_processor_settings(hf_processor, tokenizer, checkpoint=config.hf_checkpoint)
+    media_dir = config.run_media_dir if config.multimodal_token_space_processing else None
     engine_settings = EngineLaunchSettings(**config.session_image_engine_settings)
     logger.info(
-        "[session] Image support on: processor=%s engine=%s text_only_samples=%s",
+        "[session] Image support on: processor=%s engine=%s text_only_samples=%s media_dir=%s",
         processor_settings.to_dict(),
         engine_settings.to_dict(),
         config.session_image_text_only_samples,
+        media_dir,
     )
     return SessionImageProcessor(
         hf_processor=hf_processor,
         processor_settings=processor_settings,
         engine_settings=engine_settings,
         text_only_samples=config.session_image_text_only_samples,
+        media_dir=media_dir,
     )

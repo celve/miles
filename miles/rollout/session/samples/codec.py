@@ -49,11 +49,13 @@ SAMPLES_VALUE_SPEC: dict[str, ValueSpec] = {
     "metadata": ValueSpec("json"),
 }
 
-# Tree-serving v2 adds `Sample.reward` and the multimodal trainer inputs to the wire.
+# Tree-serving v2 adds `Sample.reward` and the session's images, as trainer tensors or media refs, to the wire.
 SAMPLES_VALUE_SPEC_V2: dict[str, ValueSpec] = {
     **SAMPLES_VALUE_SPEC,
     "reward": ValueSpec("json"),
     "multimodal_train_inputs": ValueSpec("tensor_dict"),
+    # Server-owned: the refs the session's tokens reference, so a dataset's own media never rides on them.
+    "multimodal_inputs": ValueSpec("json"),
 }
 
 ROLLOUT_SAMPLING_MASK_FIELDS = ("rollout_sampling_mask",)
