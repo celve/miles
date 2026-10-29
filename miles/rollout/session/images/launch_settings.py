@@ -175,7 +175,14 @@ def validate_token_space_engine_settings(args) -> None:
         if group.worker_type == WorkerType.PLACEHOLDER:
             continue
         settings = _group_launch_settings(args, group.overrides)
-        differing = sorted(key for key, value in expected.items() if (settings[key] or None) != (value or None))
+        settings["enable_token_space_processor"] = group.overrides.get(
+            "enable_token_space_processor", args.sglang_enable_token_space_processor
+        )
+        differing = sorted(
+            key
+            for key, value in {**expected, "enable_token_space_processor": True}.items()
+            if (settings[key] or None) != (value or None)
+        )
         if differing:
             raise ValueError(
                 "--multimodal-token-space-processing rebuilds pixels on the trainer with the checkpoint's processor, "
