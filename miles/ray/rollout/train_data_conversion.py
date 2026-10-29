@@ -406,6 +406,8 @@ def split_train_data_by_dp_scheduled_raw(
     args: Any, data: dict[str, Any], *, train_parallel_config: TrainParallelConfig
 ) -> list[dict[str, Any]]:
     """DP split with the micro-batch schedule precomputed on the rollout side."""
+    if getattr(args, "pad_steps_for_dp_alignment", False):
+        pad_steps_for_dp_alignment(args, data, dp_size=train_parallel_config.dp_size)
     total_lengths = [len(t) for t in data["tokens"]]
     data["total_lengths"] = total_lengths
 
@@ -431,6 +433,50 @@ def split_train_data_by_dp_scheduled_raw(
         shard["micro_batch_indices"] = micro_batch_indices[rank]
         shard["num_rollouts"] = num_rollouts
     return shards
+
+
+# Per-sample keys a padding row copies from its step's first row; it zeroes the per-token ones below.
+_PAD_COPIED_KEYS = frozenset(
+    {"sample_indices", "rollout_ids", "rollout_mask_sums", "round_number", "prompt", "raw_reward", "metadata"}
+)
+_NOT_PER_SAMPLE_KEYS = frozenset({"prompt_group_sizes"})
+_PAD_ROW = {
+    "tokens": lambda: [0, 0],
+    "response_lengths": lambda: 1,
+    "rewards": lambda: 0.0,
+    "truncated": lambda: 0,
+    "loss_masks": lambda: [0],
+    "rollout_log_probs": lambda: [0.0],
+    "multimodal_train_inputs": lambda: None,
+    "multimodal_inputs": lambda: None,
+    "weight_versions": lambda: [],
+}
+
+
+def pad_steps_for_dp_alignment(args, data: dict[str, Any], *, dp_size: int) -> None:
+    """Append dp_size - 1 zero-loss rows to each full step's first rollout, in place.
+
+    The rows share that rollout's id and mask sum, so the step's rollout count and loss divisor are unchanged.
+    """
+    if dp_size == 1:
+        return
+    assert args.use_dynamic_batch_size, "--pad-steps-for-dp-alignment needs --use-dynamic-batch-size"
+    n = len(data["tokens"])
+    per_sample = [
+        key
+        for key, value in data.items()
+        if isinstance(value, list) and len(value) == n and key not in _NOT_PER_SAMPLE_KEYS
+    ]
+    unknown = sorted(set(per_sample) - _PAD_COPIED_KEYS - set(_PAD_ROW))
+    if unknown:
+        raise ValueError(f"--pad-steps-for-dp-alignment cannot pad these per-sample train-data keys: {unknown}")
+    order = list(dict.fromkeys(data["rollout_ids"]))
+    global_batch_size = data.get("dynamic_global_batch_size", args.global_batch_size)
+    for start in range(0, len(order) - global_batch_size + 1, global_batch_size):
+        first = data["rollout_ids"].index(order[start])
+        for _ in range(dp_size - 1):
+            for key in per_sample:
+                data[key].append(_PAD_ROW[key]() if key in _PAD_ROW else data[key][first])
 
 
 def _log_dp_schedule_trim(*, args, data: dict[str, Any], partitions: list[list[int]]) -> None:

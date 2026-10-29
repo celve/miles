@@ -1510,6 +1510,18 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "`max_response_len // cp_size` instead of `max_response_len`."
                 ),
             )
+            parser.add_argument(
+                "--pad-steps-for-dp-alignment",
+                action="store_true",
+                default=False,
+                help=(
+                    "With --use-dynamic-batch-size and the rollout-side schedule, give each optimizer step "
+                    "dp_size - 1 zero-loss two-token samples on its first rollout. When every sample in a step "
+                    "exceeds half of --max-tokens-per-gpu, each micro-batch holds one sample and splitting cannot "
+                    "reach a multiple of dp_size, so the schedule refuses the step; the padding samples can be "
+                    "split off instead, without merging two full samples past the token cap."
+                ),
+            )
             return parser
 
         def add_eval_arguments(parser):
@@ -4265,8 +4277,12 @@ def miles_validate_args(args):
 
     if args.multimodal_rebuild_per_micro_batch and not args.multimodal_token_space_processing:
         raise ValueError("--multimodal-rebuild-per-micro-batch needs --multimodal-token-space-processing")
-    if (args.multimodal_rebuild_prefetch or args.multimodal_rebuild_cache_mb) and not args.multimodal_rebuild_decode_workers:
-        raise ValueError("--multimodal-rebuild-prefetch and --multimodal-rebuild-cache-mb need --multimodal-rebuild-decode-workers")
+    if (
+        args.multimodal_rebuild_prefetch or args.multimodal_rebuild_cache_mb
+    ) and not args.multimodal_rebuild_decode_workers:
+        raise ValueError(
+            "--multimodal-rebuild-prefetch and --multimodal-rebuild-cache-mb need --multimodal-rebuild-decode-workers"
+        )
     if args.multimodal_token_space_processing:
         # SGLang registers --sglang-enable-token-space-processor only in builds with the token-space processor.
         if not hasattr(
