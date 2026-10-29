@@ -1355,12 +1355,45 @@ def test_delayed_dp_split_preserves_the_tinker_loss_vectors():
     assert shards[0]["advantages"] == [[0.5], [0.5]]
 
 
+def _pad_args(**overrides):
+    return SimpleNamespace(
+        **{
+            "use_dynamic_batch_size": True,
+            "max_tokens_per_gpu": 8192,
+            "global_batch_size": 2,
+            "balance_data": False,
+            "balance_by_flops": False,
+            "allow_partial_train_step": False,
+            **overrides,
+        }
+    )
+
+
+def _schedule(args, data, dp_size):
+    return build_dp_schedule(
+        args,
+        make_train_parallel_config(dp_size=dp_size, supports_precomputed_schedule=True),
+        [len(t) for t in data["tokens"]],
+        global_batch_size=args.global_batch_size,
+        rollout_indices=data["rollout_ids"],
+    )
+
+
+def _pad(args, data, dp_size):
+    pad_steps_for_dp_alignment(
+        args,
+        data,
+        train_parallel_config=make_train_parallel_config(dp_size=dp_size, supports_precomputed_schedule=True),
+    )
+
+
 class TestPadStepsForDpAlignment:
     @staticmethod
-    def _data(rollout_ids):
+    def _data(rollout_ids, lengths=None):
         n = len(rollout_ids)
+        lengths = lengths or [5000] * n
         return {
-            "tokens": [[1] * 5000 for _ in range(n)],
+            "tokens": [[1] * length for length in lengths],
             "response_lengths": [10] * n,
             "rewards": [1.0] * n,
             "raw_reward": [1.0] * n,
@@ -1375,74 +1408,75 @@ class TestPadStepsForDpAlignment:
             "prompt_group_sizes": [1] * n,
         }
 
-    def test_each_full_step_gets_dp_minus_one_zero_loss_rows_on_its_first_rollout(self):
-        args = SimpleNamespace(use_dynamic_batch_size=True, global_batch_size=2)
-        data = self._data([7, 7, 8, 9, 9, 10, 11])
-        pad_steps_for_dp_alignment(args, data, dp_size=3)
-        pads = slice(7, None)
-        assert data["rollout_ids"][pads] == [7, 7, 9, 9]
-        assert data["tokens"][pads] == [[0, 0]] * 4
-        assert data["loss_masks"][pads] == [[0]] * 4
-        assert data["response_lengths"][pads] == [1] * 4
-        assert data["rollout_mask_sums"][pads] == [10] * 4
-        assert data["multimodal_inputs"][pads] == [None] * 4
-        assert data["weight_versions"][pads] == [[]] * 4
-        assert data["prompt_group_sizes"] == [1] * 7
+    def test_pad_rows_are_zero_loss_and_join_the_steps_first_rollout(self):
+        args = _pad_args(global_batch_size=3)
+        data = self._data([7, 8, 9])
+        _pad(args, data, dp_size=2)
+        assert data["rollout_ids"][3:] == [7]
+        assert data["tokens"][3:] == [[0, 0]]
+        assert data["loss_masks"][3:] == [[0]]
+        assert data["response_lengths"][3:] == [1]
+        assert data["rollout_mask_sums"][3:] == [10]
+        assert data["multimodal_inputs"][3:] == [None]
+        assert data["weight_versions"][3:] == [[]]
+        assert data["prompt_group_sizes"] == [1] * 3
 
-    def test_the_schedule_splits_the_pads_off_where_it_would_refuse_the_step(self):
-        args = SimpleNamespace(
-            use_dynamic_batch_size=True,
-            max_tokens_per_gpu=8192,
-            global_batch_size=3,
-            balance_data=False,
-            balance_by_flops=False,
-            allow_partial_train_step=False,
-        )
-        config = make_train_parallel_config(dp_size=2, supports_precomputed_schedule=True)
+    def test_a_step_the_schedule_cannot_align_is_padded_until_it_can(self):
+        args = _pad_args(global_batch_size=3)
         data = self._data([0, 1, 2])
         with pytest.raises(AssertionError, match="could only produce"):
-            build_dp_schedule(
-                args,
-                config,
-                [len(t) for t in data["tokens"]],
-                global_batch_size=3,
-                rollout_indices=data["rollout_ids"],
-            )
-        pad_steps_for_dp_alignment(args, data, dp_size=2)
-        schedule = build_dp_schedule(
-            args, config, [len(t) for t in data["tokens"]], global_batch_size=3, rollout_indices=data["rollout_ids"]
-        )
+            _schedule(args, data, dp_size=2)
+        _pad(args, data, dp_size=2)
+        schedule = _schedule(args, data, dp_size=2)
         assert sorted(i for partition in schedule.partitions for i in partition) == [0, 1, 2, 3]
 
+    @pytest.mark.parametrize("length", [8192, 8191, 9000])
+    def test_an_already_aligned_step_is_left_alone(self, length):
+        # Full bins: a pad there would open a micro-batch of its own and break a schedule that was valid.
+        args = _pad_args()
+        data = self._data([0, 1], lengths=[length, length])
+        before = _schedule(args, data, dp_size=2)
+        _pad(args, data, dp_size=2)
+        assert len(data["tokens"]) == 2
+        assert _schedule(args, data, dp_size=2) == before
+
+    def test_pads_that_open_a_micro_batch_bring_enough_rows_to_split_it_off(self):
+        args = _pad_args(global_batch_size=3)
+        data = self._data([0, 1, 2], lengths=[8192, 8192, 8192])
+        _pad(args, data, dp_size=2)
+        schedule = _schedule(args, data, dp_size=2)
+        assert sorted(i for partition in schedule.partitions for i in partition) == list(range(len(data["tokens"])))
+
+    def test_an_eligible_partial_step_is_padded_too(self):
+        args = _pad_args(allow_partial_train_step=True)
+        data = self._data([0, 1, 2, 2, 2])
+        with pytest.raises(AssertionError, match="could only produce"):
+            _schedule(args, data, dp_size=2)
+        _pad(args, data, dp_size=2)
+        schedule = _schedule(args, data, dp_size=2)
+        assert schedule.num_rollouts == [2, 1]
+        assert sorted(i for partition in schedule.partitions for i in partition) == list(range(len(data["tokens"])))
+
+    def test_dp_one_needs_no_padding(self):
+        args = _pad_args(global_batch_size=3)
+        data = self._data([0, 1, 2])
+        _pad(args, data, dp_size=1)
+        assert len(data["tokens"]) == 3
+
     def test_an_unknown_per_sample_key_is_refused(self):
-        data = self._data([0, 1])
-        data["teacher_log_probs"] = [[0.0], [0.0]]
+        data = self._data([0, 1, 2])
+        data["teacher_log_probs"] = [[0.0]] * 3
         with pytest.raises(ValueError, match="teacher_log_probs"):
-            pad_steps_for_dp_alignment(
-                SimpleNamespace(use_dynamic_batch_size=True, global_batch_size=2), data, dp_size=2
-            )
+            _pad(_pad_args(global_batch_size=3), data, dp_size=2)
 
 
 def test_a_real_harbor_2x1080p_round_needs_the_padding_and_schedules_with_it():
     # Round 0 of a Harbor computer-1 session-server run with two 1920x1080 screenshots kept: every sample is over half the cap.
     recorded = json.loads((Path(__file__).parent / "data" / "harbor_2x1080p_round_lengths.json").read_text())
-    args = SimpleNamespace(
-        use_dynamic_batch_size=True,
-        max_tokens_per_gpu=8192,
-        global_batch_size=8,
-        balance_data=False,
-        balance_by_flops=False,
-        allow_partial_train_step=False,
-    )
-    config = make_train_parallel_config(dp_size=2, supports_precomputed_schedule=True)
-    lengths, rollout_ids = recorded["total_lengths"], recorded["rollout_ids"]
+    args = _pad_args(global_batch_size=8)
+    data = TestPadStepsForDpAlignment._data(recorded["rollout_ids"], lengths=recorded["total_lengths"])
     with pytest.raises(AssertionError, match="could only produce"):
-        build_dp_schedule(args, config, lengths, global_batch_size=8, rollout_indices=rollout_ids)
-
-    data = TestPadStepsForDpAlignment._data(rollout_ids)
-    data["tokens"] = [[1] * n for n in lengths]
-    pad_steps_for_dp_alignment(args, data, dp_size=2)
-    schedule = build_dp_schedule(
-        args, config, [len(t) for t in data["tokens"]], global_batch_size=8, rollout_indices=data["rollout_ids"]
-    )
+        _schedule(args, data, dp_size=2)
+    _pad(args, data, dp_size=2)
+    schedule = _schedule(args, data, dp_size=2)
     assert sorted(i for partition in schedule.partitions for i in partition) == list(range(len(data["tokens"])))

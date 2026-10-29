@@ -3780,3 +3780,19 @@ class TestWeightUpdateFaultToleranceSupport:
 
         with pytest.raises(AssertionError, match="weight_update FT requires Megatron"):
             miles_validate_args(args)
+
+
+class TestPadStepsForDpAlignmentValidation:
+    def _validated(self, extra):
+        return TestMaxConsecutiveAbortedGroups._validated(self, ["--pad-steps-for-dp-alignment", *extra])
+
+    def test_it_starts_with_the_dynamic_schedule(self):
+        assert self._validated(["--use-dynamic-batch-size", "--max-tokens-per-gpu", "8192"]).pad_steps_for_dp_alignment
+
+    def test_it_needs_the_dynamic_schedule(self):
+        with pytest.raises(ValueError, match="--use-dynamic-batch-size"):
+            self._validated([])
+
+    def test_per_token_loss_is_refused(self):
+        with pytest.raises(ValueError, match="--calculate-per-token-loss"):
+            self._validated(["--use-dynamic-batch-size", "--max-tokens-per-gpu", "8192", "--calculate-per-token-loss"])

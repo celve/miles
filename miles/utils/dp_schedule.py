@@ -37,29 +37,21 @@ def _calculate_workloads(step_lengths, args):
     return [calculate_fwd_flops([sl], args) for sl in step_lengths]
 
 
-def build_dp_schedule(
-    args: Any,
-    train_parallel_config: TrainParallelConfig,
-    total_lengths: list[int],
-    *,
-    global_batch_size: int,
-    rollout_indices: list[int],
-) -> DPSchedule:
-    """Compute ``DPSchedule``;
-    ``global_batch_size`` counts rollouts, not training samples."""
-    dp_size = train_parallel_config.dp_size
-    cp_size = train_parallel_config.cp_size
+def _align_to(train_parallel_config: TrainParallelConfig) -> int:
+    """Micro-batches per step must divide evenly across dp and vpp."""
     vpp_size = train_parallel_config.vpp_size or 1
     mb_group = train_parallel_config.microbatch_group_size_per_vp_stage
+    return train_parallel_config.dp_size * (mb_group if vpp_size > 1 else 1)
 
-    # micro-batch size per step must divide evenly across dp and vpp
-    align_to = dp_size * (mb_group if vpp_size > 1 else 1)
 
-    max_per_bin = None
-    if args.use_dynamic_batch_size:
-        assert args.max_tokens_per_gpu is not None
-        max_per_bin = args.max_tokens_per_gpu * cp_size
+def _aligned_count(count: int, align_to: int) -> int:
+    return max((count + align_to - 1) // align_to * align_to, align_to)
 
+
+def _plan_steps(
+    args: Any, rollout_indices: list[int], *, global_batch_size: int, dp_size: int
+) -> tuple[list[int], dict[int, list[int]], list[int]]:
+    """The rollout ids in order, each rollout's sample positions, and each training step's rollout count."""
     # Rollout can include multiple samples (compaction, subagent, fork, etc.)
     # Samples in the same rollout should be trained in the same step, or dropped together.
     rollout_id_to_sample_index: dict[int, list[int]] = {}
@@ -83,6 +75,91 @@ def build_dp_schedule(
             num_rollouts.append(leftover)
         else:
             logger.info(f"partial step skipped: {leftover_samples} samples < dp_size {dp_size}")
+    return rollout_ids, rollout_id_to_sample_index, num_rollouts
+
+
+def _pack_step(args: Any, step_lengths: list[int], max_per_bin: int, workloads: list | None) -> list[list[int]]:
+    """Pack under the token budget: first-fit, or FLOPs-balanced partitions under --balance-by-flops.
+
+    The FLOPs-balanced packing does not enforce the token cap per micro-batch.
+    """
+    if getattr(args, "balance_by_flops", False):
+        total_tokens = sum(step_lengths)
+        micro_batch_count = max(1, (total_tokens + max_per_bin - 1) // max_per_bin)
+        if micro_batch_count >= len(step_lengths):
+            return [[i] for i in range(len(step_lengths))]
+        return get_seqlen_balanced_partitions(workloads, micro_batch_count, equal_size=False)
+    return first_fit_decreasing_pack(step_lengths, max_per_bin)
+
+
+def pads_for_dp_alignment(
+    args: Any,
+    train_parallel_config: TrainParallelConfig,
+    total_lengths: list[int],
+    *,
+    global_batch_size: int,
+    rollout_indices: list[int],
+    pad_length: int,
+) -> list[tuple[int, int]]:
+    """For each scheduled step that splitting cannot align, its first sample position and the pad rows it needs.
+
+    A step packs into ``bins`` micro-batches and must reach the next multiple of the alignment, which splitting can
+    only do while the step has at least that many rows; pads of ``pad_length`` tokens supply the missing rows, and
+    since they can themselves open a new micro-batch the count is recomputed with them packed in.
+    """
+    assert args.use_dynamic_batch_size, "--pad-steps-for-dp-alignment needs --use-dynamic-batch-size"
+    align_to = _align_to(train_parallel_config)
+    max_per_bin = args.max_tokens_per_gpu * train_parallel_config.cp_size
+    rollout_ids, rollout_id_to_sample_index, num_rollouts = _plan_steps(
+        args, rollout_indices, global_batch_size=global_batch_size, dp_size=train_parallel_config.dp_size
+    )
+    pads: list[tuple[int, int]] = []
+    step_start = 0
+    for step_num_rollouts in num_rollouts:
+        picked = rollout_ids[step_start : step_start + step_num_rollouts]
+        step_start += step_num_rollouts
+        sample_indices = [pos for rid in picked for pos in rollout_id_to_sample_index[rid]]
+        real = [total_lengths[i] for i in sample_indices]
+        count = 0
+        # Pads open at most one micro-batch of their own, so this settles within a couple of passes.
+        for _ in range(4):
+            lengths = real + [pad_length] * count
+            workloads = _calculate_workloads(lengths, args) if getattr(args, "balance_by_flops", False) else None
+            target = _aligned_count(len(_pack_step(args, lengths, max_per_bin, workloads)), align_to)
+            if len(lengths) >= target:
+                break
+            count = target - len(real)
+        else:
+            raise AssertionError(f"could not settle the pad count for a step of {len(real)} samples")
+        if count:
+            pads.append((sample_indices[0], count))
+    return pads
+
+
+def build_dp_schedule(
+    args: Any,
+    train_parallel_config: TrainParallelConfig,
+    total_lengths: list[int],
+    *,
+    global_batch_size: int,
+    rollout_indices: list[int],
+) -> DPSchedule:
+    """Compute ``DPSchedule``;
+    ``global_batch_size`` counts rollouts, not training samples."""
+    dp_size = train_parallel_config.dp_size
+    cp_size = train_parallel_config.cp_size
+    vpp_size = train_parallel_config.vpp_size or 1
+    mb_group = train_parallel_config.microbatch_group_size_per_vp_stage
+    align_to = _align_to(train_parallel_config)
+
+    max_per_bin = None
+    if args.use_dynamic_batch_size:
+        assert args.max_tokens_per_gpu is not None
+        max_per_bin = args.max_tokens_per_gpu * cp_size
+
+    rollout_ids, rollout_id_to_sample_index, num_rollouts = _plan_steps(
+        args, rollout_indices, global_batch_size=global_batch_size, dp_size=dp_size
+    )
 
     partitions: list[list[int]] = [[] for _ in range(dp_size)]
     micro_batch_indices: list[list[list[int]]] = [[] for _ in range(dp_size)]
@@ -103,19 +180,9 @@ def build_dp_schedule(
         # Shared by FLOPs-balanced packing and FLOPs-balanced distribution below.
         workloads = _calculate_workloads(step_lengths, args) if balance_by_flops else None
         if args.use_dynamic_batch_size:
-            # Pack under the token budget: first-fit, or FLOPs-balanced partitions under
-            # --balance-by-flops (which does not enforce the token cap per micro-batch).
-            if balance_by_flops:
-                total_tokens = sum(step_lengths)
-                micro_batch_count = max(1, (total_tokens + max_per_bin - 1) // max_per_bin)
-                if micro_batch_count >= len(step_lengths):
-                    step_micro_batches = [[i] for i in range(len(step_lengths))]
-                else:
-                    step_micro_batches = get_seqlen_balanced_partitions(workloads, micro_batch_count, equal_size=False)
-            else:
-                step_micro_batches = first_fit_decreasing_pack(step_lengths, max_per_bin)
+            step_micro_batches = _pack_step(args, step_lengths, max_per_bin, workloads)
             # Grow the micro-batch count to a multiple of align_to by splitting multi-sample micro-batches.
-            target = max((len(step_micro_batches) + align_to - 1) // align_to * align_to, align_to)
+            target = _aligned_count(len(step_micro_batches), align_to)
             if target != len(step_micro_batches):
                 expand_bins_by_splitting(step_micro_batches, target, step_lengths)
                 assert len(step_micro_batches) == target, (

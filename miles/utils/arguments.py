@@ -3846,6 +3846,15 @@ def miles_validate_args(args):
     if getattr(args, "balance_by_flops", False):
         assert args.use_dynamic_batch_size, "--balance-by-flops requires --use-dynamic-batch-size"
 
+    if args.pad_steps_for_dp_alignment:
+        if not args.use_dynamic_batch_size:
+            raise ValueError("--pad-steps-for-dp-alignment pads the dynamic schedule; set --use-dynamic-batch-size")
+        if args.calculate_per_token_loss:
+            raise ValueError(
+                "--pad-steps-for-dp-alignment is incompatible with --calculate-per-token-loss: the per-token "
+                "normalizer counts a fully masked row as one token, so pad rows would shrink every real gradient"
+            )
+
     if args.eps_clip_high is None:
         args.eps_clip_high = args.eps_clip
 

@@ -6,7 +6,7 @@ import torch
 from miles.backends.training_utils.data.multimodal import trained_total_lengths
 from miles.rollout.generate_utils.rollout_topk_logprobs import validate_rollout_topk_logprobs_sample
 from miles.utils.audit_utils.sample_ownership.recorder import SampleOwnershipRecorder
-from miles.utils.dp_schedule import TrainParallelConfig, build_dp_schedule
+from miles.utils.dp_schedule import TrainParallelConfig, build_dp_schedule, pads_for_dp_alignment
 from miles.utils.lora.utils import is_multi_lora_enabled
 from miles.utils.media_refs import has_media
 from miles.utils.object_store import ValueSpec
@@ -407,7 +407,7 @@ def split_train_data_by_dp_scheduled_raw(
 ) -> list[dict[str, Any]]:
     """DP split with the micro-batch schedule precomputed on the rollout side."""
     if getattr(args, "pad_steps_for_dp_alignment", False):
-        pad_steps_for_dp_alignment(args, data, dp_size=train_parallel_config.dp_size)
+        pad_steps_for_dp_alignment(args, data, train_parallel_config=train_parallel_config)
     total_lengths = [len(t) for t in data["tokens"]]
     data["total_lengths"] = total_lengths
 
@@ -453,14 +453,11 @@ _PAD_ROW = {
 }
 
 
-def pad_steps_for_dp_alignment(args, data: dict[str, Any], *, dp_size: int) -> None:
-    """Append dp_size - 1 zero-loss rows to each full step's first rollout, in place.
+def pad_steps_for_dp_alignment(args, data: dict[str, Any], *, train_parallel_config: TrainParallelConfig) -> None:
+    """Append zero-loss rows to the steps the schedule could not align, on each such step's first sample, in place.
 
-    The rows share that rollout's id and mask sum, so the step's rollout count and loss divisor are unchanged.
+    The rows share that sample's rollout id and mask sum, so the step's rollout count and loss divisor are unchanged.
     """
-    if dp_size == 1:
-        return
-    assert args.use_dynamic_batch_size, "--pad-steps-for-dp-alignment needs --use-dynamic-batch-size"
     n = len(data["tokens"])
     per_sample = [
         key
@@ -470,11 +467,16 @@ def pad_steps_for_dp_alignment(args, data: dict[str, Any], *, dp_size: int) -> N
     unknown = sorted(set(per_sample) - _PAD_COPIED_KEYS - set(_PAD_ROW))
     if unknown:
         raise ValueError(f"--pad-steps-for-dp-alignment cannot pad these per-sample train-data keys: {unknown}")
-    order = list(dict.fromkeys(data["rollout_ids"]))
-    global_batch_size = data.get("dynamic_global_batch_size", args.global_batch_size)
-    for start in range(0, len(order) - global_batch_size + 1, global_batch_size):
-        first = data["rollout_ids"].index(order[start])
-        for _ in range(dp_size - 1):
+    pads = pads_for_dp_alignment(
+        args,
+        train_parallel_config,
+        trained_total_lengths(data["tokens"], data.get("multimodal_train_inputs")),
+        global_batch_size=data.get("dynamic_global_batch_size", args.global_batch_size),
+        rollout_indices=data["rollout_ids"],
+        pad_length=len(_PAD_ROW["tokens"]()),
+    )
+    for first, count in pads:
+        for _ in range(count):
             for key in per_sample:
                 data[key].append(_PAD_ROW[key]() if key in _PAD_ROW else data[key][first])
 
