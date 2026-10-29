@@ -41,7 +41,8 @@ Args:
         screenshot as a file under ``--output-dir``/media instead of pixel tensors; the
         trainer rebuilds the pixels with SGLang's token-space processor, which the
         engines' SGLang build must provide. Routes through Miles's router, which
-        forwards the chat route's ``mm_token_expansion_start_len``.
+        forwards the chat route's ``mm_token_expansion_start_len``, and rebuilds per
+        micro-batch with the features kept on the trainer GPU.
 
 Usage:
     python3 scripts/run_qwen3_vl_4b_harbor_cua.py --harbor-env-type e2b
@@ -198,6 +199,8 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
             )
             # The session server's per-sample cap, where the generate path caps by --rollout-max-context-len.
             + "--max-seq-len 32768 "
+            # A whole episode is one sample, so a step can hold only samples over half the token cap.
+            + "--pad-steps-for-dp-alignment "
         )
         if args.media_refs:
             cua_args += (
@@ -205,6 +208,8 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
                 "--sglang-enable-token-space-processor "
                 f"--shared-media-dir {args.output_dir}/media "
                 "--use-miles-router "
+                "--multimodal-rebuild-per-micro-batch "
+                "--multimodal-rebuild-keep-on-device "
             )
     else:
         cua_args = (

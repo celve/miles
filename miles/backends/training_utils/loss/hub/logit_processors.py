@@ -283,7 +283,8 @@ def _torch_log_probs_and_entropy(
                 debug_unified_grad_fused_logprob=args.debug_unified_grad_fused_logprob,
             )
 
-        log_probs_list.append(log_prob.squeeze(-1))
+        # The true-on-policy path already returns [R]; squeezing that would turn a one-token response into a scalar.
+        log_probs_list.append(log_prob.squeeze(-1) if log_prob.dim() > 1 else log_prob)
         if with_entropy:
             entropy_list.append(entropy)
 

@@ -35,6 +35,7 @@ def test_the_session_path_trains_computer_1_through_the_agent_function(monkeypat
     assert "--use-session-server v2 --use-session-images" in command
     assert "--tito-model qwen3_vl" in command
     assert "--max-seq-len 32768" in command
+    assert "--pad-steps-for-dp-alignment" in command
     assert "--harbor-cua-" not in command
     assert str(REPO_ROOT / "examples/experimental/harbor") in env["PYTHONPATH"].split(":")
     assert env["HARBOR_AGENT_MAX_ITERATIONS"] == "7"
@@ -61,6 +62,7 @@ def test_media_refs_hand_the_trainer_files_instead_of_pixels(monkeypatch, tmp_pa
     assert "--multimodal-token-space-processing --sglang-enable-token-space-processor" in command
     assert re.search(r"--shared-media-dir \S+/media ", command)
     assert "--use-miles-router" in command
+    assert "--multimodal-rebuild-per-micro-batch --multimodal-rebuild-keep-on-device" in command
 
 
 def test_the_session_path_ships_pixels_by_default(monkeypatch, tmp_path):
