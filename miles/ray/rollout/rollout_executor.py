@@ -183,6 +183,7 @@ class RolloutExecutor(DedicatedRpcLoopWorker):
         else:
             data, metadata = replay.data, replay.metadata
 
+        handoff_start = time.perf_counter()
         with SampleOwnershipRecorder.suppress_drop_logging() if replay is not None else nullcontext():
             train_data = convert_samples_to_train_data(
                 self.args,
@@ -200,6 +201,7 @@ class RolloutExecutor(DedicatedRpcLoopWorker):
                 )
                 store = object_store.get_instance()
                 data_ref = [store.put(value=shard, value_spec=ROLLOUT_DATA_VALUE_SPEC) for shard in shards]
+            logger.info(f"rollout {rollout_id}: train data converted and put in {time.perf_counter() - handoff_start:.1f}s")
             return RolloutDataPack(sample_indices=sample_indices, data_ref=data_ref)
 
     async def _generate_rollout_data(

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from miles.utils.data import Dataset
 from miles.utils.function_registry import load_function
+from miles.utils.media_refs import run_media_dir
 from miles.utils.processing_utils import load_processor, load_tokenizer
 from miles.utils.simple_checkpointer import load_simple_checkpoint, save_simple_checkpoint
 from miles.utils.types import Sample
@@ -52,7 +53,13 @@ class RolloutDataSource(DataSource):
             tokenizer = load_tokenizer(
                 args.hf_checkpoint, chat_template_path=args.chat_template_path, trust_remote_code=True
             )
-            processor = load_processor(args.hf_checkpoint, trust_remote_code=True)
+            # In token space Miles never runs the processor: media prompts are measured by their text tokens.
+            # TODO: mark a sample whose expanded prompt exceeds the context as truncated; SGLang rejects it now.
+            processor = (
+                None
+                if args.multimodal_token_space_processing
+                else load_processor(args.hf_checkpoint, trust_remote_code=True)
+            )
 
             # TODO move (during the refactor)
             if (d := args.dump_details) is not None:
@@ -68,6 +75,7 @@ class RolloutDataSource(DataSource):
                 max_length=args.rollout_max_prompt_len,
                 prompt_key=args.input_key,
                 multimodal_keys=args.multimodal_keys,
+                media_dir=run_media_dir(args),
                 label_key=args.label_key,
                 metadata_key=args.metadata_key,
                 tool_key=args.tool_key,

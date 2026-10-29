@@ -1,3 +1,4 @@
+import functools
 import logging
 from argparse import Namespace
 from collections.abc import Sequence
@@ -7,7 +8,9 @@ import torch.distributed as dist
 import torch.nn.functional as F
 
 from miles.backends.training_utils.data.context_parallel import slice_log_prob_with_cp, slice_with_cp
+from miles.backends.training_utils.data.decoded_media import DecodedImages
 from miles.backends.training_utils.data.multimodal import expand_multimodal_rollout_data_in_place
+from miles.backends.training_utils.data.token_space_media_process import compute_multimodal_train_inputs, image_decoder
 from miles.backends.training_utils.parallel import get_parallel_state
 from miles.platforms import current_platform
 from miles.utils.audit_utils.witness.allocator import WitnessInfo
@@ -17,6 +20,7 @@ from miles.utils.ft_utils.process_group_utils import GeneralPGUtil
 from miles.utils.object_store import ObjectStoreGetResult
 from miles.utils.ray_utils import Box
 from miles.utils.seqlen_balancing import get_seqlen_balanced_partitions
+from miles.utils.timer import timer
 from miles.utils.types import RolloutBatch
 
 logger = logging.getLogger(__name__)
@@ -29,6 +33,75 @@ def _rollout_logprob_dtype(args: Namespace) -> torch.dtype:
         if getattr(args, "fp16", False):
             return torch.float16
     return torch.float32
+
+
+def _use_device(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.set_device(device)
+
+
+def _cast_floating(mm: dict[str, torch.Tensor] | None, dtype: torch.dtype) -> dict[str, torch.Tensor] | None:
+    if mm is None:
+        return None
+    return {key: value.to(dtype) if value.is_floating_point() else value for key, value in mm.items()}
+
+
+class LazyMultimodalTrainInputs(Sequence):
+    """Rebuilds a sample's processor tensors from its media refs each time a micro-batch indexes it, holding none."""
+
+    def __init__(self, args: Namespace, multimodal_inputs: list, tokens: list[torch.Tensor]) -> None:
+        self._args = args
+        self._multimodal_inputs = multimodal_inputs
+        self._tokens = tokens
+        self._dtype = torch.float16 if args.fp16 else torch.bfloat16
+        self._prefetch = args.multimodal_rebuild_prefetch
+        self._images = None
+        if args.multimodal_rebuild_decode_workers > 0:
+            self._images = DecodedImages(
+                image_decoder(args.hf_checkpoint, getattr(args, "sglang_mm_process_config", None)),
+                workers=args.multimodal_rebuild_decode_workers,
+                cache_bytes=args.multimodal_rebuild_cache_mb * 2**20,
+                # A new thread starts on cuda:0; SGLang's GPU JPEG decode must land on this rank's device instead.
+                thread_initializer=functools.partial(_use_device, current_platform.current_device()),
+            )
+
+    # Token-space ids are expanded by SGLang already, so no expansion pass has to read these.
+    tokens_already_expanded = True
+
+    def __len__(self) -> int:
+        return len(self._multimodal_inputs)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return self.get_many(range(*index.indices(len(self))))
+        (mm,) = compute_multimodal_train_inputs(
+            self._args.hf_checkpoint,
+            # Pre-refactor args: the base engine flag; per-group overrides are not read on this branch.
+            getattr(self._args, "sglang_mm_process_config", None),
+            [self._multimodal_inputs[index]],
+            [self._tokens[index]],
+            device=current_platform.current_device(),
+            image_loader=self._images.get if self._images is not None else None,
+            keep_on_device=self._args.multimodal_rebuild_keep_on_device,
+        )
+        # SGLang's processor returns fp32 pixels; held for every sample, they double the eager path's bf16 footprint.
+        return _cast_floating(mm, self._dtype)
+
+    def _image_paths(self, indices) -> list[str]:
+        return [path for i in indices for path in (self._multimodal_inputs[i] or {}).get("images", [])]
+
+    def get_many(self, indices) -> list:
+        indices = list(indices)
+        if self._images is None:
+            return [self[i] for i in indices]
+        self._images.request(self._image_paths(indices))
+        out = [self[i] for i in indices]
+        self._images.trim(keep=set(self._image_paths(indices)))
+        return out
+
+    def prefetch(self, indices) -> None:
+        if self._prefetch and self._images is not None:
+            self._images.request(self._image_paths(indices))
 
 
 def get_rollout_data(
@@ -66,7 +139,17 @@ def get_rollout_data(
             for t, sid in zip(rollout_data["tokens"], seq_witness_ids, strict=True)
         ]
 
-    if "multimodal_train_inputs" in rollout_data:
+    if "multimodal_inputs" in rollout_data:
+        lazy = LazyMultimodalTrainInputs(args, rollout_data.pop("multimodal_inputs"), rollout_data["tokens"])
+        if args.multimodal_rebuild_per_micro_batch:
+            rollout_data["multimodal_train_inputs"] = lazy
+        else:
+            with timer("multimodal_rebuild"):
+                # Chunks bound the decoded images a parallel decode holds at once.
+                rollout_data["multimodal_train_inputs"] = [
+                    mm for start in range(0, len(lazy), 64) for mm in lazy.get_many(range(start, min(start + 64, len(lazy))))
+                ]
+    elif "multimodal_train_inputs" in rollout_data:
         # Move multimodal training tensors to the device in advance
         rollout_data["multimodal_train_inputs"] = [
             (
@@ -430,18 +513,27 @@ class DataIterator:
             else:
                 if self.micro_batch_indices is not None:
                     indices = self.micro_batch_indices[self.offset]
-                    batch[key] = [vals[i] for i in indices]
+                    batch[key] = vals.get_many(indices) if hasattr(vals, "get_many") else [vals[i] for i in indices]
                 else:
                     assert self.offset + self.micro_batch_size <= len(
                         vals
                     ), f"offset: {self.offset}, micro_batch_size: {self.micro_batch_size}, len(vals): {len(vals)}"
                     batch[key] = vals[self.offset : self.offset + self.micro_batch_size]
+                if hasattr(vals, "prefetch") and (next_indices := self._next_indices(len(vals))):
+                    vals.prefetch(next_indices)
 
         if self.micro_batch_indices is not None:
             self.offset += 1
         else:
             self.offset += self.micro_batch_size
         return batch
+
+    def _next_indices(self, size: int) -> list[int]:
+        if self.micro_batch_indices is not None:
+            following = self.offset + 1
+            return self.micro_batch_indices[following] if following < len(self.micro_batch_indices) else []
+        start = self.offset + self.micro_batch_size
+        return list(range(start, min(start + self.micro_batch_size, size)))
 
     def reset(self) -> "DataIterator":
         """Reset internal offset to the start and return self."""

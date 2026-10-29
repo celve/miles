@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import logging
 import os
 
@@ -13,6 +14,7 @@ from miles.utils.arguments import parse_args, validate_async_off_policy_correcti
 from miles.utils.async_utils import Disposer, eager_create_task, with_disposer
 from miles.utils.data import remove_rollout_data_refs, remove_train_output_refs
 from miles.utils.ft_utils.mini_ft_controller import maybe_start_mini_ft_controller
+from miles.utils.media_refs import release_run_media
 from miles.utils.misc import should_run_periodic_action
 from miles.utils.orchestration_utils import init_orchestration_script
 
@@ -23,6 +25,8 @@ logger = logging.getLogger(__name__)
 async def train(args, *, disposer: Disposer):
     assert not args.colocate or args.fully_async, "Colocation is only supported for async training with --fully-async."
     validate_async_off_policy_correction(args)
+    # Added first so it runs last, once no rollout or trainer can still read this run's media.
+    disposer.add(functools.partial(release_run_media, args))
     _worker_manager = init_orchestration_script(args, disposer=disposer)
 
     # create the rollout manager, with sglang engines inside.

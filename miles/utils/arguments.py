@@ -24,7 +24,10 @@ from miles.backends.sglang_utils.arguments import validate_args as sglang_valida
 from miles.dashboard.args import add_dashboard_arguments, validate_dashboard_args
 from miles.ray.specs.train import compute_trainer_ids, external_trainer_controller_addrs
 from miles.rollout.checkpoint_eval import is_checkpoint_eval_fn
-from miles.rollout.session.images.launch_settings import validate_session_image_args
+from miles.rollout.session.images.launch_settings import (
+    validate_session_image_args,
+    validate_token_space_engine_settings,
+)
 from miles.utils.audit_utils.event_logger.logger import EVENTS_DIRNAME
 from miles.utils.chat_template_utils.tito_tokenizer import TITOTokenizerType
 from miles.utils.env_report.launcher_report import LAUNCHER_REPORT_ENV_VAR
@@ -1337,6 +1340,49 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             parser.add_argument("--apply-chat-template", action="store_true", default=False)
             # Temporarily be JSON-serialized str, will be a real dict after using Omegaconf
             parser.add_argument("--apply-chat-template-kwargs", type=json.loads, default="{}")
+            parser.add_argument(
+                "--shared-media-dir",
+                type=str,
+                default=None,
+                help="Directory shared with every SGLang engine; media that is not a file path yet is written here.",
+            )
+            parser.add_argument(
+                "--multimodal-token-space-processing",
+                action="store_true",
+                default=False,
+                help="SGLang expands media placeholders and the trainer builds the processor inputs (models with an SGLang token-space strategy).",
+            )
+            parser.add_argument(
+                "--multimodal-rebuild-per-micro-batch",
+                action="store_true",
+                default=False,
+                help="With --multimodal-token-space-processing, rebuild media tensors per micro-batch instead of once per round: "
+                "GPU memory stays bounded by the micro-batch, at the cost of one rebuild per forward pass.",
+            )
+            parser.add_argument(
+                "--multimodal-rebuild-keep-on-device",
+                action="store_true",
+                default=False,
+                help="Keep rebuilt media features on the trainer's GPU instead of SGLang's serving-side copy to the CPU and back.",
+            )
+            parser.add_argument(
+                "--multimodal-rebuild-decode-workers",
+                type=int,
+                default=0,
+                help="Threads that decode a rebuild's images in parallel before the processor runs; 0 lets SGLang load each sample's images itself.",
+            )
+            parser.add_argument(
+                "--multimodal-rebuild-prefetch",
+                action="store_true",
+                default=False,
+                help="Decode the next micro-batch's images while the current one computes (needs --multimodal-rebuild-decode-workers).",
+            )
+            parser.add_argument(
+                "--multimodal-rebuild-cache-mb",
+                type=int,
+                default=0,
+                help="Keep decoded images up to this many MiB across micro-batches, so a screenshot shared by samples or passes decodes once.",
+            )
             parser.add_argument(
                 "--chat-template-path",
                 type=str,
@@ -4215,6 +4261,25 @@ def miles_validate_args(args):
     _resolve_event_logging(args)
     _resolve_sample_ownership_check(args)
 
+    if args.multimodal_rebuild_per_micro_batch and not args.multimodal_token_space_processing:
+        raise ValueError("--multimodal-rebuild-per-micro-batch needs --multimodal-token-space-processing")
+    if (args.multimodal_rebuild_prefetch or args.multimodal_rebuild_cache_mb) and not args.multimodal_rebuild_decode_workers:
+        raise ValueError("--multimodal-rebuild-prefetch and --multimodal-rebuild-cache-mb need --multimodal-rebuild-decode-workers")
+    if args.multimodal_token_space_processing:
+        # SGLang registers --sglang-enable-token-space-processor only in builds with the token-space processor.
+        if not hasattr(
+            args, "sglang_enable_token_space_processor"
+        ):  # config-access-exempt: SGLang builds without the token-space processor do not register this flag
+            raise ValueError(
+                "--multimodal-token-space-processing needs an SGLang build with the token-space processor; "
+                "update SGLang to a version that has --enable-token-space-processor."
+            )
+        if not args.sglang_enable_token_space_processor:
+            raise ValueError(
+                "--multimodal-token-space-processing needs the SGLang engines to expand media placeholders in token "
+                "space; set --sglang-enable-token-space-processor."
+            )
+
     if args.use_rollout_indexer_replay:
         args.use_indexer_replay = True
         assert args.context_parallel_size == 1, "indexer replay does not support context parallelism yet"
@@ -4272,8 +4337,9 @@ def miles_validate_args(args):
 
     _validate_deploy_component(args)
 
-    # Last: it reads the derived engine topology (rollout_external, starts_inference_engines).
+    # Last: these read the derived engine topology (rollout_external, starts_inference_engines).
     validate_session_image_args(args)
+    validate_token_space_engine_settings(args)
 
 
 def validate_skip_actor_forward_only(args) -> None:

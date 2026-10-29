@@ -144,3 +144,48 @@ def check_engine_launch_settings(settings: dict[str, Any], *, checkpoint: str) -
             f"the policy engines launch with image_processor_backend {settings['image_processor_backend']!r}; "
             "only the default 'auto' has been verified to match the trainer's pixels"
         )
+
+
+def validate_token_space_engine_settings(args) -> None:
+    """Refuse at startup engine image settings the trainer-side rebuild cannot reproduce.
+
+    With --multimodal-token-space-processing every trainer rank rebuilds pixels with the checkpoint's processor, the
+    default 'auto' backend and the base --sglang-mm-process-config, so every policy engine group must launch with
+    exactly those; a group override would change the engine's pixels while every token id still matched.
+    """
+    if not args.multimodal_token_space_processing:
+        return
+    if args.rollout_external:
+        raise ValueError(
+            "--multimodal-token-space-processing needs engines Miles launches itself: an external engine's image "
+            "settings are not in this run's args, so the trainer's rebuild cannot be checked against them"
+        )
+    models = resolve_sglang_config(args).models
+    if not models:
+        return
+    expected = {
+        "model_path": args.hf_checkpoint,
+        "tokenizer_path": args.hf_checkpoint,
+        "revision": None,
+        "mm_process_config": getattr(args, "sglang_mm_process_config", None),
+        "image_processor_backend": "auto",
+        "disable_fast_image_processor": False,
+    }
+    for group in models[0].server_groups:
+        if group.worker_type == WorkerType.PLACEHOLDER:
+            continue
+        settings = _group_launch_settings(args, group.overrides)
+        settings["enable_token_space_processor"] = group.overrides.get(
+            "enable_token_space_processor", args.sglang_enable_token_space_processor
+        )
+        differing = sorted(
+            key
+            for key, value in {**expected, "enable_token_space_processor": True}.items()
+            if (settings[key] or None) != (value or None)
+        )
+        if differing:
+            raise ValueError(
+                "--multimodal-token-space-processing rebuilds pixels on the trainer with the checkpoint's processor, "
+                "the 'auto' image backend and the base --sglang-mm-process-config; a policy engine group launches "
+                f"with different {differing}, so its pixels would differ from the trainer's"
+            )

@@ -5,7 +5,10 @@ from argparse import Namespace
 import pytest
 from tests.fast.backends.sglang_utils.test_sglang_config import _make_args as _make_launch_args
 
-from miles.rollout.session.images.launch_settings import validate_session_image_args
+from miles.rollout.session.images.launch_settings import (
+    validate_session_image_args,
+    validate_token_space_engine_settings,
+)
 
 
 def _image_args(tmp_path=None, yaml_text: str | None = None, **overrides) -> Namespace:
@@ -85,6 +88,14 @@ class TestSessionImageEngine:
         with pytest.raises(ValueError, match="the two processors would disagree"):
             validate_session_image_args(_image_args(tmp_path, _groups(_group(8, model_path="/ckpt/other"))))
 
+    def test_a_group_that_turns_the_token_space_processor_off_is_refused(self, tmp_path):
+        yaml_text = _groups(_group(4), _group(4, enable_token_space_processor="false"))
+        args = _image_args(
+            tmp_path, yaml_text, multimodal_token_space_processing=True, sglang_enable_token_space_processor=True
+        )
+        with pytest.raises(ValueError, match="enable_token_space_processor"):
+            validate_token_space_engine_settings(args)
+
     def test_external_engines_are_refused(self):
         with pytest.raises(ValueError, match="engines Miles launches itself"):
             validate_session_image_args(_image_args(rollout_external=True))
@@ -133,3 +144,50 @@ class TestSessionImageEngine:
         )
         validate_session_image_args(args)
         assert "reasoning_parser" not in args.session_image_engine_settings
+
+
+class TestTokenSpaceEngineSettings:
+    """The trainer rebuilds pixels with the base settings, so every engine group must launch with them."""
+
+    def test_base_settings_and_a_base_mm_process_config_pass(self, tmp_path):
+        config = {"image": {"do_normalize": False}}
+        args = _image_args(
+            tmp_path,
+            _groups(_group(4), _group(4)),
+            multimodal_token_space_processing=True,
+            sglang_enable_token_space_processor=True,
+        )
+        args.sglang_mm_process_config = config
+        validate_token_space_engine_settings(args)
+
+    def test_a_group_override_of_the_image_config_is_refused(self, tmp_path):
+        yaml_text = _groups(_group(4), _group(4, mm_process_config="{image: {do_rescale: false}}"))
+        args = _image_args(
+            tmp_path, yaml_text, multimodal_token_space_processing=True, sglang_enable_token_space_processor=True
+        )
+        with pytest.raises(ValueError, match="mm_process_config"):
+            validate_token_space_engine_settings(args)
+
+    def test_a_non_default_image_backend_is_refused(self):
+        args = _image_args(
+            multimodal_token_space_processing=True,
+            sglang_enable_token_space_processor=True,
+            sglang_image_processor_backend="pil",
+        )
+        with pytest.raises(ValueError, match="image_processor_backend"):
+            validate_token_space_engine_settings(args)
+
+    def test_a_group_that_turns_the_token_space_processor_off_is_refused(self, tmp_path):
+        yaml_text = _groups(_group(4), _group(4, enable_token_space_processor="false"))
+        args = _image_args(
+            tmp_path, yaml_text, multimodal_token_space_processing=True, sglang_enable_token_space_processor=True
+        )
+        with pytest.raises(ValueError, match="enable_token_space_processor"):
+            validate_token_space_engine_settings(args)
+
+    def test_external_engines_are_refused(self):
+        with pytest.raises(ValueError, match="external"):
+            validate_token_space_engine_settings(_image_args(multimodal_token_space_processing=True, rollout_external=True))
+
+    def test_off_checks_nothing(self):
+        validate_token_space_engine_settings(_image_args(multimodal_token_space_processing=False, rollout_external=True))

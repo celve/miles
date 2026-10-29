@@ -234,6 +234,8 @@ def expand_multimodal_rollout_data_in_place(
     qkv_format: str = "thd",
 ) -> None:
     multimodal_train_inputs = rollout_data.get("multimodal_train_inputs", None)
+    if getattr(multimodal_train_inputs, "tokens_already_expanded", False):
+        return
     if _has_inkling_media(multimodal_train_inputs):
         _expand_inkling_rollout_data_in_place(rollout_data)
         return
