@@ -14,7 +14,7 @@ async def test_recompute_rollout_logprobs_via_prefill_uses_response_tail(monkeyp
         rollout_log_probs=[-9.0, -9.0, -9.0],
         status=Sample.Status.COMPLETED,
     )
-    args = SimpleNamespace(recompute_logprobs_via_prefill=True, sglang_enable_lora=False)
+    args = SimpleNamespace(recompute_logprobs_via_prefill=True, sglang_enable_lora=False, multimodal_token_space_processing=False)
     seen = {}
 
     async def fake_post(url, payload, headers=None):
@@ -56,7 +56,7 @@ async def test_recompute_rollout_logprobs_via_prefill_uses_response_tail(monkeyp
 @pytest.mark.asyncio
 async def test_recompute_rollout_logprobs_via_prefill_checks_token_alignment(monkeypatch):
     sample = Sample(tokens=[10, 11, 20], response_length=1, status=Sample.Status.COMPLETED)
-    args = SimpleNamespace(recompute_logprobs_via_prefill=True, sglang_enable_lora=False)
+    args = SimpleNamespace(recompute_logprobs_via_prefill=True, sglang_enable_lora=False, multimodal_token_space_processing=False)
 
     async def fake_post(url, payload, headers=None):
         return {"meta_info": {"input_token_logprobs": [(None, 11), (-0.1, 999)]}}
@@ -81,6 +81,7 @@ async def test_recompute_samples_flushes_each_batch_and_batches_prefill_score(mo
     args = SimpleNamespace(
         recompute_logprobs_via_prefill=True,
         sglang_enable_lora=False,
+        multimodal_token_space_processing=False,
         sglang_router_policy="round_robin",
     )
     calls = []
@@ -123,6 +124,7 @@ async def test_recompute_samples_batches_by_logprob_start_len(monkeypatch):
     args = SimpleNamespace(
         recompute_logprobs_via_prefill=True,
         sglang_enable_lora=False,
+        multimodal_token_space_processing=False,
         sglang_router_policy="round_robin",
     )
     calls = []
@@ -167,3 +169,18 @@ async def test_recompute_samples_batches_by_logprob_start_len(monkeypatch):
     assert calls[1][1]["input_ids"] == [[10, 11, 20], [10, 11, 22]]
     assert calls[3][1]["logprob_start_len"] == 2
     assert calls[3][1]["input_ids"] == [[10, 11, 12, 21]]
+
+
+@pytest.mark.parametrize("token_space", [False, True])
+def test_prefill_scoring_of_media_marks_the_expanded_tokens_as_prefix(token_space):
+    sample = Sample(tokens=[1, 9, 9, 9, 9, 2, 20], response_length=1, status=Sample.Status.COMPLETED)
+    sample.multimodal_inputs = {"images": ["/shared/a.png"]}
+    args = SimpleNamespace(sglang_enable_lora=False, multimodal_token_space_processing=token_space)
+
+    payload = prefill_logprobs._build_prefill_scoring_payload(args, sample, {})
+
+    assert payload["image_data"] == ["/shared/a.png"]
+    if token_space:
+        assert payload["mm_token_expansion_start_len"] == len(sample.tokens)
+    else:
+        assert "mm_token_expansion_start_len" not in payload
