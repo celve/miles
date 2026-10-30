@@ -7,8 +7,7 @@ repository. One recipe also runs from Miles itself: Flow-GRPO on SD3.5-medium wi
 miles_diffusion at `221f965f`.
 
 ```bash
-pip install paddleocr==2.9.1 paddlepaddle==2.6.2 python-Levenshtein
-export HF_TOKEN=...  # SD3.5 is gated
+export HF_TOKEN=...  # SD3.5 is gated; the launcher installs CPU PaddleOCR when missing
 python scripts/run_sd35_medium_flow_grpo_ocr.py --num-rollout 600
 ```
 

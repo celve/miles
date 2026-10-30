@@ -9,6 +9,7 @@ first step's log_prob_mean_abs_diff is the engine/trainer log-prob agreement tha
 import json
 import math
 import os
+import tempfile
 from pathlib import Path
 
 from scripts import run_sd35_medium_flow_grpo_ocr as recipe
@@ -41,19 +42,35 @@ def _series(path: Path) -> dict[str, list[float]]:
     return out
 
 
-def test_sd35_medium_flow_grpo_ocr(tmp_path):
-    metrics_path = tmp_path / "metrics.jsonl"
-    os.environ["MILES_DIFFUSION_METRICS_JSONL"] = str(metrics_path)
+def _script_args() -> recipe.ScriptArgs:
     args = command_utils.default_config(recipe.ScriptArgs)
     args.num_rollout = 2
     args.model_dir = get_test_model_dir()
     args.data_dir = get_test_data_dir()
-    recipe.prepare(args)
-    recipe.execute(args)
+    return args
 
+
+def prepare() -> None:
+    recipe.prepare(_script_args())
+
+
+def execute(metrics_path: Path) -> None:
+    os.environ["MILES_DIFFUSION_METRICS_JSONL"] = str(metrics_path)
+    recipe.execute(_script_args())
+
+
+def check(metrics_path: Path) -> None:
     got, want = _series(metrics_path), json.loads(STANDARD.read_text())["metrics"]
     for key, tolerance in TOLERANCES.items():
         assert len(got.get(key, [])) == len(want[key]), f"{key}: {got.get(key)} vs {want[key]}"
         for step, (g, w) in enumerate(zip(got[key], want[key], strict=True)):
             assert math.isfinite(g) and abs(g - w) <= tolerance, f"{key}[{step}]: {g} vs {w} (tolerance {tolerance})"
     assert got["train/log_prob_mean_abs_diff"][0] < 2e-4, "the trainer does not re-score the engine's own transitions"
+
+
+if __name__ == "__main__":
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        metrics = Path(tmp_dir) / "metrics.jsonl"
+        prepare()
+        execute(metrics)
+        check(metrics)
