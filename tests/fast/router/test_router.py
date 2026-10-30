@@ -323,7 +323,6 @@ class DeregisteringWorkerHealth:
         return url, self._results[url]
 
 
-# TODO: extract main body inside `_health_check_loop`, then can test that function
 class TestHealthCheck:
     def test_check_worker_health_success(self, router_factory, mock_worker: MockSGLangServer):
         router = router_factory()
@@ -486,7 +485,7 @@ class TestStaleHealthResults:
     def test_a_duplicate_registration_does_not_lift_a_live_workers_quarantine(
         self, router_factory: Callable[..., MilesRouter]
     ):
-        """Only a fresh registration clears quarantine, because reconnecting a still-registered dead worker needs a weight resync."""
+        """A duplicate registration must not bypass the health check needed to lift quarantine."""
         worker_url = "http://w1:8000"
         router = router_factory(health_check_failure_threshold=3)
         router.worker_request_counts = {worker_url: 2}

@@ -82,46 +82,42 @@ class MilesRouter:
     async def _health_check_loop(self):
         """Background loop to monitor worker health and adjust routing pool."""
         interval = self.config.health_check_interval
-        threshold = self.config.health_check_failure_threshold
-
         while True:
             try:
                 await asyncio.sleep(interval)
-
-                urls = [u for u in self.worker_request_counts if u not in self.dead_workers]
-                if not urls:
-                    continue
-
-                results = await asyncio.gather(*(self._check_worker_health(url) for url in urls))
-
-                for url, is_healthy in results:
-                    if url not in self.worker_request_counts:
-                        continue
-                    if not is_healthy:
-                        failures = self.worker_failure_counts.get(url, 0) + 1
-                        self.worker_failure_counts[url] = failures
-
-                        if failures >= threshold:
-                            logger.warning(
-                                f"[miles-router] Worker {url} failed {threshold} consecutive health checks. Marking as DEAD."
-                            )
-                            self.dead_workers.add(url)
-                            # TODO (chenyang): Connect back 'dead' workers requires a mechanism to sync
-                            # model versions to avoid off-policy issues from stale weights, since these
-                            # dead workers' parameters may not be refitted.
-                    else:
-                        self.worker_failure_counts[url] = 0
-
-                logger.debug(
-                    f"[miles-router] Health check complete. {len(self.worker_request_counts) - len(self.dead_workers)} workers healthy."
-                )
-
+                await self._health_check_once()
             except asyncio.CancelledError:
                 logger.warning("[miles-router] Background health check loop is being cancelled.")
                 raise
             except Exception as e:
                 logger.error(f"[miles-router] Unexpected error in health check loop: {e}", exc_info=True)
                 await asyncio.sleep(5)
+
+    async def _health_check_once(self):
+        urls = list(self.worker_request_counts)
+        results = await asyncio.gather(*(self._check_worker_health(url) for url in urls))
+
+        for url, is_healthy in results:
+            if url not in self.worker_request_counts:
+                continue
+            if is_healthy:
+                self.worker_failure_counts[url] = 0
+                if url in self.dead_workers:
+                    # Registered cells still receive weight updates; failed updates deregister them.
+                    self.dead_workers.remove(url)
+                    logger.info(f"[miles-router] Worker {url} recovered. Restoring routing.")
+            else:
+                failures = self.worker_failure_counts.get(url, 0) + 1
+                self.worker_failure_counts[url] = failures
+                if failures >= self.config.health_check_failure_threshold and url not in self.dead_workers:
+                    logger.warning(
+                        f"[miles-router] Worker {url} failed {failures} consecutive health checks. Marking as DEAD."
+                    )
+                    self.dead_workers.add(url)
+
+        logger.debug(
+            f"[miles-router] Health check complete. {len(self.worker_request_counts) - len(self.dead_workers)} workers healthy."
+        )
 
     async def proxy(self, request: Request, path: str):
         """Proxy all other requests to the SGLang router"""
