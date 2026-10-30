@@ -85,7 +85,7 @@ def test_per_micro_batch_rebuild_matches_the_round_rebuild_and_skips_expansion(m
     assert rebuilt["pixel_values"].dtype == torch.bfloat16
     assert torch.equal(rebuilt["image_grid_thw"], torch.tensor([[1, 2, 2], [1, 2, 2]]))
     assert [call["image_data"] for call in processor.calls] == [["/shared/b.png", "/shared/c.png"]]
-    assert len(phases) == 2
+    assert len(phases) == 1
     assert all(name == "multimodal_rebuild" and t1 >= t0 for name, t0, t1 in phases)
 
 

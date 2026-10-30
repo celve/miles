@@ -95,13 +95,14 @@ class LazyMultimodalTrainInputs(Sequence):
         return [path for i in indices for path in (self._multimodal_inputs[i] or {}).get("images", [])]
 
     def get_many(self, indices) -> list:
-        indices = list(indices)
-        if self._images is None:
-            return [self[i] for i in indices]
-        self._images.request(self._image_paths(indices))
-        out = [self[i] for i in indices]
-        self._images.trim(keep=set(self._image_paths(indices)))
-        return out
+        with timer("multimodal_rebuild"):
+            indices = list(indices)
+            if self._images is None:
+                return [self._rebuild(i) for i in indices]
+            self._images.request(self._image_paths(indices))
+            out = [self._rebuild(i) for i in indices]
+            self._images.trim(keep=set(self._image_paths(indices)))
+            return out
 
     def prefetch(self, indices) -> None:
         if self._prefetch and self._images is not None:
