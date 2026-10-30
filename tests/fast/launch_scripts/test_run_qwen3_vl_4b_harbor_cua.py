@@ -78,3 +78,12 @@ def test_media_refs_refuse_the_generate_path():
 
     with pytest.raises(typer.BadParameter, match="--rollout-path session only"):
         launcher.main(harbor_env_type="e2b", media_refs=True)
+
+
+@pytest.mark.parametrize("rollout_path", ["generate", "session"])
+def test_engines_keep_image_features_on_the_gpu(monkeypatch, tmp_path, rollout_path):
+    command, env = _train_command(monkeypatch, tmp_path, rollout_path=rollout_path)
+
+    assert "--sglang-mm-feature-transport cuda_ipc" in command
+    assert env["SGLANG_MM_FEATURE_CACHE_MB"] == "4096"
+    assert env["SGLANG_VLM_CACHE_SIZE_MB"] == "0"
