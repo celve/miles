@@ -27,7 +27,8 @@ DATASET_SUBSET = "flowgrpo_ocr"
 # paddleocr's resolver downgrades numpy below 2 and adds GUI OpenCV wheels; the image's numpy and headless OpenCV
 # are restored afterwards, which PaddleOCR 2.9 runs on (miles.diffusion.rollout.ocr patches the one numpy 2 gap).
 _OCR_DEPS_INSTALL = (
-    "python -c 'import paddleocr, Levenshtein' 2>/dev/null || ("
+    'python -c \'import importlib.metadata as m; [m.version(p) for p in ("paddleocr", "paddlepaddle", '
+    '"python-Levenshtein")]\' 2>/dev/null || ('
     "set -e; "
     "NUMPY=$(python -c 'import numpy; print(numpy.__version__)'); "
     "OPENCV=$(pip show opencv-python-headless | sed -n 's/^Version: //p'); "
