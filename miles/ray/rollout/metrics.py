@@ -232,9 +232,9 @@ def _compute_metrics_from_samples(args, samples):
 
 def _get_rollout_key(sample: Sample, position: int) -> tuple[str, int | None, int]:
     if sample.rollout_id is not None:
-        return ("rollout", sample.group_index, sample.rollout_id)
+        return ("rollout", sample.group_index, sample.rollout_identity)
     if sample.index is not None:
-        return ("sample", sample.group_index, sample.index)
+        return ("sample", sample.group_index, sample.rollout_identity)
     return ("position", sample.group_index, position)
 
 

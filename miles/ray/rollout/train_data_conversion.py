@@ -97,7 +97,7 @@ def convert_samples_to_train_data(
         "truncated": [1 if sample.status == Sample.Status.TRUNCATED else 0 for sample in samples],
         "sample_indices": [sample.index for sample in samples],
         **sample_identity_columns,
-        "rollout_ids": [s.rollout_id if s.rollout_id is not None else s.index for s in samples],
+        "rollout_ids": [s.rollout_identity for s in samples],
     }
 
     # loss mask

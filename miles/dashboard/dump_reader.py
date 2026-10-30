@@ -17,10 +17,11 @@ surfacing as corruption.
 from __future__ import annotations
 
 import json
-import os
+import tempfile
 import time
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
+from numbers import Number
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -90,6 +91,41 @@ def _sample_keys(samples: list[Sample]) -> list[SampleKey]:
         occurrences[int(sample.index)] += 1
         keys.append(key)
     return keys
+
+
+def _episode_reward(sample: Sample, reward_key: str | None) -> float | None:
+    metadata = sample.metadata or {}
+    others = metadata.get("others")
+    episode_return = others.get("episode_return", sample.reward) if isinstance(others, dict) else sample.reward
+    reward = metadata.get("raw_reward", episode_return)
+    if isinstance(reward, dict) and reward_key is not None:
+        reward = reward.get(reward_key)
+    return _reward_scalar(reward)
+
+
+def _reward_scalar(reward) -> float | None:
+    return (
+        float(reward)
+        if isinstance(reward, Number) or (isinstance(reward, torch.Tensor) and reward.numel() == 1)
+        else None
+    )
+
+
+def _sample_raw_rewards(samples: list[Sample], rewards, *, reward_key: str | None) -> list:
+    one_per_episode = len({(s.group_index, s.rollout_identity) for s in samples}) == len(samples)
+    if one_per_episode and rewards is not None and len(rewards) >= len(samples):
+        return [_reward_scalar(reward) for reward in rewards[: len(samples)]]
+    # Segment rewards may be per-turn; the saved episode return survives pruning and train-only padding.
+    return [_episode_reward(sample, reward_key) for sample in samples]
+
+
+def _is_dummy_train_row(columns: dict, row: int) -> bool:
+    return (
+        int(columns["response_lengths"][row]) == 1
+        and int(columns["total_lengths"][row]) == 2
+        and torch.as_tensor(columns["tokens"][row]).tolist() == [0, 0]
+        and not bool(torch.as_tensor(columns["loss_masks"][row]).any())
+    )
 
 
 def _matching_train_locations(
@@ -347,6 +383,7 @@ class JoinedRollout:
     rollout_id: int
     evaluation: bool
     samples: list[Sample]
+    raw_rewards: list[float | None]
     # TITO leaves can share Sample.index; occurrence keeps each row distinct.
     train_rows: dict[SampleKey, TrainRow]  # empty for eval dumps
 
@@ -364,7 +401,7 @@ class DumpReader:
     FRESH_SECONDS: ClassVar[float] = 60.0
 
     # bump to invalidate summary parquet caches when their columns change
-    SUMMARY_VERSION: ClassVar[int] = 9  # v9: prefill_lag is the per-call maximum
+    SUMMARY_VERSION: ClassVar[int] = 11
 
     # Column order of summary(). Only needed to give a step with no samples the
     # same shape as any other step; with rows present the schema comes from
@@ -373,6 +410,8 @@ class DumpReader:
     SUMMARY_COLUMNS: ClassVar[tuple[str, ...]] = (
         "sample_index",
         "sample_occurrence",
+        "sample_rollout_id",
+        "lifecycle_index",
         "group_index",
         "status",
         "remove_sample",
@@ -412,6 +451,10 @@ class DumpReader:
         self.train_dir = self.dump_dir / "train_data"
         self.cache_dir = Path(cache_dir) if cache_dir is not None else self.dump_dir / "dashboard" / "cache"
         self.tensor_lru = tensor_lru
+        meta_path = self.dump_dir / "dashboard" / "meta.json"
+        self._reward_key = (
+            json.loads(meta_path.read_text()).get("args", {}).get("reward_key") if meta_path.exists() else None
+        )
         self._joined_cache: OrderedDict[tuple[int, bool], JoinedRollout] = OrderedDict()
         # token-view point reads: mmap'd train shards + {sample -> (shard, row)}
         self._shard_cache: OrderedDict[int, tuple[list[dict], dict[int, list[tuple[int, int]]]]] = OrderedDict()
@@ -442,26 +485,26 @@ class DumpReader:
         sample_counts: defaultdict[int, int] = defaultdict(int)
         for sample_index, _occurrence in sample_keys:
             sample_counts[sample_index] += 1
-        # raw_reward is stored batch-global, so it is indexed by the sample's
-        # position in the rollout dump, not by shard row.
         sample_indices = {key[0] for key in sample_keys}
 
+        raw_reward_column = (
+            _sample_raw_rewards(samples, None, reward_key=self._reward_key)
+            if not evaluation
+            else [None] * len(samples)
+        )
         train_rows: dict[SampleKey, TrainRow] = {}
         if not evaluation:
             handles: list[dict] = []
             index: dict[int, list[tuple[int, int]]] = {}
-            raw_reward_column = None
             for shard, path in enumerate(self._train_paths(rollout_id)):
                 rank_pack = self._torch_load(path)
                 columns = rank_pack["rollout_data"]
                 raw_rewards = columns.get("raw_reward")
                 if raw_rewards is not None:
-                    assert len(raw_rewards) == len(samples), (
-                        f"{path}: raw_reward must be batch-global "
-                        f"(expected {len(samples)} entries, got {len(raw_rewards)})"
-                    )
-                    raw_reward_column = raw_rewards
+                    raw_reward_column = _sample_raw_rewards(samples, raw_rewards, reward_key=self._reward_key)
                 for row, sample_index in enumerate(columns["sample_indices"]):
+                    if _is_dummy_train_row(columns, row):
+                        continue
                     assert (
                         int(sample_index) in sample_indices
                     ), f"{path} references sample_index {sample_index} absent from the rollout dump"
@@ -486,10 +529,16 @@ class DumpReader:
                 train_rows[key] = _build_train_row(
                     handles,
                     locations,
-                    raw_reward=None if raw_reward_column is None else raw_reward_column[position],
+                    raw_reward=raw_reward_column[position],
                 )
 
-        return JoinedRollout(rollout_id=rollout_id, evaluation=evaluation, samples=samples, train_rows=train_rows)
+        return JoinedRollout(
+            rollout_id=rollout_id,
+            evaluation=evaluation,
+            samples=samples,
+            raw_rewards=raw_reward_column,
+            train_rows=train_rows,
+        )
 
     def joined(self, rollout_id: int, *, evaluation: bool = False) -> JoinedRollout:
         """LRU-cached :meth:`load_joined`. A completed rollout's dumps never
@@ -536,8 +585,11 @@ class DumpReader:
                 joined.train_rows.get(key),
                 rollout_id=rollout_id,
                 sample_occurrence=key[1],
+                raw_reward=raw_reward,
             )
-            for sample, key in zip(joined.samples, _sample_keys(joined.samples), strict=True)
+            for sample, key, raw_reward in zip(
+                joined.samples, _sample_keys(joined.samples), joined.raw_rewards, strict=True
+            )
         ]
         # A step can be dumped with no samples at all (aborted before any
         # generation landed). Inferring the schema from an empty row list gives
@@ -550,18 +602,37 @@ class DumpReader:
             else pl.DataFrame(schema={name: pl.Null for name in self.SUMMARY_COLUMNS})
         )
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        tmp_path = cache_path.with_suffix(f".{os.getpid()}.tmp")
-        df.write_parquet(tmp_path)
-        tmp_path.replace(cache_path)
-        sources_path.write_text(json.dumps(sources))
+        with tempfile.TemporaryDirectory(dir=self.cache_dir) as temporary:
+            tmp_path = Path(temporary) / cache_path.name
+            df.write_parquet(tmp_path)
+            tmp_path.replace(cache_path)
+            tmp_sources = Path(temporary) / sources_path.name
+            tmp_sources.write_text(json.dumps(sources))
+            tmp_sources.replace(sources_path)
         return df
+
+    def episodes(self, rollout_id: int, *, evaluation: bool = False) -> pl.DataFrame:
+        """One row per rollout execution, independent of its number of training segments."""
+        return (
+            self.summary(rollout_id, evaluation=evaluation)
+            .group_by("group_index", "sample_rollout_id", maintain_order=True)
+            .agg(
+                sample_index=pl.col("sample_index").first(),
+                sample_occurrence=pl.col("sample_occurrence").first(),
+                n_samples=pl.len(),
+                raw_reward=pl.col("raw_reward").mean(),
+                reward=pl.col("reward").mean(),
+                response_length=pl.col("response_length").sum(),
+                truncated=pl.col("truncated").any(),
+            )
+        )
 
     def groups(self, rollout_id: int, *, evaluation: bool = False) -> pl.DataFrame:
         """Per-GRPO-group aggregates; ``zero_std`` flags degenerate groups
         (all samples got the same reward, so advantages vanish)."""
         reward_column = "reward" if evaluation else "raw_reward"
         return (
-            self.summary(rollout_id, evaluation=evaluation)
+            self.episodes(rollout_id, evaluation=evaluation)
             .group_by("group_index")
             .agg(
                 n=pl.len(),
@@ -586,12 +657,13 @@ class DumpReader:
         for rollout_id in self.rollout_ids().train:
             df = self.summary(rollout_id)
             groups = self.groups(rollout_id)
+            episodes = self.episodes(rollout_id)
             rows.append(
                 dict(
                     rollout_id=rollout_id,
                     n_samples=df.height,
-                    reward_mean=df["raw_reward"].mean(),
-                    reward_std=df["raw_reward"].std(),
+                    reward_mean=episodes["raw_reward"].mean(),
+                    reward_std=episodes["raw_reward"].std(),
                     response_length_mean=df["response_length"].mean(),
                     truncated_frac=df["truncated"].cast(pl.Float64).mean(),
                     zero_std_group_frac=groups["zero_std"].cast(pl.Float64).mean(),
@@ -691,6 +763,8 @@ class DumpReader:
             for shard_no, path in enumerate(self._train_paths(rollout_id)):
                 pack = self._torch_load(path, mmap=True)
                 for row_no, si in enumerate(pack["rollout_data"]["sample_indices"]):
+                    if _is_dummy_train_row(pack["rollout_data"], row_no):
+                        continue
                     index.setdefault(int(si), []).append((shard_no, row_no))
                 handles.append(pack)
             self._shard_cache[rollout_id] = (handles, index)
@@ -802,7 +876,15 @@ class DumpReader:
         paths = [rollout_path] + ([] if evaluation else self._train_paths(rollout_id))
         return {"_summary_version": self.SUMMARY_VERSION, **{p.name: p.stat().st_mtime for p in paths}}
 
-    def _summary_row(self, sample: Sample, row: TrainRow | None, *, rollout_id: int, sample_occurrence: int) -> dict:
+    def _summary_row(
+        self,
+        sample: Sample,
+        row: TrainRow | None,
+        *,
+        rollout_id: int,
+        sample_occurrence: int,
+        raw_reward: float | None = None,
+    ) -> dict:
         spec = sample.spec_info
         cache_info = sample.prefix_cache_info
         versions, turns = _weight_version_summary(sample)
@@ -810,12 +892,14 @@ class DumpReader:
         entry = dict(
             sample_index=sample.index,
             sample_occurrence=sample_occurrence,
+            sample_rollout_id=sample.rollout_identity,
+            lifecycle_index=sample.lineage.source_sample_index if sample.lineage is not None else sample.index,
             group_index=sample.group_index,
             status=sample.status.value,
             remove_sample=sample.remove_sample,
             response_length=sample.response_length,
             total_length=len(sample.tokens),
-            reward=float(sample.reward) if isinstance(sample.reward, (int, float)) else None,
+            reward=_episode_reward(sample, self._reward_key),
             weight_version=versions[-1] if versions else None,
             weight_version_min=_min_numeric_version(versions),
             mixed_version=len(set(versions)) > 1 if versions else None,
@@ -835,7 +919,7 @@ class DumpReader:
         )
         if row is None:
             return entry | dict(
-                raw_reward=None,
+                raw_reward=raw_reward,
                 normalized_reward=None,
                 truncated=sample.status == Sample.Status.TRUNCATED,
                 dumped_rank=None,
@@ -859,7 +943,7 @@ class DumpReader:
         abs_diff = _masked(None if lp_diff is None else lp_diff.abs(), mask)
         advantages = _masked(row.advantages, mask)
         return entry | dict(
-            raw_reward=None if row.raw_reward is None else float(row.raw_reward),
+            raw_reward=raw_reward,
             normalized_reward=float(row.reward),
             truncated=bool(row.truncated) if row.truncated is not None else sample.status == Sample.Status.TRUNCATED,
             dumped_rank=row.rank,
