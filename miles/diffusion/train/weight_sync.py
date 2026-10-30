@@ -12,6 +12,7 @@ from collections.abc import Iterator, Sequence
 import torch
 import torch.distributed as dist
 from sglang.srt.utils import MultiprocessingSerializer
+from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions
 from sglang.srt.weight_sync.tensor_bucket import FlattenedTensorBucket
 
 from miles.backends.fsdp_utils.dtensor import gather_full_param
@@ -102,6 +103,8 @@ class DiffusionLoraFromTensor(WeightTransferProtocol):
         self.is_sender = self._gather_group is not None
 
     def send_bucket(self, bucket: list[tuple[str, torch.Tensor]]) -> None:
+        # Handles must name GPUs by UUID: each engine sees only its own GPU, as device 0.
+        monkey_patch_torch_reductions()
         by_dtype: dict[torch.dtype, list[tuple[str, torch.Tensor]]] = {}
         for name, tensor in bucket:
             by_dtype.setdefault(tensor.dtype, []).append((name.split(":", 1)[-1], tensor))
