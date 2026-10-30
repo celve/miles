@@ -86,13 +86,18 @@ class DiffusionLoraIpcSync:
         serialized = []
         for tensors in by_dtype.values():
             flat = FlattenedTensorBucket(named_tensors=tensors)
-            payload = {self.component: {"flattened_tensor": flat.get_flattened_tensor(), "metadata": flat.get_metadata()}}
+            payload = {
+                self.component: {"flattened_tensor": flat.get_flattened_tensor(), "metadata": flat.get_metadata()}
+            }
             serialized.append(MultiprocessingSerializer.serialize(payload, output_str=True))
 
         is_src = dist.get_rank() == self._gather_src
         gathered = [None] * dist.get_world_size(self._gather_group) if is_src else None
         dist.gather_object(
-            obj=(get_physical_gpu_id(), serialized), object_gather_list=gathered, dst=self._gather_src, group=self._gather_group
+            obj=(get_physical_gpu_id(), serialized),
+            object_gather_list=gathered,
+            dst=self._gather_src,
+            group=self._gather_group,
         )
         if not is_src:
             return

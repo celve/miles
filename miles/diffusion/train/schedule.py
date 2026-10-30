@@ -16,9 +16,9 @@ def tile_train_pairs(
     images_per_step = len(rows) // num_optim_steps
     sample_mb = min(sample_microbatch, images_per_step)
     tstep_mb = min(tstep_microbatch, window)
-    assert images_per_step % sample_mb == 0 and window % tstep_mb == 0, (
-        f"tiles must be uniform: {images_per_step} images per step / {sample_mb}, {window} steps / {tstep_mb}"
-    )
+    assert (
+        images_per_step % sample_mb == 0 and window % tstep_mb == 0
+    ), f"tiles must be uniform: {images_per_step} images per step / {sample_mb}, {window} steps / {tstep_mb}"
 
     steps = []
     for step in range(num_optim_steps):

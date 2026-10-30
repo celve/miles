@@ -7,8 +7,8 @@ from typing_extensions import Self
 from miles.backends.sglang_utils.sglang_api_client import WorkerType
 from miles.backends.sglang_utils.sglang_config import ModelConfig, ServerGroupConfig
 from miles.backends.sglang_utils.sglang_engine import compute_engine_launch_cmd
-from miles.diffusion.engine import compute_diffusion_engine_env_vars, compute_diffusion_engine_launch_cmd
 from miles.backends.sglang_utils.sglang_scaling_config import ServerGroupScalingConfig
+from miles.diffusion.engine import compute_diffusion_engine_env_vars, compute_diffusion_engine_launch_cmd
 from miles.ray.utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST
 from miles.rollout.session.config import compute_session_server_config
 from miles.router.backend import make_router_backend

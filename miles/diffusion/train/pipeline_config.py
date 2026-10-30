@@ -21,7 +21,9 @@ def register_train_pipeline_config(family: str):
 def resolve_model_family(hf_checkpoint: str) -> str:
     """The family whose longest name pattern occurs in the checkpoint path."""
     ref = hf_checkpoint.lower()
-    matches = [(len(pattern), family) for family, cls in _REGISTRY.items() for pattern in cls.name_patterns if pattern in ref]
+    matches = [
+        (len(pattern), family) for family, cls in _REGISTRY.items() for pattern in cls.name_patterns if pattern in ref
+    ]
     if not matches:
         raise ValueError(f"Cannot resolve the diffusion family of {hf_checkpoint!r}; set --diffusion-model-family")
     return max(matches)[1]

@@ -19,7 +19,8 @@ def convert_samples_to_train_data(args, samples: list[Sample]) -> dict[str, Any]
     advantages = compute_grpo_advantages(args, raw_rewards=[sample.reward for sample in samples])
     return {
         "diffusion_train_pairs": [
-            build_train_pairs(sample, advantage=advantage) for sample, advantage in zip(samples, advantages, strict=True)
+            build_train_pairs(sample, advantage=advantage)
+            for sample, advantage in zip(samples, advantages, strict=True)
         ],
         "sample_indices": [sample.index for sample in samples],
         "raw_reward": [sample.reward for sample in samples],

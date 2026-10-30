@@ -287,6 +287,13 @@ class TestConstructorArguments:
             train_specs._TRAINER_ACTOR_CLASSES[backend]
         ] * use_critic
 
+    def test_a_diffusion_run_selects_the_dit_trainer_and_its_deterministic_env(self):
+        args = _make_args(train_backend="fsdp", model_kind="diffusion")
+        (actor_spec,) = specs_trainer(args)
+
+        assert actor_spec.worker_class == "miles.diffusion.train.actor.DiffusionFSDPTrainRayActor"
+        assert train_specs._is_deterministic_diffusion(actor_spec.args) is actor_spec.args.backend.deterministic_mode
+
 
 class TestConcurrencyGroups:
     def test_the_heartbeat_rpc_is_always_isolated(self):

@@ -63,10 +63,14 @@ def _init_context(*, materialize: bool):
 def _load_component(checkpoint: str, component: str, *, master_dtype: torch.dtype, materialize: bool):
     """Load one pipeline component by the class `model_index.json` names, without loading its siblings."""
     library, class_name = DiffusionPipeline.load_config(checkpoint)[component][:2]
-    model_cls = getattr(importlib.import_module(library), class_name)
+    model_cls = getattr(  # config-access-exempt: model_index.json names the class
+        importlib.import_module(library), class_name
+    )
     # Off rank 0, low_cpu_mem_usage=False keeps params on meta, which diffusers forbids for classes pinning
     # modules to fp32; the pin is lifted meanwhile and dtypes are synced from rank 0 afterwards.
-    keep_in_fp32 = getattr(model_cls, "_keep_in_fp32_modules", None)
+    keep_in_fp32 = getattr(  # config-access-exempt: only some diffusers classes pin modules to fp32
+        model_cls, "_keep_in_fp32_modules", None
+    )
     if not materialize and keep_in_fp32 is not None:
         model_cls._keep_in_fp32_modules = None
     try:
@@ -108,8 +112,7 @@ def _sync_dtypes_from_rank0(model: torch.nn.Module) -> None:
 
 
 def _apply_fsdp2(model: torch.nn.Module, *, mesh, param_dtype: torch.dtype) -> torch.nn.Module:
-    base = model.get_base_model() if hasattr(model, "get_base_model") else model
-    block_classes = set(base._no_split_modules)
+    block_classes = set(model.get_base_model()._no_split_modules)
     blocks = [module for module in model.modules() if type(module).__name__ in block_classes]
     # Inputs keep their dtype: autocast owns compute, so gradient-checkpoint recompute stays consistent.
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=torch.float32, cast_forward_inputs=False)
@@ -126,9 +129,7 @@ def _broadcast_full_state(model: torch.nn.Module, full_state: dict) -> None:
         model.to(device=device, non_blocking=True)
     else:
         model.to_empty(device=device)
-    set_model_state_dict(
-        model, full_state, options=StateDictOptions(full_state_dict=True, broadcast_from_rank0=True)
-    )
+    set_model_state_dict(model, full_state, options=StateDictOptions(full_state_dict=True, broadcast_from_rank0=True))
     # State dict loading skips non-persistent buffers.
     for buffer in model.buffers():
         dist.broadcast(buffer, src=0)

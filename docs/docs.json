@@ -326,7 +326,8 @@
       "group": "Getting Started",
       "pages": [
        "diffusion/getting-started/installation",
-       "diffusion/getting-started/quick-start"
+       "diffusion/getting-started/quick-start",
+       "diffusion/getting-started/miles-main"
       ]
      },
      {
