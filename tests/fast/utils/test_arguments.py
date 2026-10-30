@@ -36,6 +36,8 @@ from miles.utils.arguments import (
     validate_log_probs_backend_args,
     validate_skip_actor_forward_only,
 )
+from miles.rollout.fully_async_rollout import FullyAsyncRolloutFn
+from miles.rollout.inference_rollout.inference_rollout_common import InferenceRolloutFn
 from miles.utils.env_report.redaction import _SECRET_ARG_NAMES, _SECRET_ENV_VAR_PATTERN
 from miles.utils.ft_utils.health_checker import SimpleHealthCheckerConfig
 from miles.utils.function_registry import function_registry
@@ -794,10 +796,27 @@ def test_the_flag_and_a_matching_path_agree():
 
 def test_the_flag_still_rejects_a_different_rollout_function():
     """Two different selections remain a misconfiguration."""
-    args = _fully_async_candidate_args(fully_async=True, rollout_function_path="pkg.CustomRolloutFn")
+    args = _fully_async_candidate_args(fully_async=True, rollout_function_path="test:OtherRolloutFn")
 
-    with pytest.raises(AssertionError, match="pass only one"):
+    with function_registry.temporary("test:OtherRolloutFn", InferenceRolloutFn):
+        with pytest.raises(AssertionError, match="pass only one"):
+            _resolve_rollout_functions(args)
+
+
+def test_the_flag_takes_a_fully_async_subclass():
+    """A FullyAsyncRolloutFn subclass named by path refines the mode's selection instead of competing with it."""
+
+    class RecordingFullyAsyncRolloutFn(FullyAsyncRolloutFn):
+        pass
+
+    args = _fully_async_candidate_args(fully_async=True, rollout_function_path="test:RecordingFullyAsyncRolloutFn")
+
+    with function_registry.temporary("test:RecordingFullyAsyncRolloutFn", RecordingFullyAsyncRolloutFn):
         _resolve_rollout_functions(args)
+
+    assert args.fully_async is True
+    assert args.rollout_function_path == "test:RecordingFullyAsyncRolloutFn"
+    assert args.eval_function_path == "test:RecordingFullyAsyncRolloutFn"
 
 
 def test_an_ordinary_rollout_function_path_stays_untouched():
