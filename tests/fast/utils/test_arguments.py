@@ -15,6 +15,8 @@ from tests.fast.fixtures.megatron_config_fixtures import encode_megatron_config,
 
 from miles.backends.sglang_utils.arguments import add_sglang_arguments, collect_eval_sglang_overrides
 from miles.backends.sglang_utils.arguments import validate_args as validate_sglang_args
+from miles.rollout.fully_async_rollout import FullyAsyncRolloutFn
+from miles.rollout.inference_rollout.inference_rollout_common import InferenceRolloutFn
 from miles.utils.arguments import (
     FULLY_ASYNC_ROLLOUT_PATH,
     _compute_custom_inference_engine_provider_path,
@@ -36,8 +38,6 @@ from miles.utils.arguments import (
     validate_log_probs_backend_args,
     validate_skip_actor_forward_only,
 )
-from miles.rollout.fully_async_rollout import FullyAsyncRolloutFn
-from miles.rollout.inference_rollout.inference_rollout_common import InferenceRolloutFn
 from miles.utils.env_report.redaction import _SECRET_ARG_NAMES, _SECRET_ENV_VAR_PATTERN
 from miles.utils.ft_utils.health_checker import SimpleHealthCheckerConfig
 from miles.utils.function_registry import function_registry
