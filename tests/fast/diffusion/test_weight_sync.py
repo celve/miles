@@ -42,6 +42,8 @@ def single_rank(tmp_path, monkeypatch):
     dist.init_process_group("gloo", init_method=f"file://{tmp_path}/pg", rank=0, world_size=1)
     monkeypatch.setattr(distributed_utils, "GLOO_GROUP", dist.new_group(backend="gloo"))
     monkeypatch.setattr(weight_sync, "get_physical_gpu_id", lambda: "GPU-test")
+    # The UUID reduction patch is process-wide and handles only CUDA tensors.
+    monkeypatch.setattr(weight_sync, "monkey_patch_torch_reductions", lambda: None)
     monkeypatch.setattr(torch.cuda, "ipc_collect", lambda: None)
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
     yield
