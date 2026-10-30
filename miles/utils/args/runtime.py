@@ -20,6 +20,7 @@ from miles.utils.args.configs.custom_megatron_plugins import (
 from miles.utils.args.configs.dashboard import DashboardConfig
 from miles.utils.args.configs.data import DataConfig
 from miles.utils.args.configs.debug import DebugConfig, DebugRolloutOnlyConfig
+from miles.utils.args.configs.diffusion import DiffusionConfig
 from miles.utils.args.configs.eval import EvalConfig, EvalRolloutOnlyConfig
 from miles.utils.args.configs.fault_tolerance import FaultToleranceConfig
 from miles.utils.args.configs.lora import LoraConfig
@@ -61,6 +62,7 @@ class OrchestratorConfig(
     AlgoConfig,
     OnPolicyDistillationConfig,
     LoraConfig,
+    DiffusionConfig,
     RouterConfig,
     DebugConfig,
     NetworkConfig,
@@ -96,6 +98,7 @@ class TrainerConfig(
     AlgoConfig,
     OnPolicyDistillationConfig,
     LoraConfig,
+    DiffusionConfig,
     RouterConfig,
     DebugConfig,
     NetworkConfig,
@@ -178,6 +181,7 @@ class InferenceControllerConfig(
     AlgoConfig,
     OnPolicyDistillationConfig,
     LoraConfig,
+    DiffusionConfig,
     RouterConfig,
     DebugConfig,
     NetworkConfig,
@@ -225,6 +229,7 @@ class RolloutConfig(
     AlgoConfig,
     OnPolicyDistillationConfig,
     LoraConfig,
+    DiffusionConfig,
     RouterConfig,
     DebugConfig,
     NetworkConfig,
@@ -261,6 +266,7 @@ class MultiLoraConfig(
     AlgoConfig,
     OnPolicyDistillationConfig,
     LoraConfig,
+    DiffusionConfig,
     RouterConfig,
     DebugConfig,
     NetworkConfig,
@@ -302,6 +308,7 @@ class AllConfig(
     OnPolicyDistillationConfig,
     OnPolicyDistillationRolloutOnlyConfig,
     LoraConfig,
+    DiffusionConfig,
     WandbConfig,
     WandbRolloutOnlyConfig,
     MlflowConfig,

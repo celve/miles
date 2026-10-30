@@ -49,8 +49,14 @@ _TRAINER_ACTOR_CLASSES = {
     "fsdp": "miles.backends.fsdp_utils.actor.FSDPTrainRayActor",
     "torchtitan": "miles.backends.torchtitan_utils.actor.TorchtitanTrainRayActor",
 }
+_DIFFUSION_TRAINER_ACTOR_CLASSES = {
+    "fsdp": "miles.diffusion.train.actor.DiffusionFSDPTrainRayActor",
+}
 
 _NUM_GPUS_PER_TRAINER_WORKER = 0.4
+
+# Read by NCCL and cuBLAS at process start, so they must be in the spawn environment.
+_DIFFUSION_DETERMINISTIC_ENV_VARS = {"NCCL_DETERMINISTIC": "1", "CUBLAS_WORKSPACE_CONFIG": ":4096:8"}
 
 
 class TrainerControllerSpec(BaseServeSpec):
@@ -162,13 +168,7 @@ class TrainerSpec(BaseServeSpec):
                 DEFAULT_RPC_PORT_INFO,
             ],
             partial_static_meta=StaticMeta(values=dict(role=config.trainer_role), include_cell_index=True),
-            worker_class=(
-                "miles.backends.megatron_utils.lora.actor.MultiLoRATrainRayActor"
-                if config.train_backend == "megatron"
-                and config.trainer_role == ACTOR_ROLE
-                and is_multi_lora_enabled(config)
-                else _TRAINER_ACTOR_CLASSES[config.train_backend]
-            ),
+            worker_class=_compute_trainer_actor_class(config),
             concurrency_groups=TRAINER_CONCURRENCY_GROUPS if config.use_fault_tolerance else None,
         )
 
@@ -219,6 +219,7 @@ def compute_trainer_env_vars(args, ctx: WorkerLaunchContext, *, fp8_scales: str)
         "NVSHMEM_DISABLE_NCCL": os.environ.get("NVSHMEM_DISABLE_NCCL", "1"),
         "NVTE_FP8_BLOCK_SCALING_FP32_SCALES": fp8_scales,
         **{name: "1" for name in NOSET_VISIBLE_DEVICES_ENV_VARS_LIST},
+        **(_DIFFUSION_DETERMINISTIC_ENV_VARS if _is_deterministic_diffusion(args) else {}),
         **args.train_env_vars,
     }
 
@@ -256,3 +257,15 @@ def _compute_fp8_block_scaling_fp32_scales() -> str:
         if (x := os.environ.get("NVTE_FP8_BLOCK_SCALING_FP32_SCALES")) is not None
         else default_fp8_block_scaling_fp32_scales()
     )
+
+
+def _compute_trainer_actor_class(config: TrainerConfig) -> str:
+    if config.model_kind == "diffusion":
+        return _DIFFUSION_TRAINER_ACTOR_CLASSES[config.train_backend]
+    if config.train_backend == "megatron" and config.trainer_role == ACTOR_ROLE and is_multi_lora_enabled(config):
+        return "miles.backends.megatron_utils.lora.actor.MultiLoRATrainRayActor"
+    return _TRAINER_ACTOR_CLASSES[config.train_backend]
+
+
+def _is_deterministic_diffusion(args) -> bool:
+    return args.model_kind == "diffusion" and args.backend.deterministic_mode

@@ -198,6 +198,8 @@ class Sample:
     remove_sample: bool = False
     teacher_log_probs: list[float] | None = None  # Log probabilities from teacher model for OPD
     opd_reverse_kl: list[float] | None = None  # Precomputed per-token OPD reverse-KL estimate
+    # Denoising trajectory of a --model-kind diffusion sample (miles.diffusion.types.DiffusionRollout)
+    diffusion: Any = None
 
     class Status(Enum):
         PENDING = "pending"
