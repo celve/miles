@@ -86,4 +86,4 @@ def test_engines_keep_image_features_on_the_gpu(monkeypatch, tmp_path, rollout_p
 
     assert "--sglang-mm-feature-transport cuda_ipc" in command
     assert env["SGLANG_MM_FEATURE_CACHE_MB"] == "4096"
-    assert env["SGLANG_VLM_CACHE_SIZE_MB"] == "0"
+    assert env["SGLANG_VLM_CACHE_SIZE_MB"] == "4096"

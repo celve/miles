@@ -369,8 +369,8 @@ def _worker_env(args: ScriptArgs, harbor_env: dict[str, str]) -> dict:
         "AGENT_MAX_OUTPUT_TOKENS": os.environ.get("AGENT_MAX_OUTPUT_TOKENS", "2048"),
         # Room for 64 desktops' screenshots in flight, so the IPC pool never falls back to CPU transport.
         "SGLANG_MM_FEATURE_CACHE_MB": "4096",
-        # SGLang never clears its ViT embedding cache, not even on /flush_cache after a weight update.
-        "SGLANG_VLM_CACHE_SIZE_MB": "0",
+        # Keeps the resent screenshot's ViT embedding (~42 MB at 1080p) for 64 desktops; needs an SGLang that clears it on weight updates.
+        "SGLANG_VLM_CACHE_SIZE_MB": "4096",
     }
     if args.rollout_path == "session":
         env["HARBOR_AGENT_MAX_ITERATIONS"] = str(args.max_turns)
