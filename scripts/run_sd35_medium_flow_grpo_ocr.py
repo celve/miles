@@ -2,8 +2,8 @@
 two sglang.multimodal_gen engines time-sharing the same GPUs).
 
 Ported from radixark/miles_diffusion at 221f965f (scripts/run_diffusion_grpo_sd3_ocr_sglang.py). SD3.5 is gated on
-the Hugging Face Hub, so export HF_TOKEN or pass --model-path to a local copy. The OCR reward needs
-`pip install paddleocr==2.9.1 paddlepaddle==2.6.2 python-Levenshtein`.
+the Hugging Face Hub, so export HF_TOKEN or pass --model-path to a local copy. `prepare` installs the OCR reward's
+PaddleOCR (CPU) when the image lacks it.
 
 Args:
     --num-rollout: rollouts to train; each is 8 prompts x 16 images and two optimizer steps.
@@ -23,6 +23,19 @@ from miles.utils.external_utils import command_utils
 MODEL = "stabilityai/stable-diffusion-3.5-medium"
 DATASET = "rockdu/miles-diffusion-datasets"
 DATASET_SUBSET = "flowgrpo_ocr"
+
+# paddleocr's resolver downgrades numpy below 2 and adds GUI OpenCV wheels; the image's numpy and headless OpenCV
+# are restored afterwards, which PaddleOCR 2.9 runs on (miles.diffusion.rollout.ocr patches the one numpy 2 gap).
+_OCR_DEPS_INSTALL = (
+    "python -c 'import paddleocr, Levenshtein' 2>/dev/null || ("
+    "set -e; "
+    "NUMPY=$(python -c 'import numpy; print(numpy.__version__)'); "
+    "OPENCV=$(pip show opencv-python-headless | sed -n 's/^Version: //p'); "
+    "pip install paddleocr==2.9.1 paddlepaddle==2.6.2 python-Levenshtein==0.27.3; "
+    "pip uninstall -y opencv-python opencv-contrib-python; "
+    'pip install "numpy==$NUMPY"; '
+    'pip install --force-reinstall --no-deps "opencv-python-headless==$OPENCV")'
+)
 
 
 @dataclass
@@ -45,6 +58,7 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
 
 def prepare(args: ScriptArgs) -> None:
     U = args.create_backend()
+    U.exec_command_cpu(_OCR_DEPS_INSTALL)
     U.exec_command_cpu(
         f"hf download --repo-type dataset {DATASET} --include '{DATASET_SUBSET}/**' --local-dir {args.dataset_dir}"
     )

@@ -1,9 +1,14 @@
 ### 0
+python -c 'import paddleocr, Levenshtein' 2>/dev/null || (set -e; NUMPY=$(python -c 'import numpy; print(numpy.__version__)'); OPENCV=$(pip show opencv-python-headless | sed -n 's/^Version: //p'); pip install paddleocr==2.9.1 paddlepaddle==2.6.2 python-Levenshtein==0.27.3; pip uninstall -y opencv-python opencv-contrib-python; pip install "numpy==$NUMPY"; pip install
+  --force-reinstall
+  --no-deps "opencv-python-headless==$OPENCV")
+
+### 1
 hf download
   --repo-type dataset rockdu/miles-diffusion-datasets
   --include 'flowgrpo_ocr/**'
   --local-dir /root/datasets/miles-diffusion-datasets
 
-### 1
+### 2
 hf download stabilityai/stable-diffusion-3.5-medium
   --local-dir /root/models/stable-diffusion-3.5-medium
