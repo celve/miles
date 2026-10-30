@@ -253,3 +253,12 @@ def test_custom_phase_helpers_are_noops_when_disabled_or_evaluating():
         report_trajectory_phase(sample, "reset", 1.0, 2.0, evaluation=True)
     TrajectoryLifecycle().sink.flush()
     assert _pushed(handle) == []
+
+
+def test_reported_phase_closes_without_waiting_for_another_event():
+    from miles.utils.lifecycle import report_trajectory_phase
+
+    handle = FakeHandle()
+    TrajectoryLifecycle().sink = TrajectorySink(handle)
+    report_trajectory_phase(_sample(), "settle", 10.0, 12.0, turn=1)
+    assert [(event.kind, event.ts) for event in _pushed(handle)] == [("phase_start", 10.0), ("phase_end", 12.0)]

@@ -222,6 +222,7 @@ class TrajectorySink:
 
     def phase_end(self, sample, name: str, *, turn: int = -1, ts: float | None = None) -> None:
         self._emit(TrajectoryEventKind.PHASE_END, sample, ts=ts, turn=turn, detail=name)
+        self.flush()
 
     # ------------------------------ internals -------------------------------
 
