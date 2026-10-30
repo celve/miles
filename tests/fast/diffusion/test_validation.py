@@ -92,3 +92,23 @@ def test_the_engine_layout_is_one_model_of_regular_single_gpu_groups():
     for group in (_group(WorkerType.PREFILL), _group(num_gpus_per_engine=2)):
         with pytest.raises(ValueError, match="regular single-GPU"):
             validate_diffusion_sglang_config(SimpleNamespace(models=[_model("m", [group])]))
+
+
+def test_a_model_path_that_differs_from_the_checkpoint_freezes_the_model_and_is_rejected(tmp_path):
+    from tests.fast.ray.rollout.conftest import make_sglang_config_yaml
+
+    from miles.backends.sglang_utils.sglang_config import SglangConfig
+
+    config_path = tmp_path / "sglang.yaml"
+    config_path.write_text(
+        make_sglang_config_yaml(
+            model_path="/models/another-copy",
+            server_groups=[{"worker_type": "regular", "num_gpus": 2, "num_gpus_per_engine": 1}],
+        )
+    )
+    supported = _supported(sglang_config=str(config_path), rollout_num_gpus=2, actor_num_gpus_per_node=2)
+    sglang, _ = SglangConfig.parse_args(Namespace(**(parser_defaults() | vars(supported))))
+
+    assert sglang.models[0].update_weights is False
+    with pytest.raises(ValueError, match="update_weights"):
+        validate_diffusion_sglang_config(sglang)
