@@ -1,23 +1,31 @@
-"""Colocated LoRA weight sync to sglang.multimodal_gen: each training rank all-gathers the adapter's A/B pairs,
-hands its engine CUDA-IPC handles, and the engine merges ``W + alpha/r * B @ A`` (``weight_update_mode=lora_merge``)."""
+"""Colocated LoRA weight sync to sglang.multimodal_gen, driven by the common `WeightUpdater`.
+
+Each training rank all-gathers the adapter's A/B pairs and hands its own engine CUDA-IPC handles; the engine
+merges ``W + alpha/r * B @ A`` into its weights (``weight_update_mode=lora_merge``).
+"""
 
 import logging
 import re
-from collections.abc import Iterator
+from argparse import Namespace
+from collections.abc import Iterator, Sequence
 
 import torch
 import torch.distributed as dist
 from sglang.srt.utils import MultiprocessingSerializer
-from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions
 from sglang.srt.weight_sync.tensor_bucket import FlattenedTensorBucket
 
 from miles.backends.fsdp_utils.dtensor import gather_full_param
-from miles.ray.rollout.inference_controller import UpdatableEngines
+from miles.backends.sglang_utils.sglang_api_client import SGLangApiClient
+from miles.backends.training_utils.parallel import ParallelState
+from miles.backends.training_utils.weight_update.hf_weight_iterator import HfWeightIteratorBase, WeightUpdatePlacement
+from miles.backends.training_utils.weight_update.protocol import WeightTransferProtocol
+from miles.backends.training_utils.weight_update.rollout_cell_updater import create_rollout_cell_updaters
 from miles.ray.utils import get_physical_gpu_id
 from miles.utils import async_utils
 
 logger = logging.getLogger(__name__)
 
+DIT_COMPONENT = "transformer"
 # PEFT appends the adapter name and ".weight" after lora_A / lora_B.
 _PEFT_LORA_SUFFIX = re.compile(r"\.(lora_[AB])(?:\.[^.]+)?(?:\.weight)?$")
 
@@ -28,68 +36,83 @@ def to_hf_name(train_name: str) -> str:
     return _PEFT_LORA_SUFFIX.sub(r".\1", name)
 
 
-class DiffusionLoraIpcSync:
-    def __init__(self, args, model: torch.nn.Module, *, component: str = "transformer") -> None:
-        self.args = args
-        self.model = model
-        self.component = component
-        adapter = model.peft_config[model.active_adapter]
-        self.lora_alpha = adapter.lora_alpha
-        self.lora_rank = adapter.r
-        self._connected_cell_ids: tuple[str, ...] | None = None
+class DiffusionLoraWeightIterator(HfWeightIteratorBase):
+    """Streams the PEFT adapter of an FSDP2 DiT; one unit per LoRA module, its A and B together, since the
+    engine merges each module from both halves."""
 
-    def connect_if_needed(self, engines: UpdatableEngines) -> None:
-        if self._connected_cell_ids == tuple(engines.engine_cell_ids):
-            return
-        # Every rank creates every engine's gather group, in the same order, as dist.new_group requires.
-        rank = dist.get_rank()
-        for client, offset, count in zip(
-            engines.rollout_engines, engines.engine_gpu_offsets, engines.engine_gpu_counts, strict=True
-        ):
-            group = dist.new_group(ranks=list(range(offset, offset + count)), backend="gloo")
-            if offset <= rank < offset + count:
-                self._engine, self._gather_group, self._gather_src = client, group, offset
-        self._connected_cell_ids = tuple(engines.engine_cell_ids)
+    def _iter_hf_param_units(self, weights, *, materialize: bool):
+        raise NotImplementedError("the diffusion engine keeps its base weights; only the LoRA adapter is synced")
 
-    @torch.no_grad()
-    def update_weights(self, *, weight_version: int) -> None:
-        monkey_patch_torch_reductions()
-        for bucket in self._iter_buckets():
-            self._send_bucket(bucket, weight_version=weight_version)
-
-    def _iter_buckets(self) -> Iterator[list[tuple[str, torch.Tensor]]]:
-        """Adapter tensors in buckets of at most --update-weight-buffer-size bytes; a module's A and B share one."""
-        bucket, bucket_bytes, halves = [], 0, {}
+    def _iter_hf_adapter_units(self, adapter, *, materialize: bool) -> Iterator[list[tuple[str, torch.Tensor]]]:
+        halves: dict[str, list[tuple[str, torch.Tensor]]] = {}
         for name, param in self.model.state_dict().items():
             if ".lora_A" not in name and ".lora_B" not in name:
                 continue
             full = gather_full_param(param)
             hf_name = to_hf_name(name)
-            module = hf_name.rsplit(".lora_", 1)[0]
-            halves.setdefault(module, []).append((hf_name, full))
-            if len(halves[module]) < 2:
-                continue
-            unit = halves.pop(module)
-            bucket.extend(unit)
-            bucket_bytes += sum(tensor.numel() * tensor.element_size() for _, tensor in unit)
-            if bucket_bytes >= self.args.update_weight_buffer_size:
-                yield bucket
-                bucket, bucket_bytes = [], 0
+            module = halves.setdefault(hf_name.rsplit(".lora_", 1)[0], [])
+            module.append((hf_name, full))
+            if len(module) == 2:
+                del halves[hf_name.rsplit(".lora_", 1)[0]]
+                if materialize:
+                    yield module
         assert not halves, f"LoRA modules missing an A or B half: {sorted(halves)}"
-        if bucket:
-            yield bucket
 
-    def _send_bucket(self, named_tensors: list[tuple[str, torch.Tensor]], *, weight_version: int) -> None:
+
+class DiffusionLoraFromTensor(WeightTransferProtocol):
+    """Each rank sends to the one engine whose GPUs it shares.
+
+    sglang.multimodal_gen serves no pause/flush/begin/end session and reports no weight version, so the session
+    frame is off. A failed bucket marks its cell errored, which without fault tolerance stops the run instead of
+    serving a partly merged adapter.
+    """
+
+    required_placement = WeightUpdatePlacement(gather_pp=True)
+    supports_lora = True
+    use_weight_update_session = False
+
+    def __init__(self, args: Namespace) -> None:
+        super().__init__(args)
+        self.group_name = "miles-diffusion-colocate"
+        self._gather_groups: list[dist.ProcessGroup] = []
+
+    def connect(
+        self,
+        rollout_engines: Sequence[SGLangApiClient],
+        engine_gpu_counts: Sequence[int] | None,
+        engine_gpu_offsets: Sequence[int] | None,
+        engine_cell_ids: Sequence[str],
+        parallel_state: ParallelState,
+        placement: WeightUpdatePlacement,
+        selector: str,
+    ) -> None:
+        self.rollout_engines = rollout_engines
+        self.cell_updaters_of_cell_id = create_rollout_cell_updaters(self.args, rollout_engines, engine_cell_ids)
+        for group in self._gather_groups:
+            dist.destroy_process_group(group)
+        self._gather_groups = []
+        self._cell_id = self._gather_group = self._gather_src = None
+        rank = dist.get_rank()
+        # dist.new_group is collective: every rank creates every engine's group, in the same order.
+        for cell_id, offset, count in zip(engine_cell_ids, engine_gpu_offsets, engine_gpu_counts, strict=True):
+            group = dist.new_group(ranks=list(range(offset, offset + count)), backend="gloo")
+            self._gather_groups.append(group)
+            if offset <= rank < offset + count:
+                self._cell_id, self._gather_group, self._gather_src = cell_id, group, offset
+        self.is_sender = self._gather_group is not None
+
+    def send_bucket(self, bucket: list[tuple[str, torch.Tensor]]) -> None:
         by_dtype: dict[torch.dtype, list[tuple[str, torch.Tensor]]] = {}
-        for name, tensor in named_tensors:
-            by_dtype.setdefault(tensor.dtype, []).append((name, tensor))
-        serialized = []
-        for tensors in by_dtype.values():
-            flat = FlattenedTensorBucket(named_tensors=tensors)
-            payload = {
-                self.component: {"flattened_tensor": flat.get_flattened_tensor(), "metadata": flat.get_metadata()}
-            }
-            serialized.append(MultiprocessingSerializer.serialize(payload, output_str=True))
+        for name, tensor in bucket:
+            by_dtype.setdefault(tensor.dtype, []).append((name.split(":", 1)[-1], tensor))
+        flats = [FlattenedTensorBucket(named_tensors=tensors) for tensors in by_dtype.values()]
+        serialized = [
+            MultiprocessingSerializer.serialize(
+                {DIT_COMPONENT: {"flattened_tensor": flat.get_flattened_tensor(), "metadata": flat.get_metadata()}},
+                output_str=True,
+            )
+            for flat in flats
+        ]
 
         is_src = dist.get_rank() == self._gather_src
         gathered = [None] * dist.get_world_size(self._gather_group) if is_src else None
@@ -99,22 +122,25 @@ class DiffusionLoraIpcSync:
             dst=self._gather_src,
             group=self._gather_group,
         )
-        if not is_src:
-            return
-        for dtype_index in range(len(serialized)):
-            body = {
-                "serialized_named_tensors": [tensors[dtype_index] for _, tensors in gathered],
-                "payload_gpu_uuids": [gpu_uuid for gpu_uuid, _ in gathered],
-                "load_format": "flattened_bucket",
-                "target_modules": [self.component],
-                "weight_version": str(weight_version),
-                "weight_update_mode": "lora_merge",
-                "lora_alpha": self.lora_alpha,
-                "lora_rank": self.lora_rank,
-            }
-            result = async_utils.run(
-                self._engine._make_request(
-                    "update_weights_from_tensor", body, timeout=self.args.update_weight_engine_request_timeout
-                )
+        if is_src:
+            updater = self.cell_updaters_of_cell_id[self._cell_id]
+            async_utils.wait_futures(
+                [
+                    updater.submit_client_call(
+                        "update_lora_weights_from_tensor",
+                        serialized_named_tensors=[tensors[index] for _, tensors in gathered],
+                        payload_gpu_uuids=[gpu_uuid for gpu_uuid, _ in gathered],
+                        target_module=DIT_COMPONENT,
+                        lora_rank=self.args.diffusion_lora_rank,
+                        lora_alpha=self.args.diffusion_lora_alpha,
+                    )
+                    for index in range(len(serialized))
+                ]
             )
-            assert result and result.get("success"), f"LoRA weight sync failed on {self._engine.server_url}: {result}"
+        # Every rank owns storage behind the gathered IPC handles; keep it alive until the engine has read it.
+        dist.barrier(group=self._gather_group)
+        del flats
+
+    def after_engines_resumed(self) -> None:
+        torch.cuda.ipc_collect()
+        torch.cuda.empty_cache()
