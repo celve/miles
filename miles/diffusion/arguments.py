@@ -80,6 +80,9 @@ def validate_diffusion_sglang_config(sglang) -> None:
     """One model served by regular single-GPU engine groups: the trainer syncs one DiT into one engine kind."""
     if len(sglang.models) != 1:
         raise ValueError(f"--model-kind diffusion serves exactly one model, got {[m.name for m in sglang.models]}")
+    if not sglang.models[0].update_weights:
+        # A frozen model's engines get no LoRA sync, yet every weight version would still be published.
+        raise ValueError("--model-kind diffusion trains its one model, so that model needs update_weights: true")
     for group in sglang.models[0].server_groups:
         if group.worker_type != WorkerType.REGULAR or group.num_gpus_per_engine != 1:
             raise ValueError(

@@ -76,14 +76,19 @@ def _group(worker_type=WorkerType.REGULAR, num_gpus_per_engine=1):
     return SimpleNamespace(worker_type=worker_type, num_gpus_per_engine=num_gpus_per_engine)
 
 
+def _model(name, groups, update_weights=True):
+    return SimpleNamespace(name=name, server_groups=groups, update_weights=update_weights)
+
+
+def test_a_frozen_sole_model_is_rejected():
+    with pytest.raises(ValueError, match="update_weights"):
+        validate_diffusion_sglang_config(SimpleNamespace(models=[_model("m", [_group()], update_weights=False)]))
+
+
 def test_the_engine_layout_is_one_model_of_regular_single_gpu_groups():
-    validate_diffusion_sglang_config(SimpleNamespace(models=[SimpleNamespace(name="m", server_groups=[_group()])]))
+    validate_diffusion_sglang_config(SimpleNamespace(models=[_model("m", [_group()])]))
     with pytest.raises(ValueError, match="exactly one model"):
-        validate_diffusion_sglang_config(
-            SimpleNamespace(models=[SimpleNamespace(name=n, server_groups=[_group()]) for n in "ab"])
-        )
+        validate_diffusion_sglang_config(SimpleNamespace(models=[_model(n, [_group()]) for n in "ab"]))
     for group in (_group(WorkerType.PREFILL), _group(num_gpus_per_engine=2)):
         with pytest.raises(ValueError, match="regular single-GPU"):
-            validate_diffusion_sglang_config(
-                SimpleNamespace(models=[SimpleNamespace(name="m", server_groups=[group])])
-            )
+            validate_diffusion_sglang_config(SimpleNamespace(models=[_model("m", [group])]))
