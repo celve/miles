@@ -499,6 +499,9 @@ def _log_dp_schedule_trim(*, args, data: dict[str, Any], partitions: list[list[i
 
 def split_train_data_by_dp_raw(args, data: dict[str, Any], *, dp_size: int) -> list[dict[str, Any]]:
     """Split the train data by data parallel size."""
+    if "tokens" not in data:
+        return _split_rows_by_stride(args, data, dp_size=dp_size)
+
     total_lengths = [len(t) for t in data["tokens"]]
     data["total_lengths"] = total_lengths
 
@@ -514,6 +517,13 @@ def split_train_data_by_dp_raw(args, data: dict[str, Any], *, dp_size: int) -> l
         partitions = [sorted(p, key=lambda i: adapter_slots[i]) for p in partitions]
 
     return _package_shards(args, data, partitions)
+
+
+def _split_rows_by_stride(args, data: dict[str, Any], *, dp_size: int) -> list[dict[str, Any]]:
+    """Token-free rows (diffusion images): row i goes to rank i % dp_size."""
+    num_rows = len(data["sample_indices"])
+    assert num_rows % dp_size == 0, f"{num_rows} rows do not split evenly over {dp_size} DP ranks"
+    return _package_shards(args, data, [range(rank, num_rows, dp_size) for rank in range(dp_size)])
 
 
 def _package_shards(args, data: dict[str, Any], partitions) -> list[dict[str, Any]]:
@@ -556,6 +566,7 @@ def _package_shards(args, data: dict[str, Any], partitions) -> list[dict[str, An
             "loss_weights",
             "advantages",
             "target_tokens",
+            "diffusion_train_pairs",
         ]:
             if key not in data:
                 continue

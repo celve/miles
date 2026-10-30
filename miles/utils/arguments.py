@@ -300,7 +300,8 @@ def parse_args_and_get_parser(
         args.rank = 0  # Primary process rank for wandb initialization
         args.world_size = args.actor_num_nodes * args.actor_num_gpus_per_node
 
-        if args.hf_checkpoint:
+        # A diffusers pipeline directory has no transformers config to read layers from.
+        if args.hf_checkpoint and args.model_kind != "diffusion":
             args.num_layers = resolve_fsdp_num_layers(load_hf_config(args.hf_checkpoint))
         else:
             args.num_layers = None
@@ -869,6 +870,11 @@ def miles_validate_args(args):
     if mode == "broadcast_packed" and (args.train_backend != "megatron" or args.colocate):
         raise ValueError("broadcast_packed requires Megatron non-colocated weight transfer")
     validate_dashboard_args(args)
+    if args.model_kind == "diffusion":
+        # Local import: the diffusion package pulls in optional dependencies text runs never install.
+        from miles.diffusion.arguments import validate_diffusion_args
+
+        validate_diffusion_args(args)
 
     args.ft_components = _resolve_ft_components(args)
     assert "rollout" not in args.ft_components or supports_partial_target_weight_update(args), (
