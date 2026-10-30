@@ -168,6 +168,8 @@ class TrajectoryEventKind(StrEnum):
     TOOL_START = "tool_start"
     TOOL_END = "tool_end"
     ATTEMPT_END = "attempt_end"
+    PHASE_START = "phase_start"
+    PHASE_END = "phase_end"
 
 
 @dataclass
@@ -699,7 +701,10 @@ class MetricStore:
                             segment["weight_version"] = event.weight_version
                     open_spans.clear()
                 else:
-                    base, is_start = span_kinds[TrajectoryEventKind(event.kind)]
+                    if event.kind in (TrajectoryEventKind.PHASE_START, TrajectoryEventKind.PHASE_END):
+                        base, is_start = event.detail, event.kind == TrajectoryEventKind.PHASE_START
+                    else:
+                        base, is_start = span_kinds[TrajectoryEventKind(event.kind)]
                     if is_start:
                         segment = dict(
                             kind=base, t0=event.ts, t1=None, turn=event.turn, weight_version=event.weight_version
@@ -723,7 +728,7 @@ class MetricStore:
                             segment["weight_version"] = event.weight_version or segment["weight_version"]
             if attempt_t0 is not None:
                 attempts.append(dict(t0=attempt_t0, t1=None))  # attempt still running
-            if any(segment["turn"] > 0 for segment in segments if segment["kind"] == "gen"):
+            if any(s["kind"] == "model_call" or (s["kind"] == "gen" and s["turn"] > 0) for s in segments):
                 # per-turn spans (multi_turn / agentic) supersede the coarse
                 # attempt-level gen span the generate_and_rm probe emits
                 segments = [s for s in segments if not (s["kind"] == "gen" and s["turn"] < 0)]
@@ -1396,7 +1401,9 @@ class MetricStore:
         lanes = all_lanes[: self.LIFECYCLE_MAX_ROWS]
         matrix = np.zeros((len(lanes), x_buckets), dtype=np.uint8)
         span = t1 - t0
-        state_id = {name: i for i, name in enumerate(self.LIFECYCLE_PALETTE)}
+        custom_phases = sorted({s["kind"] for lane in lanes for s in lane["segments"]} - {"gen", "tool"})
+        palette = (*self.LIFECYCLE_PALETTE, *custom_phases)
+        state_id = {name: i for i, name in enumerate(palette)}
 
         def bucket(ts: float) -> int:
             return min(x_buckets - 1, max(0, int((ts - t0) / span * x_buckets)))
@@ -1405,7 +1412,8 @@ class MetricStore:
             for attempt in lane["attempts"]:
                 matrix[row, bucket(attempt["t0"] or t0) : bucket(attempt["t1"] or t1) + 1] = state_id["queue"]
             for segment in lane["segments"]:
-                cell = state_id["generating" if segment["kind"] == "gen" else "tool_wait"]
+                state = {"gen": "generating", "tool": "tool_wait"}.get(segment["kind"], segment["kind"])
+                cell = state_id[state]
                 matrix[row, bucket(segment["t0"] or t0) : bucket(segment["t1"] or t1) + 1] = cell
         rows = [dict(sample_index=lane["sample_index"], group_index=lane["group_index"]) for lane in lanes]
         return dict(
@@ -1417,7 +1425,7 @@ class MetricStore:
             metric="lifecycle",
             values=matrix.tobytes(),
             scale=None,
-            palette=list(self.LIFECYCLE_PALETTE),
+            palette=list(palette),
         )
 
     def fleet(self, *, t0: float | None = None, t1: float | None = None, x_buckets: int = 600) -> dict:

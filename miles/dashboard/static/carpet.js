@@ -1,3 +1,4 @@
+import { CUSTOM_PHASE_COLORS } from "./lifecycle.js";
 import { apiBinary } from "./api.js";
 import { el, fmtNum } from "./app.js";
 import { hideTooltip, showTooltip } from "./charts.js";
@@ -7,7 +8,10 @@ const M_LEFT = 96;
 const M_RIGHT = 14;
 const X_BUCKETS = 1200;
 const METRICS = ["util", "phase", "mem_mb", "power_w", "lifecycle"];
-const LIFECYCLE_COLORS = { queue: "#e8e1d8", generating: "#d55816", tool_wait: "#1baf7a" };
+const LIFECYCLE_COLORS = {
+  queue: "#e8e1d8", generating: "#d55816", tool_wait: "#1baf7a",
+  ...CUSTOM_PHASE_COLORS,
+};
 const MAX_LABELED_ROWS = 48;
 
 // sequential ramp for magnitude metrics: one hue (aqua, matches charts.js

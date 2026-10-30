@@ -36,17 +36,19 @@ import logging
 import time
 from collections.abc import Callable
 from copy import deepcopy
+from dataclasses import asdict
 from typing import Any
 
 import httpx
 from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
 
-from miles.dashboard.hooks import push_sandbox_reports
+from miles.dashboard.hooks import push_agent_reports
 from miles.rollout.agentic.agent_function import AGENT_FUNCTION_MODES, InfraAbort, call_agent_function
 from miles.rollout.base_types import GenerateFnInput, GenerateFnOutput
 from miles.rollout.generate_utils.openai_endpoint_utils import OpenAIEndpointTracer
 from miles.rollout.session.v2.metrics import SESSION_ROLLOUT_METRICS_KEY
 from miles.utils.function_registry import load_function
+from miles.utils.lifecycle import TrajectoryIdentity
 from miles.utils.types import Sample
 
 logger = logging.getLogger(__name__)
@@ -83,7 +85,12 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
     log_prefix = f"[session={tracer.session_id}]"
 
     # From the tracer, not args: with multiple instances the owning ip:port is per-session.
-    metadata = {**metadata, "session_server_id": tracer.session_server_id}
+    # The dispatcher owns the source identity used to join subprocess phase reports.
+    metadata = {
+        **metadata,
+        "session_server_id": tracer.session_server_id,
+        "miles_lifecycle": asdict(TrajectoryIdentity.from_sample(input.sample)),
+    }
 
     agent_metadata = None
     infra_abort: InfraAbort | None = None
@@ -94,7 +101,7 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
         agent_metadata = await call_agent_function(
             custom_agent_function,
             mode=input.args.custom_agent_function_mode,
-            on_child_reports=push_sandbox_reports,
+            on_child_reports=lambda reports: push_agent_reports(reports, evaluation=input.evaluation),
             base_url=tracer.agent_base_url,
             prompt=input.sample.prompt,
             request_kwargs=build_chat_request_kwargs(input.sampling_params),
@@ -160,7 +167,7 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
             sample.metadata[SESSION_ROLLOUT_METRICS_KEY] = session_rollout_metrics
     if use_v2 and len(samples) > 1:
         # FIXME: handle sample index issues.
-        rollout_id = input.sample.rollout_id if input.sample.rollout_id is not None else input.sample.index
+        rollout_id = input.sample.rollout_identity
         assert rollout_id is not None, "v2 agentic samples require input Sample.rollout_id or Sample.index"
         for sample in samples:
             sample.rollout_id = rollout_id

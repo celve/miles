@@ -23,7 +23,9 @@ class _RecordingProcessor:
 def test_trainer_rebuilds_tensors_without_expanding_the_rollout_tokens(monkeypatch):
     processor = _RecordingProcessor()
     monkeypatch.setattr(
-        token_space_media_process, "_token_space_processor", lambda hf_checkpoint, mm_process_config_json, keep_on_device=False: processor
+        token_space_media_process,
+        "_token_space_processor",
+        lambda hf_checkpoint, mm_process_config_json, keep_on_device=False: processor,
     )
     multimodal_inputs = [{"images": ["/shared/a.png", "/shared/b.png"]}, None]
     tokens = [torch.tensor([1, 9, 9, 9, 9, 2, 5]), torch.tensor([1, 2])]
@@ -51,7 +53,9 @@ def test_per_micro_batch_rebuild_matches_the_round_rebuild_and_skips_expansion(m
 
     processor = _RecordingProcessor()
     monkeypatch.setattr(
-        token_space_media_process, "_token_space_processor", lambda hf_checkpoint, mm_process_config_json, keep_on_device=False: processor
+        token_space_media_process,
+        "_token_space_processor",
+        lambda hf_checkpoint, mm_process_config_json, keep_on_device=False: processor,
     )
     monkeypatch.setattr(data_rollout.current_platform, "current_device", lambda: torch.device("cpu"))
     args = SimpleNamespace(
@@ -66,6 +70,10 @@ def test_per_micro_batch_rebuild_matches_the_round_rebuild_and_skips_expansion(m
     multimodal_inputs = [{"images": ["/shared/a.png"]}, None, {"images": ["/shared/b.png", "/shared/c.png"]}]
     tokens = [torch.tensor([1, 9, 2]), torch.tensor([1, 2]), torch.tensor([1, 9, 9, 2])]
 
+    from miles.utils.timer import Timer
+
+    phases = []
+    monkeypatch.setattr(Timer(), "event_sinks", [lambda name, t0, t1: phases.append((name, t0, t1))])
     lazy = data_rollout.LazyMultimodalTrainInputs(args, multimodal_inputs, tokens)
     rollout_data = {"tokens": tokens, "multimodal_train_inputs": lazy}
     expand_multimodal_rollout_data_in_place(rollout_data)
@@ -77,6 +85,8 @@ def test_per_micro_batch_rebuild_matches_the_round_rebuild_and_skips_expansion(m
     assert rebuilt["pixel_values"].dtype == torch.bfloat16
     assert torch.equal(rebuilt["image_grid_thw"], torch.tensor([[1, 2, 2], [1, 2, 2]]))
     assert [call["image_data"] for call in processor.calls] == [["/shared/b.png", "/shared/c.png"]]
+    assert len(phases) == 1
+    assert all(name == "multimodal_rebuild" and t1 >= t0 for name, t0, t1 in phases)
 
 
 def test_decoded_images_decode_once_and_trim_to_the_byte_cap():
@@ -107,9 +117,15 @@ def test_parallel_decode_and_prefetch_feed_the_processor_decoded_images(monkeypa
 
     processor = _RecordingProcessor()
     monkeypatch.setattr(
-        token_space_media_process, "_token_space_processor", lambda hf_checkpoint, mm_process_config_json, keep_on_device=False: processor
+        token_space_media_process,
+        "_token_space_processor",
+        lambda hf_checkpoint, mm_process_config_json, keep_on_device=False: processor,
     )
-    monkeypatch.setattr(data_rollout, "image_decoder", lambda hf_checkpoint, mm_config: lambda path: SimpleNamespace(nbytes=10, path=path))
+    monkeypatch.setattr(
+        data_rollout,
+        "image_decoder",
+        lambda hf_checkpoint, mm_config: lambda path: SimpleNamespace(nbytes=10, path=path),
+    )
     monkeypatch.setattr(data_rollout.current_platform, "current_device", lambda: torch.device("cpu"))
     args = SimpleNamespace(
         hf_checkpoint="ckpt",
