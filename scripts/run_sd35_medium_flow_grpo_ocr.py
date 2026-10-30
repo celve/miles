@@ -37,11 +37,14 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
 
 def prepare(args: ScriptArgs) -> tuple[str, str]:
     U = args.create_backend()
-    U.hf_download_dataset(DATASET, include=f"{DATASET_SUBSET}/**", data_dir=args.data_dir)
+    dataset_dir = f"{args.data_dir}/{DATASET.split('/')[-1]}"
+    U.exec_command_cpu(
+        f"hf download --repo-type dataset {DATASET} --include '{DATASET_SUBSET}/**' --local-dir {dataset_dir}"
+    )
     model_path = args.model_path or f"{args.model_dir}/stable-diffusion-3.5-medium"
     if not args.model_path:
         U.exec_command_cpu(f"hf download {MODEL} --local-dir {model_path}")
-    return model_path, f"{args.data_dir}/{DATASET.split('/')[-1]}/{DATASET_SUBSET}"
+    return model_path, f"{dataset_dir}/{DATASET_SUBSET}"
 
 
 def execute(args: ScriptArgs, *, model_path: str, data_dir: str) -> None:
@@ -83,7 +86,7 @@ def execute(args: ScriptArgs, *, model_path: str, data_dir: str) -> None:
 
     optimizer_args = "--lr 3e-4 --adam-beta2 0.999 --weight-decay 1e-4 "
 
-    lora_args = "--lora-rank 32 --lora-alpha 64 --diffusion-lora-init gaussian "
+    lora_args = "--diffusion-lora-rank 32 --diffusion-lora-alpha 64 --diffusion-lora-init gaussian "
 
     sglang_args = (
         "--use-miles-router "

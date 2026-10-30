@@ -1,5 +1,3 @@
-from typing import Literal
-
 from miles.utils.args.schema import A, Arg, BaseConfig
 
 
@@ -7,10 +5,11 @@ class DiffusionConfig(BaseConfig):
     """Flags of `--model-kind diffusion` runs: Flow-GRPO on a diffusers DiT served by sglang.multimodal_gen."""
 
     model_kind: A[
-        Literal["text", "diffusion"],
+        str,
         Arg(
+            choices=["text", "diffusion"],
             help="What the run trains. `diffusion` selects the DiT trainer, the sglang.multimodal_gen engine "
-            "and the denoising-trajectory data path; `--hf-checkpoint` is then a diffusers pipeline directory."
+            "and the denoising-trajectory data path; `--hf-checkpoint` is then a diffusers pipeline directory.",
         ),
     ] = "text"
 
@@ -20,9 +19,9 @@ class DiffusionConfig(BaseConfig):
     diffusion_negative_prompt: A[str | None, Arg(help="Negative prompt for classifier-free guidance.")] = None
     diffusion_height: A[int, Arg(help="Rollout image height.")] = 512
     diffusion_width: A[int, Arg(help="Rollout image width.")] = 512
-    diffusion_sde_type: A[
-        Literal["sde"], Arg(help="Stochastic sampler the engine runs on the SDE steps.")
-    ] = "sde"
+    diffusion_sde_type: A[str, Arg(choices=["sde"], help="Stochastic sampler the engine runs on the SDE steps.")] = (
+        "sde"
+    )
     diffusion_noise_level: A[float, Arg(help="SDE noise level, used in rollout and in the trainer's log-prob.")] = 0.7
     diffusion_quality: A[
         str, Arg(help="sglang.multimodal_gen `quality` sampling knob; `exact` keeps the engine batch-invariant.")
@@ -46,7 +45,7 @@ class DiffusionConfig(BaseConfig):
         str | None, Arg(help="Train pipeline family (e.g. sd3); resolved from --hf-checkpoint when unset.")
     ] = None
     diffusion_forward_dtype: A[
-        Literal["fp16", "bf16", "fp32"], Arg(help="DiT forward dtype; fp32 master weights are kept regardless.")
+        str, Arg(choices=["fp16", "bf16", "fp32"], help="DiT forward dtype; fp32 master weights are kept regardless.")
     ] = "bf16"
     diffusion_clip_range: A[float, Arg(help="PPO ratio clip range.")] = 1e-4
     diffusion_kl_beta: A[
@@ -59,9 +58,11 @@ class DiffusionConfig(BaseConfig):
     ] = False
     diffusion_micro_batch_size_sample: A[int, Arg(help="Images per micro-batch tile.")] = 16
     diffusion_micro_batch_size_tstep: A[int, Arg(help="SDE steps per micro-batch tile.")] = 5
+    diffusion_lora_rank: A[int, Arg(help="Rank of the trained LoRA adapter.")] = 32
+    diffusion_lora_alpha: A[int, Arg(help="LoRA alpha; the adapter is scaled by alpha / rank.")] = 64
     diffusion_lora_init: A[
-        Literal["gaussian", "kaiming-uniform"], Arg(help="PEFT LoRA initialization of the trained adapter.")
+        str, Arg(choices=["gaussian", "kaiming-uniform"], help="PEFT LoRA initialization of the trained adapter.")
     ] = "gaussian"
     diffusion_lora_target_modules: A[
-        list[str] | None, Arg(help="LoRA target modules; the family default when unset.")
+        list[str] | None, Arg(type_parser=str, nargs="+", help="LoRA target modules; the family default when unset.")
     ] = None
