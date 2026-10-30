@@ -7,6 +7,8 @@ the sink when enabled; while it is ``None`` every probe site is a no-op.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 from miles.utils.misc import SingletonMeta
 
 
@@ -30,3 +32,37 @@ def attach_lifecycle_metadata(sample, record, prev_record, turn: int) -> None:
     if prev_record is not None:
         segment["prev_t1"] = prev_record.timestamp  # gap since the previous call end = agent-side work
     sample.metadata["lifecycle"] = segment
+
+
+@contextmanager
+def trajectory_phase(sample, name: str, *, turn: int = -1, evaluation: bool = False):
+    """Time one custom-generator phase; concurrent samples and nested named phases stay separate."""
+    sink = None if evaluation else TrajectoryLifecycle().sink
+    if sink is not None:
+        sink.phase_start(sample, name, turn=turn)
+    try:
+        yield
+    finally:
+        if sink is not None:
+            sink.phase_end(sample, name, turn=turn)
+
+
+def report_trajectory_phase(sample, name: str, t0: float, t1: float, *, turn: int = -1, evaluation: bool = False):
+    """Report an externally measured phase using wall-clock timestamps in seconds."""
+    sink = None if evaluation else TrajectoryLifecycle().sink
+    if sink is not None:
+        sink.phase_start(sample, name, turn=turn, ts=t0)
+        sink.phase_end(sample, name, turn=turn, ts=t1)
+
+
+@contextmanager
+def trajectory_episode(sample, *, evaluation: bool = False):
+    """Record an episode in a custom rollout function that bypasses Miles's per-sample dispatcher."""
+    sink = None if evaluation else TrajectoryLifecycle().sink
+    if sink is not None:
+        sink.attempt_start(sample)
+    try:
+        yield
+    finally:
+        if sink is not None:
+            sink.attempt_end(sample)

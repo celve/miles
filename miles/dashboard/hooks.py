@@ -201,9 +201,12 @@ class TrajectorySink:
                 if segment.get("t0") is not None:
                     self._emit(TrajectoryEventKind.GEN_START, sample, ts=segment["t0"], turn=segment["turn"])
                 self._emit(TrajectoryEventKind.GEN_END, sample, ts=segment["t1"], turn=segment["turn"])
+        if not samples:
+            return
         last = samples[-1]
         status = last.status.value if getattr(last, "status", None) is not None else ""
         self._emit(TrajectoryEventKind.ATTEMPT_END, last, detail=status)
+        self.flush()
 
     def gen_span(self, sample, t0: float, t1: float, turn: int, detail: str = "") -> None:
         self._emit(TrajectoryEventKind.GEN_START, sample, ts=t0, turn=turn)
@@ -213,6 +216,13 @@ class TrajectorySink:
         self._emit(TrajectoryEventKind.TOOL_START, sample, ts=t0, turn=turn, detail=detail)
         self._emit(TrajectoryEventKind.TOOL_END, sample, ts=t1, turn=turn, detail=detail)
 
+    def phase_start(self, sample, name: str, *, turn: int = -1, ts: float | None = None) -> None:
+        self._emit(TrajectoryEventKind.PHASE_START, sample, ts=ts, turn=turn, detail=name)
+        self.flush()
+
+    def phase_end(self, sample, name: str, *, turn: int = -1, ts: float | None = None) -> None:
+        self._emit(TrajectoryEventKind.PHASE_END, sample, ts=ts, turn=turn, detail=name)
+
     # ------------------------------ internals -------------------------------
 
     def _emit(self, kind: str, sample, *, ts: float | None = None, turn: int = -1, detail: str = "") -> None:
@@ -221,7 +231,11 @@ class TrajectorySink:
             event = TrajectoryEvent(
                 ts=time.time() if ts is None else ts,
                 kind=kind,
-                sample_index=sample.index if sample.index is not None else -1,
+                sample_index=(
+                    sample.lineage.source_sample_index
+                    if sample.lineage is not None
+                    else sample.index if sample.index is not None else -1
+                ),
                 group_index=sample.group_index if sample.group_index is not None else -1,
                 turn=turn,
                 weight_version=str(versions[-1]) if versions else "",

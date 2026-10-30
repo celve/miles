@@ -74,6 +74,10 @@ class LazyMultimodalTrainInputs(Sequence):
     def __getitem__(self, index):
         if isinstance(index, slice):
             return self.get_many(range(*index.indices(len(self))))
+        with timer("multimodal_rebuild"):
+            return self._rebuild(index)
+
+    def _rebuild(self, index):
         (mm,) = compute_multimodal_train_inputs(
             self._args.hf_checkpoint,
             # Pre-refactor args: the base engine flag; per-group overrides are not read on this branch.
@@ -144,11 +148,12 @@ def get_rollout_data(
         if args.multimodal_rebuild_per_micro_batch:
             rollout_data["multimodal_train_inputs"] = lazy
         else:
-            with timer("multimodal_rebuild"):
-                # Chunks bound the decoded images a parallel decode holds at once.
-                rollout_data["multimodal_train_inputs"] = [
-                    mm for start in range(0, len(lazy), 64) for mm in lazy.get_many(range(start, min(start + 64, len(lazy))))
-                ]
+            # Chunks bound the decoded images a parallel decode holds at once.
+            rollout_data["multimodal_train_inputs"] = [
+                mm
+                for start in range(0, len(lazy), 64)
+                for mm in lazy.get_many(range(start, min(start + 64, len(lazy))))
+            ]
     elif "multimodal_train_inputs" in rollout_data:
         # Move multimodal training tensors to the device in advance
         rollout_data["multimodal_train_inputs"] = [

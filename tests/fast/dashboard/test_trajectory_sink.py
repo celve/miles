@@ -199,3 +199,57 @@ def test_trajectory_events_roundtrip_store(tmp_path):
     assert [e.ts for e in store.trajectory_events()] == [10.0, 3700.0]
     assert [e.ts for e in store.trajectory_events(t0=3600.0)] == [3700.0]
     assert store.iter_records(Stream.TRAJECTORIES)[0].weight_version == "2"
+
+
+@pytest.mark.asyncio
+async def test_custom_phases_keep_concurrent_episodes_nested_spans_and_errors(tmp_path):
+    import asyncio
+
+    from miles.dashboard.store import MetricStore
+    from miles.utils.lifecycle import report_trajectory_phase, trajectory_episode, trajectory_phase
+
+    handle = FakeHandle()
+    sink = TrajectorySink(handle)
+    TrajectoryLifecycle().sink = sink
+
+    async def episode(index):
+        sample = _sample(index=index)
+        with trajectory_episode(sample):
+            with trajectory_phase(sample, "setup"):
+                await asyncio.sleep(0)
+            with trajectory_phase(sample, "env_step", turn=1):
+                with trajectory_phase(sample, "settle", turn=1):
+                    await asyncio.sleep(0)
+            report_trajectory_phase(sample, "model_call", 50.0, 51.0, turn=2)
+            with pytest.raises(ValueError, match="desktop failed"), trajectory_phase(sample, "reset"):
+                raise ValueError("desktop failed")
+
+    await asyncio.gather(episode(10), episode(20))
+    store = MetricStore(tmp_path)
+    for event in _pushed(handle):
+        store.append(event)
+    store.flush()
+    lanes = store.trajectory_lanes()
+    assert {lane["sample_index"] for lane in lanes} == {10, 20}
+    for lane in lanes:
+        assert len(lane["attempts"]) == 1
+        assert {s["kind"] for s in lane["segments"]} == {"setup", "env_step", "settle", "model_call", "reset"}
+        assert all(s["t0"] is not None and s["t1"] is not None for s in lane["segments"])
+        model = next(s for s in lane["segments"] if s["kind"] == "model_call")
+        assert (model["t0"], model["t1"], model["turn"]) == (50.0, 51.0, 2)
+    palette = store.heatmap("lifecycle", t0=49, t1=52, x_buckets=6)["palette"]
+    assert "model_call" in palette
+
+
+def test_custom_phase_helpers_are_noops_when_disabled_or_evaluating():
+    from miles.utils.lifecycle import report_trajectory_phase, trajectory_episode, trajectory_phase
+
+    sample = _sample()
+    with trajectory_episode(sample), trajectory_phase(sample, "setup"):
+        report_trajectory_phase(sample, "reset", 1.0, 2.0)
+    handle = FakeHandle()
+    TrajectoryLifecycle().sink = TrajectorySink(handle)
+    with trajectory_episode(sample, evaluation=True), trajectory_phase(sample, "env_step", evaluation=True):
+        report_trajectory_phase(sample, "reset", 1.0, 2.0, evaluation=True)
+    TrajectoryLifecycle().sink.flush()
+    assert _pushed(handle) == []

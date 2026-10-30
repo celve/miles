@@ -92,6 +92,22 @@ def _sample_keys(samples: list[Sample]) -> list[SampleKey]:
     return keys
 
 
+def _sample_raw_rewards(samples: list[Sample], rewards, *, path: Path) -> list:
+    if len(rewards) == len(samples):
+        return rewards
+    episode_positions = {}
+    positions = []
+    for sample in samples:
+        identity = sample.rollout_id if sample.rollout_id is not None else sample.index
+        key = (sample.group_index, identity)
+        positions.append(episode_positions.setdefault(key, len(episode_positions)))
+    assert len(rewards) == len(episode_positions), (
+        f"{path}: raw_reward must be batch-global by sample or rollout "
+        f"(expected {len(samples)} samples or {len(episode_positions)} rollouts, got {len(rewards)})"
+    )
+    return [rewards[position] for position in positions]
+
+
 def _matching_train_locations(
     handles: list[dict],
     locations: list[tuple[int, int]],
@@ -364,7 +380,7 @@ class DumpReader:
     FRESH_SECONDS: ClassVar[float] = 60.0
 
     # bump to invalidate summary parquet caches when their columns change
-    SUMMARY_VERSION: ClassVar[int] = 9  # v9: prefill_lag is the per-call maximum
+    SUMMARY_VERSION: ClassVar[int] = 10
 
     # Column order of summary(). Only needed to give a step with no samples the
     # same shape as any other step; with rows present the schema comes from
@@ -373,6 +389,8 @@ class DumpReader:
     SUMMARY_COLUMNS: ClassVar[tuple[str, ...]] = (
         "sample_index",
         "sample_occurrence",
+        "sample_rollout_id",
+        "lifecycle_index",
         "group_index",
         "status",
         "remove_sample",
@@ -442,8 +460,6 @@ class DumpReader:
         sample_counts: defaultdict[int, int] = defaultdict(int)
         for sample_index, _occurrence in sample_keys:
             sample_counts[sample_index] += 1
-        # raw_reward is stored batch-global, so it is indexed by the sample's
-        # position in the rollout dump, not by shard row.
         sample_indices = {key[0] for key in sample_keys}
 
         train_rows: dict[SampleKey, TrainRow] = {}
@@ -456,11 +472,7 @@ class DumpReader:
                 columns = rank_pack["rollout_data"]
                 raw_rewards = columns.get("raw_reward")
                 if raw_rewards is not None:
-                    assert len(raw_rewards) == len(samples), (
-                        f"{path}: raw_reward must be batch-global "
-                        f"(expected {len(samples)} entries, got {len(raw_rewards)})"
-                    )
-                    raw_reward_column = raw_rewards
+                    raw_reward_column = _sample_raw_rewards(samples, raw_rewards, path=path)
                 for row, sample_index in enumerate(columns["sample_indices"]):
                     assert (
                         int(sample_index) in sample_indices
@@ -556,12 +568,28 @@ class DumpReader:
         sources_path.write_text(json.dumps(sources))
         return df
 
+    def episodes(self, rollout_id: int, *, evaluation: bool = False) -> pl.DataFrame:
+        """One row per rollout execution, independent of its number of training segments."""
+        return (
+            self.summary(rollout_id, evaluation=evaluation)
+            .group_by("group_index", "sample_rollout_id", maintain_order=True)
+            .agg(
+                sample_index=pl.col("sample_index").first(),
+                sample_occurrence=pl.col("sample_occurrence").first(),
+                n_samples=pl.len(),
+                raw_reward=pl.col("raw_reward").mean(),
+                reward=pl.col("reward").mean(),
+                response_length=pl.col("response_length").sum(),
+                truncated=pl.col("truncated").any(),
+            )
+        )
+
     def groups(self, rollout_id: int, *, evaluation: bool = False) -> pl.DataFrame:
         """Per-GRPO-group aggregates; ``zero_std`` flags degenerate groups
         (all samples got the same reward, so advantages vanish)."""
         reward_column = "reward" if evaluation else "raw_reward"
         return (
-            self.summary(rollout_id, evaluation=evaluation)
+            self.episodes(rollout_id, evaluation=evaluation)
             .group_by("group_index")
             .agg(
                 n=pl.len(),
@@ -586,12 +614,13 @@ class DumpReader:
         for rollout_id in self.rollout_ids().train:
             df = self.summary(rollout_id)
             groups = self.groups(rollout_id)
+            episodes = self.episodes(rollout_id)
             rows.append(
                 dict(
                     rollout_id=rollout_id,
                     n_samples=df.height,
-                    reward_mean=df["raw_reward"].mean(),
-                    reward_std=df["raw_reward"].std(),
+                    reward_mean=episodes["raw_reward"].mean(),
+                    reward_std=episodes["raw_reward"].std(),
                     response_length_mean=df["response_length"].mean(),
                     truncated_frac=df["truncated"].cast(pl.Float64).mean(),
                     zero_std_group_frac=groups["zero_std"].cast(pl.Float64).mean(),
@@ -810,6 +839,8 @@ class DumpReader:
         entry = dict(
             sample_index=sample.index,
             sample_occurrence=sample_occurrence,
+            sample_rollout_id=sample.rollout_id if sample.rollout_id is not None else sample.index,
+            lifecycle_index=sample.lineage.source_sample_index if sample.lineage is not None else sample.index,
             group_index=sample.group_index,
             status=sample.status.value,
             remove_sample=sample.remove_sample,

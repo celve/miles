@@ -7,7 +7,10 @@ const M_LEFT = 96;
 const M_RIGHT = 14;
 const X_BUCKETS = 1200;
 const METRICS = ["util", "phase", "mem_mb", "power_w", "lifecycle"];
-const LIFECYCLE_COLORS = { queue: "#e8e1d8", generating: "#d55816", tool_wait: "#1baf7a" };
+const LIFECYCLE_COLORS = {
+  queue: "#e8e1d8", generating: "#d55816", tool_wait: "#1baf7a",
+  model_call: "#d55816", env_step: "#1baf7a", settle: "#eda100", reset: "#8b7bd8", setup: "#2a78d6",
+};
 const MAX_LABELED_ROWS = 48;
 
 // sequential ramp for magnitude metrics: one hue (aqua, matches charts.js
