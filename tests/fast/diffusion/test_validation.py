@@ -3,51 +3,26 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.fast.fixtures.args_fixtures import _RESOLVED_AFTER_PARSING, parser_defaults
+
 from miles.backends.sglang_utils.sglang_api_client import WorkerType
 from miles.diffusion.arguments import _HOOKS, validate_diffusion_args, validate_diffusion_sglang_config
 
 
 def _supported(**overrides):
-    values = dict(
+    # The CLI defaults the validator really sees: fields derived after parsing (e.g. multi_lora) are absent.
+    defaults = {k: v for k, v in parser_defaults().items() if k not in _RESOLVED_AFTER_PARSING}
+    recipe = dict(
         train_backend="fsdp",
         colocate=True,
-        rollout_num_gpus_per_engine=1,
         use_miles_router=True,
-        advantage_estimator="grpo",
-        ref_load=None,
-        use_kl_loss=False,
-        kl_coef=0.0,
-        use_opd=False,
-        eval_interval=None,
-        eval_prompt_data=None,
-        fully_async=False,
-        partial_rollout=False,
-        dynamic_sampling_filter_path=None,
-        rm_type=None,
-        custom_rm_path=None,
-        use_output_store=False,
-        object_store_backend="ray",
-        use_fault_tolerance=False,
-        delay_split_train_data_by_dp=False,
-        indep_dp=False,
-        lora_rank=0,
-        multi_lora=False,
-        use_rollout_routing_replay=False,
-        true_on_policy_mode=False,
-        debug_train_only=False,
-        debug_rollout_only=False,
-        ci_test=False,
         rollout_batch_size=8,
         n_samples_per_prompt=16,
         global_batch_size=64,
-        diffusion_lora_rank=32,
-        diffusion_num_sde_steps=10,
-        diffusion_model_family=None,
-        diffusion_lora_target_modules=None,
         hf_checkpoint="/models/stable-diffusion-3.5-medium",
         **_HOOKS,
     )
-    return Namespace(**(values | overrides))
+    return Namespace(**(defaults | recipe | overrides))
 
 
 def test_the_recipe_layout_passes_and_resolves_the_family_defaults():
@@ -81,7 +56,7 @@ def test_the_recipe_layout_passes_and_resolves_the_family_defaults():
         (dict(delay_split_train_data_by_dp=True), "delay-split"),
         (dict(indep_dp=True), "independent"),
         (dict(lora_rank=8), "text LoRA"),
-        (dict(multi_lora=True), "text LoRA"),
+        (dict(multi_lora_n_adapters=2), "text LoRA"),
         (dict(true_on_policy_mode=True), "on-policy"),
         (dict(debug_rollout_only=True), "debug"),
         (dict(ci_test=True), "ci-test"),
