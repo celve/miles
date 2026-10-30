@@ -27,6 +27,18 @@ def convert_samples_to_train_data(args, samples: list[Sample]) -> dict[str, Any]
     }
 
 
+DIFFUSION_TRAIN_DATA_KEYS = frozenset({"diffusion_train_pairs", "sample_indices", "raw_reward"})
+
+
+def split_train_data_by_dp(data: dict[str, Any], *, dp_size: int) -> list[dict[str, Any]]:
+    """Image i goes to DP rank i % dp_size, as miles_diffusion's stride split does."""
+    assert data.keys() == DIFFUSION_TRAIN_DATA_KEYS, f"diffusion train data has keys {sorted(data)}"
+    num_rows = len(data["sample_indices"])
+    assert all(len(data[key]) == num_rows for key in DIFFUSION_TRAIN_DATA_KEYS), "ragged diffusion train data"
+    assert num_rows % dp_size == 0, f"{num_rows} images do not split evenly over {dp_size} DP ranks"
+    return [{key: data[key][rank::dp_size] for key in DIFFUSION_TRAIN_DATA_KEYS} for rank in range(dp_size)]
+
+
 def compute_grpo_advantages(args, *, raw_rewards: list[float]) -> list[float]:
     """Per-prompt mean baseline over `--n-samples-per-prompt` blocks, divided by the group or rollout std."""
     flat = torch.tensor(raw_rewards, dtype=torch.float)

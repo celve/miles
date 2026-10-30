@@ -14,19 +14,16 @@ from miles.backends.fsdp_utils.parallel import create_fsdp_parallel_state
 from miles.backends.training_utils.parallel import get_parallel_state, set_parallel_state
 from miles.backends.training_utils.torch_native.actor import TorchNativeTrainRayActor
 from miles.backends.training_utils.types import TrainStepOutcome, TrainStepOutput
+from miles.backends.training_utils.weight_update.updater import WeightUpdater
 from miles.diffusion.metrics import log_metrics
 from miles.diffusion.train.loss import collate_pairs, flow_grpo_loss
 from miles.diffusion.train.metric_buffer import MetricBuffer
 from miles.diffusion.train.model import DTYPES, load_fsdp_dit
 from miles.diffusion.train.pipeline_config import get_train_pipeline_config
 from miles.diffusion.train.schedule import tile_train_pairs
-from miles.diffusion.train.weight_sync import DiffusionLoraIpcSync
-from miles.ray.rollout.inference_controller import UpdatableEngines
-from miles.ray.train_actor import WeightUpdateOutput
+from miles.diffusion.train.weight_sync import DiffusionLoraFromTensor, DiffusionLoraWeightIterator
 from miles.utils import object_store
 from miles.utils.context_utils import with_defer
-from miles.utils.distributed_utils import get_gloo_group
-from miles.utils.memory_utils import clear_memory
 from miles.utils.object_store import StoreObjectRef
 from miles.utils.profile_utils import TrainProfiler
 from miles.utils.timer import Timer, inverse_timer, timer
@@ -84,8 +81,7 @@ class DiffusionFSDPTrainRayActor(TorchNativeTrainRayActor):
         checkpoint_payload = checkpoint.load(self)
         self.model_parts = [self.model]
         self.optimizers = [self.optimizer]
-        self.weight_sync = DiffusionLoraIpcSync(args, self.model)
-        self._published_weight_version = 0
+        self.weight_updater = self._build_diffusion_weight_updater()
         checkpoint.finalize_load(self, checkpoint_payload)
 
         if self.args.offload_train:
@@ -197,22 +193,23 @@ class DiffusionFSDPTrainRayActor(TorchNativeTrainRayActor):
                 guidance_scale=self.args.diffusion_guidance_scale,
             )
 
+    def _build_diffusion_weight_updater(self) -> WeightUpdater:
+        self._published_weight_version = 0
+        return WeightUpdater(
+            self.args,
+            self.model,
+            weights_getter=lambda: None,
+            model_name=self.pipeline_config.model_family,
+            quantization_config=None,
+            iterator_factory=DiffusionLoraWeightIterator.build,
+            parallel_state=get_parallel_state(),
+            is_lora=True,
+            lora_sync_config=dict(r=self.args.diffusion_lora_rank, lora_alpha=self.args.diffusion_lora_alpha),
+            protocol=DiffusionLoraFromTensor(self.args),
+        )
+
     def _save_checkpoint(self, rollout_id: int) -> None:
         checkpoint.save(self, iteration=rollout_id)
-
-    @timer
-    def update_weights(
-        self, info: UpdatableEngines, debug_weight_update_id: str, rollout_id: int | None
-    ) -> WeightUpdateOutput:
-        if self.args.debug_train_only or self.args.debug_rollout_only:
-            return WeightUpdateOutput(weight_version=None, failed_cell_ids=())
-        self.weight_sync.connect_if_needed(info)
-        next_version = self._published_weight_version + 1
-        self.weight_sync.update_weights(weight_version=next_version)
-        dist.barrier(group=get_gloo_group())
-        self._published_weight_version = next_version
-        clear_memory()
-        return WeightUpdateOutput(weight_version=next_version, failed_cell_ids=())
 
 
 def _enable_deterministic_training() -> None:

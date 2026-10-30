@@ -1,8 +1,11 @@
+from types import SimpleNamespace
+
+import pytest
 import torch
 
 from miles.diffusion.conversion import build_train_pairs, compute_grpo_advantages, convert_samples_to_train_data
 from miles.diffusion.types import DenoisingEnv, DiffusionRollout, DiTTrajectory
-from miles.ray.rollout.train_data_conversion import split_train_data_by_dp_raw
+from miles.ray.rollout.train_data_conversion import split_train_data_by_dp
 from miles.utils.types import Sample
 
 
@@ -10,8 +13,6 @@ class _Args:
     n_samples_per_prompt = 2
     grpo_std_normalization = True
     diffusion_globalize_reward_std = True
-    balance_data = False
-    multi_lora_n_adapters = 0
 
 
 def _sample(index, *, reward, steps, latent_step_indices=None, num_latents=4):
@@ -61,8 +62,17 @@ def test_rows_are_images_and_the_dp_split_strides_them():
     samples = [_sample(i, reward=float(i % 2), steps=[0, 1, 2]) for i in range(4)]
 
     data = convert_samples_to_train_data(_Args, samples)
-    shards = split_train_data_by_dp_raw(_Args, data, dp_size=2)
+    shards = split_train_data_by_dp(_Args, data, train_parallel_config=SimpleNamespace(dp_size=2))
 
     assert [len(row) for row in data["diffusion_train_pairs"]] == [3, 3, 3, 3]
     assert [shard["sample_indices"] for shard in shards] == [[0, 2], [1, 3]]
     assert [row[0]["sample_index"] for row in shards[1]["diffusion_train_pairs"]] == [1, 3]
+
+
+def test_the_split_rejects_diffusion_rows_with_a_foreign_schema():
+    with pytest.raises(AssertionError, match="keys"):
+        split_train_data_by_dp(
+            _Args,
+            {"diffusion_train_pairs": [[]], "sample_indices": [0], "tokens": [[1]]},
+            train_parallel_config=SimpleNamespace(dp_size=1),
+        )

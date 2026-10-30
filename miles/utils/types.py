@@ -198,8 +198,6 @@ class Sample:
     remove_sample: bool = False
     teacher_log_probs: list[float] | None = None  # Log probabilities from teacher model for OPD
     opd_reverse_kl: list[float] | None = None  # Precomputed per-token OPD reverse-KL estimate
-    # Denoising trajectory of a --model-kind diffusion sample (miles.diffusion.types.DiffusionRollout)
-    diffusion: Any = None
 
     class Status(Enum):
         PENDING = "pending"
@@ -305,8 +303,14 @@ class Sample:
 
     prefix_cache_info: PrefixCacheInfo = field(default_factory=PrefixCacheInfo)
 
+    # Denoising trajectory of a --model-kind diffusion sample (miles.diffusion.types.DiffusionRollout); last, so
+    # positional construction is unchanged, and left out of to_dict when unset, so text dicts are too.
+    diffusion: Any = None
+
     def to_dict(self):
         value = self.__dict__.copy()
+        if value["diffusion"] is None:
+            del value["diffusion"]
         value["lineage"] = asdict(self.lineage) if self.lineage is not None else None
         value["status"] = self.status.value
         value["spec_info"] = self.spec_info.to_dict()

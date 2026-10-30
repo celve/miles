@@ -46,6 +46,8 @@ def _merge_sample_pair(a: Sample, b: Sample, tokenizer) -> Sample:
     long trajectory quadratic in its number of turns.
     """
 
+    assert a.diffusion is None and b.diffusion is None, "diffusion samples are never merged across turns"
+
     def _merge_equal_value(field):
         x = getattr(a, field)  # config-access-exempt: attribute selected at runtime from field
         y = getattr(b, field)  # config-access-exempt: attribute selected at runtime from field
@@ -177,7 +179,8 @@ def _merge_sample_pair(a: Sample, b: Sample, tokenizer) -> Sample:
             rollout_sampling_mask=sampling_mask,
             teacher_log_probs=_merge_optional_per_token("teacher_log_probs"),
             opd_reverse_kl=_merge_optional_per_token("opd_reverse_kl"),
-            diffusion=_merge_equal_value("diffusion"),
+            # Multi-turn merging is a text-path operation; a diffusion sample is never a turn.
+            diffusion=None,
             rollout_routed_experts=b.rollout_routed_experts,
             rollout_indexer_topk=b.rollout_indexer_topk,
             rollout_store_plan=store_plan,

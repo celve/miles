@@ -384,6 +384,10 @@ def parse_args_and_get_parser(
     backend_values = {name: value for name, value in vars(args).items() if name in training_backend_arg_names}
     _validate_argument_ownership(args, parser=parser, training_backend_arg_names=training_backend_arg_names)
     sglang, sglang_scaling = SglangConfig.parse_args(args)
+    if args.model_kind == "diffusion":
+        from miles.diffusion.arguments import validate_diffusion_sglang_config
+
+        validate_diffusion_sglang_config(sglang)
     raw_megatron = resolve_megatron_config(args, base_args=backend_values if backend == "megatron" else {})
     check_output_store_args(args, sglang=sglang, megatron=raw_megatron)
     values = {name: value for name, value in vars(args).items() if name in AllConfig.model_fields} | {

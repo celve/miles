@@ -348,6 +348,7 @@ class InferenceEngineSpec(BaseCommandSpec):
                 interpreter_prefix=interpreter_prefix,
                 base_gpu_id=ctx.local_gpu_ids[0],
                 num_gpus_per_engine=server_group_config.num_gpus_per_engine,
+                sglang_overrides=server_group_config.overrides,
                 nccl_port=ctx.self_addrs["nccl"].port,
                 host=ctx.self_addrs["primary"].host,
                 port=ctx.self_addrs["primary"].port,

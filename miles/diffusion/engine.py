@@ -10,12 +10,18 @@ def compute_diffusion_engine_launch_cmd(
     interpreter_prefix: list[str],
     base_gpu_id: int,
     num_gpus_per_engine: int,
+    sglang_overrides: dict,
     nccl_port: int,
     host: str,
     port: int,
 ) -> str:
     server_args = compute_diffusion_server_args(
-        args, num_gpus_per_engine=num_gpus_per_engine, nccl_port=nccl_port, host=host.strip("[]"), port=port
+        args,
+        num_gpus_per_engine=num_gpus_per_engine,
+        sglang_overrides=sglang_overrides,
+        nccl_port=nccl_port,
+        host=host.strip("[]"),
+        port=port,
     )
     return shlex.join(
         [
@@ -30,8 +36,11 @@ def compute_diffusion_engine_launch_cmd(
     )
 
 
-def compute_diffusion_server_args(args, *, num_gpus_per_engine: int, nccl_port: int, host: str, port: int) -> dict:
-    """Keyword arguments of sglang.multimodal_gen's `ServerArgs.from_kwargs`."""
+def compute_diffusion_server_args(
+    args, *, num_gpus_per_engine: int, sglang_overrides: dict, nccl_port: int, host: str, port: int
+) -> dict:
+    """Keyword arguments of sglang.multimodal_gen's `ServerArgs.from_kwargs`; the server group's overrides,
+    which carry the model's own `model_path`, win over the run-wide defaults, as they do for text engines."""
     server_args = {
         "model_path": args.hf_checkpoint,
         "trust_remote_code": True,
@@ -51,7 +60,7 @@ def compute_diffusion_server_args(args, *, num_gpus_per_engine: int, nccl_port: 
     server_args["lora_target_modules"] = args.diffusion_lora_target_modules
     if args.diffusion_dit_precision is not None:
         server_args["dit_precision"] = args.diffusion_dit_precision
-    return server_args
+    return {**server_args, **sglang_overrides}
 
 
 def compute_diffusion_engine_env_vars(args) -> dict[str, str]:
