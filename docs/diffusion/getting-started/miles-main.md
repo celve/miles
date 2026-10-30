@@ -22,5 +22,6 @@ python scripts/run_sd35_medium_flow_grpo_ocr.py --num-rollout 600
 | Weight sync | LoRA A/B pairs over CUDA IPC, merged by the engine (`lora_merge`) |
 
 Supported today: SD3 family, LoRA, colocated GPUs, FSDP, the `sde` sampler and the OCR reward. Under
-`--deterministic-mode` a 2-rollout run reproduces miles_diffusion's metric series bit for bit on the same image;
-`tests/e2e/fsdp/test_sd35_medium_flow_grpo_ocr_2xGPU.py` checks it.
+`--deterministic-mode` a 2-rollout run reproduces miles_diffusion's metric series bit for bit on the same image.
+`tests/e2e/fsdp/test_sd35_medium_flow_grpo_ocr_2xGPU.py` checks that series against a recorded standard, with
+tolerances that absorb engine, torch and PaddleOCR differences between images.
