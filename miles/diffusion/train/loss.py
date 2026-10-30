@@ -43,7 +43,9 @@ def collate_pairs(
         sigma_max=stack("sigma_max"),
         log_prob_old=stack("log_prob_old"),
         advantage=torch.clamp(advantage, -adv_clip_max, adv_clip_max),
-        pos_cond=config.collate_cond([config.prepare_cond_kwargs(env.pos_cond_kwargs, device) for env in envs], device),
+        pos_cond=config.collate_cond(
+            [config.prepare_cond_kwargs(env.pos_cond_kwargs, device) for env in envs], device
+        ),
         neg_cond=(
             config.collate_cond([config.prepare_cond_kwargs(env.neg_cond_kwargs, device) for env in envs], device)
             if use_cfg

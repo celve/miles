@@ -1,0 +1,48 @@
+{
+  "meta": {
+    "recorded_with": "radixark/miles:dev (torch 2.14.1+cu130, sglang 0.5.23.dev72 5403606, diffusers 0.37.0, paddleocr 2.9.1, paddlepaddle 2.6.2), 2x H200",
+    "identical_to": "radixark/miles_diffusion 221f965f on the same image"
+  },
+  "metrics": {
+    "rollout/reward/raw_num_samples": [
+      128.0,
+      128.0
+    ],
+    "rollout/reward/raw_mean": [
+      0.37512093782424927,
+      0.5170344114303589
+    ],
+    "rollout/reward/raw_median": [
+      0.3571428656578064,
+      0.625
+    ],
+    "rollout/reward/raw_std": [
+      0.3579716682434082,
+      0.3557916283607483
+    ],
+    "train/log_prob_old_idx_0": [
+      -0.7209116667509079,
+      -0.7188687697052956,
+      -0.720888614654541,
+      -0.7224574312567711
+    ],
+    "train/log_prob_new_idx_0": [
+      -0.7209121808409691,
+      -0.7189437076449394,
+      -0.720891959965229,
+      -0.722557544708252
+    ],
+    "train/log_prob_mean_abs_diff": [
+      9.724097326397896e-05,
+      0.0011342288460582494,
+      0.00011462585534900427,
+      0.000728974083904177
+    ],
+    "train/grad_norm": [
+      0.0018483148887753487,
+      0.003766513429582119,
+      0.001475673750974238,
+      0.0035525509156286716
+    ]
+  }
+}

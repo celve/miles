@@ -34,24 +34,29 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     save_interval: int = 0
     extra_args: str = ""
 
+    @property
+    def resolved_model_path(self) -> str:
+        return self.model_path or f"{self.model_dir}/stable-diffusion-3.5-medium"
 
-def prepare(args: ScriptArgs) -> tuple[str, str]:
+    @property
+    def dataset_dir(self) -> str:
+        return f"{self.data_dir}/{DATASET.split('/')[-1]}"
+
+
+def prepare(args: ScriptArgs) -> None:
     U = args.create_backend()
-    dataset_dir = f"{args.data_dir}/{DATASET.split('/')[-1]}"
     U.exec_command_cpu(
-        f"hf download --repo-type dataset {DATASET} --include '{DATASET_SUBSET}/**' --local-dir {dataset_dir}"
+        f"hf download --repo-type dataset {DATASET} --include '{DATASET_SUBSET}/**' --local-dir {args.dataset_dir}"
     )
-    model_path = args.model_path or f"{args.model_dir}/stable-diffusion-3.5-medium"
     if not args.model_path:
-        U.exec_command_cpu(f"hf download {MODEL} --local-dir {model_path}")
-    return model_path, f"{dataset_dir}/{DATASET_SUBSET}"
+        U.exec_command_cpu(f"hf download {MODEL} --local-dir {args.resolved_model_path}")
 
 
-def execute(args: ScriptArgs, *, model_path: str, data_dir: str) -> None:
+def execute(args: ScriptArgs) -> None:
     U = args.create_backend()
     save_dir = f"{args.output_dir}/{args.run_id}/checkpoints"
 
-    ckpt_args = f"--hf-checkpoint {model_path} --model-kind diffusion "
+    ckpt_args = f"--hf-checkpoint {args.resolved_model_path} --model-kind diffusion "
     if args.save_interval:
         ckpt_args += f"--save {save_dir} --save-interval {args.save_interval} "
 
@@ -60,7 +65,7 @@ def execute(args: ScriptArgs, *, model_path: str, data_dir: str) -> None:
         "--data-source-path miles.diffusion.rollout.data_source.DiffusionPromptDataSource "
         "--custom-convert-samples-to-train-data-path miles.diffusion.conversion.convert_samples_to_train_data "
         "--custom-rollout-log-function-path miles.diffusion.conversion.log_rollout_data "
-        f"--prompt-data {data_dir}/train.jsonl "
+        f"--prompt-data {args.dataset_dir}/{DATASET_SUBSET}/train.jsonl "
         "--input-key input "
         "--rollout-batch-size 8 "
         "--n-samples-per-prompt 16 "
@@ -125,8 +130,8 @@ def execute(args: ScriptArgs, *, model_path: str, data_dir: str) -> None:
 
 @command_utils.dataclass_cli
 def main(args: ScriptArgs) -> None:
-    model_path, data_dir = prepare(args)
-    execute(args, model_path=model_path, data_dir=data_dir)
+    prepare(args)
+    execute(args)
 
 
 if __name__ == "__main__":

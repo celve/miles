@@ -1,0 +1,9 @@
+### 0
+hf download
+  --repo-type dataset rockdu/miles-diffusion-datasets
+  --include 'flowgrpo_ocr/**'
+  --local-dir /root/datasets/miles-diffusion-datasets
+
+### 1
+hf download stabilityai/stable-diffusion-3.5-medium
+  --local-dir /root/models/stable-diffusion-3.5-medium

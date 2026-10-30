@@ -9,7 +9,6 @@ import httpx
 
 from miles.diffusion.rollout.ocr import OcrRewardPool, image_to_rgb_uint8
 from miles.diffusion.rollout.response import parse_rollout_response
-from miles.rollout.inference_rollout.inference_rollout_train import get_worker_urls
 from miles.rollout.base_types import (
     BaseRolloutFn,
     RolloutFnConstructorInput,
@@ -17,6 +16,7 @@ from miles.rollout.base_types import (
     RolloutFnTrainInput,
     RolloutFnTrainOutput,
 )
+from miles.rollout.inference_rollout.inference_rollout_train import get_worker_urls
 from miles.utils.function_registry import load_function
 from miles.utils.types import Sample
 
@@ -36,9 +36,7 @@ class DiffusionRolloutFn(BaseRolloutFn):
         self.sampling_params = build_sampling_params(args)
         self.semaphore: asyncio.Semaphore | None = None
         self.reward_pool = OcrRewardPool(num_workers=args.diffusion_ocr_num_workers)
-        self.client = httpx.AsyncClient(
-            limits=httpx.Limits(max_keepalive_connections=0), timeout=httpx.Timeout(None)
-        )
+        self.client = httpx.AsyncClient(limits=httpx.Limits(max_keepalive_connections=0), timeout=httpx.Timeout(None))
 
     async def __call__(self, input: RolloutFnInput) -> RolloutFnTrainOutput:
         assert isinstance(input, RolloutFnTrainInput), "diffusion runs have no eval rollout yet"
@@ -107,6 +105,7 @@ class DiffusionRolloutFn(BaseRolloutFn):
 
     async def dispose(self) -> None:
         await self.client.aclose()
+        self.reward_pool.shutdown()
 
 
 def build_sampling_params(args: Namespace) -> dict[str, Any]:
