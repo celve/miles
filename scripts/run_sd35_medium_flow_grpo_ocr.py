@@ -14,6 +14,7 @@ Args:
     python scripts/run_sd35_medium_flow_grpo_ocr.py --num-rollout 600
 """
 
+import json
 from dataclasses import dataclass
 
 import typer
@@ -24,15 +25,17 @@ MODEL = "stabilityai/stable-diffusion-3.5-medium"
 DATASET = "rockdu/miles-diffusion-datasets"
 DATASET_SUBSET = "flowgrpo_ocr"
 
-# paddleocr's resolver downgrades numpy below 2 and adds GUI OpenCV wheels; the image's numpy and headless OpenCV
-# are restored afterwards, which PaddleOCR 2.9 runs on (miles.diffusion.rollout.ocr patches the one numpy 2 gap).
+_OCR_DEPS = {"paddleocr": "2.9.1", "paddlepaddle": "2.6.2", "python-Levenshtein": "0.27.3"}
+# Installs the pinned OCR stack unless exactly those versions are present. paddleocr's resolver downgrades numpy below
+# 2 and adds GUI OpenCV wheels, so the image's numpy and headless OpenCV are restored afterwards; PaddleOCR 2.9 runs on
+# them (miles.diffusion.rollout.ocr patches the one numpy 2 gap).
 _OCR_DEPS_INSTALL = (
-    'python -c \'import importlib.metadata as m; [m.version(p) for p in ("paddleocr", "paddlepaddle", '
-    '"python-Levenshtein")]\' 2>/dev/null || ('
+    "python -c 'import importlib.metadata as m, sys; "
+    f"sys.exit(any(m.version(p) != v for p, v in {json.dumps(_OCR_DEPS)}.items()))' 2>/dev/null || ("
     "set -e; "
     "NUMPY=$(python -c 'import numpy; print(numpy.__version__)'); "
     "OPENCV=$(pip show opencv-python-headless | sed -n 's/^Version: //p'); "
-    "pip install paddleocr==2.9.1 paddlepaddle==2.6.2 python-Levenshtein==0.27.3; "
+    f"pip install {' '.join(f'{p}=={v}' for p, v in _OCR_DEPS.items())}; "
     "pip uninstall -y opencv-python opencv-contrib-python; "
     'pip install "numpy==$NUMPY"; '
     'pip install --force-reinstall --no-deps "opencv-python-headless==$OPENCV")'
