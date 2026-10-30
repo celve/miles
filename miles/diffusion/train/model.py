@@ -33,8 +33,7 @@ def load_fsdp_dit(
         model = _load_component(args.hf_checkpoint, component, master_dtype=master_dtype, materialize=is_source)
     if args.backend.gradient_checkpointing:
         model.enable_gradient_checkpointing()
-    if args.lora_rank > 0:
-        model = _apply_lora(model, args, materialize=is_source)
+    model = _apply_lora(model, args, materialize=is_source)
     model.train(True)
 
     _sync_dtypes_from_rank0(model)
@@ -86,8 +85,8 @@ def _apply_lora(model: torch.nn.Module, args, *, materialize: bool) -> torch.nn.
     model = get_peft_model(
         model,
         LoraConfig(
-            r=args.lora_rank,
-            lora_alpha=args.lora_alpha,
+            r=args.diffusion_lora_rank,
+            lora_alpha=args.diffusion_lora_alpha,
             target_modules=args.diffusion_lora_target_modules,
             # Off rank 0 the adapters stay uninitialized on meta; rank 0's values arrive by broadcast.
             init_lora_weights=init if materialize else False,

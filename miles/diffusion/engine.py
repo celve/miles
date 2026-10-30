@@ -46,9 +46,9 @@ def compute_diffusion_server_args(args, *, num_gpus_per_engine: int, nccl_port: 
         # Miles places rollout memory itself; sglang's automatic policy would offload by startup free memory.
         "performance_mode": "manual",
     }
-    if args.lora_rank > 0:
-        server_args["lora_merge_mode"] = "merge"
-        server_args["lora_target_modules"] = args.diffusion_lora_target_modules
+    # The engine holds no adapter: each weight sync merges the trainer's LoRA delta into its base weights.
+    server_args["lora_merge_mode"] = "merge"
+    server_args["lora_target_modules"] = args.diffusion_lora_target_modules
     if args.diffusion_dit_precision is not None:
         server_args["dit_precision"] = args.diffusion_dit_precision
     return server_args

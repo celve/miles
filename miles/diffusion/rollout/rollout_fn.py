@@ -9,6 +9,7 @@ import httpx
 
 from miles.diffusion.rollout.ocr import OcrRewardPool, image_to_rgb_uint8
 from miles.diffusion.rollout.response import parse_rollout_response
+from miles.rollout.inference_rollout.inference_rollout_train import get_worker_urls
 from miles.rollout.base_types import (
     BaseRolloutFn,
     RolloutFnConstructorInput,
@@ -33,8 +34,7 @@ class DiffusionRolloutFn(BaseRolloutFn):
         self.url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/rollout/generate"
         self.step_strategy = load_function(args.diffusion_step_strategy_path)
         self.sampling_params = build_sampling_params(args)
-        num_engines = args.rollout_num_gpus // args.rollout_num_gpus_per_engine
-        self.semaphore = asyncio.Semaphore(args.sglang_server_concurrency * num_engines)
+        self.semaphore: asyncio.Semaphore | None = None
         self.reward_pool = OcrRewardPool(num_workers=args.diffusion_ocr_num_workers)
         self.client = httpx.AsyncClient(
             limits=httpx.Limits(max_keepalive_connections=0), timeout=httpx.Timeout(None)
@@ -42,6 +42,9 @@ class DiffusionRolloutFn(BaseRolloutFn):
 
     async def __call__(self, input: RolloutFnInput) -> RolloutFnTrainOutput:
         assert isinstance(input, RolloutFnTrainInput), "diffusion runs have no eval rollout yet"
+        if self.semaphore is None:
+            num_engines = len(await get_worker_urls(self.args))
+            self.semaphore = asyncio.Semaphore(self.args.sglang_server_concurrency * num_engines)
         groups = self.data_source.get_samples(self.args.rollout_batch_size)
         groups = await asyncio.gather(*(self._generate_group(group) for group in groups))
         logger.info(f"Rollout {input.rollout_id}: first prompt {groups[0][0].prompt!r}, reward {groups[0][0].reward}")

@@ -6,7 +6,7 @@ from miles.diffusion.train.pipeline_config import get_train_pipeline_config, res
 def validate_diffusion_args(args) -> None:
     assert args.train_backend == "fsdp", "--model-kind diffusion trains with --train-backend fsdp only"
     assert args.colocate, "--model-kind diffusion syncs weights over CUDA IPC, so it needs --colocate"
-    assert args.lora_rank > 0, "--model-kind diffusion trains a LoRA adapter; set --lora-rank"
+    assert args.diffusion_lora_rank > 0, "--model-kind diffusion trains a LoRA adapter"
     assert args.use_miles_router, "--model-kind diffusion routes /rollout/generate through --use-miles-router"
     assert not args.fully_async, "--model-kind diffusion runs the synchronous loop only"
     assert args.rollout_num_gpus_per_engine == 1, "--model-kind diffusion serves one GPU per engine"
