@@ -301,6 +301,8 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
         "--sglang-decode-log-interval 1000 "
         "--sglang-enable-metrics "
         "--sglang-attention-backend fa3 "
+        # SGLang keeps this off outside Hopper; on CPU transport each 2x1080p call copies ~100 MB of pixels through host memory.
+        "--sglang-mm-feature-transport cuda_ipc "
     )
 
     wandb_args = (
@@ -365,6 +367,10 @@ def _worker_env(args: ScriptArgs, harbor_env: dict[str, str]) -> dict:
         "HARBOR_CUA_DESKTOP_HEIGHT": str(args.desktop_height),
         "AGENT_MAX_INPUT_TOKENS": os.environ.get("AGENT_MAX_INPUT_TOKENS", "32768"),
         "AGENT_MAX_OUTPUT_TOKENS": os.environ.get("AGENT_MAX_OUTPUT_TOKENS", "2048"),
+        # Room for 64 desktops' screenshots in flight, so the IPC pool never falls back to CPU transport.
+        "SGLANG_MM_FEATURE_CACHE_MB": "4096",
+        # SGLang never clears its ViT embedding cache, not even on /flush_cache after a weight update.
+        "SGLANG_VLM_CACHE_SIZE_MB": "0",
     }
     if args.rollout_path == "session":
         env["HARBOR_AGENT_MAX_ITERATIONS"] = str(args.max_turns)
