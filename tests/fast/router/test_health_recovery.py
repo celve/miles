@@ -59,8 +59,10 @@ async def test_slow_health_recovers_after_all_workers_are_quarantined():
             assert len(health_calls) == 3
             assert router.worker_failure_counts[server.url] == 3
             assert router.dead_workers == {server.url}
-            with pytest.raises(RuntimeError, match="No healthy workers"):
-                router._use_url()
+            response = await client.post("/generate", json={})
+            response.raise_for_status()
+            assert response.json() == {"text": "still serving"}
+            assert router.dead_workers == {server.url}
 
             await router._health_check_once()
 
@@ -73,6 +75,48 @@ async def test_slow_health_recovers_after_all_workers_are_quarantined():
             assert router.worker_request_counts[server.url] == 0
     finally:
         server.stop()
+
+
+@pytest.mark.parametrize("state", ["busy", "dead", "mixed"], ids=["busy", "dead", "mixed"])
+async def test_quarantine_only_blocks_routing_when_another_worker_is_available(state):
+    """Slow health probes must not block a responsive pool or displace a worker outside quarantine."""
+    attempts = []
+
+    async def upstream_response(request):
+        if request.url.path == "/health":
+            return httpx.Response(200 if state == "mixed" and request.url.host == "w1" else 503)
+        attempts.append(request.url.host)
+        if state == "dead" or (state == "mixed" and request.url.host == "w2"):
+            raise httpx.ConnectError("engine down", request=request)
+        return httpx.Response(200, json={"text": "still serving"})
+
+    async with _router_clients() as (router, client):
+        await router.client.aclose()
+        async with httpx.AsyncClient(transport=httpx.MockTransport(upstream_response)) as upstream:
+            router.client = upstream
+            for url in ("http://w1", "http://w2"):
+                (await client.post("/add_worker", params={"url": url})).raise_for_status()
+            for _ in range(3):
+                await router._health_check_once()
+            router.worker_request_counts = {"http://w1": 3, "http://w2": 1}
+
+            if state == "dead":
+                with pytest.raises(httpx.ConnectError, match="engine down"):
+                    await client.post("/generate", json={})
+            else:
+                response = await client.post("/generate", json={})
+                response.raise_for_status()
+                assert response.json() == {"text": "still serving"}
+
+            assert attempts == (["w1"] if state == "mixed" else ["w2"])
+            assert router.worker_request_counts == {"http://w1": 3, "http://w2": 1}
+            assert router.dead_workers == ({"http://w2"} if state == "mixed" else {"http://w1", "http://w2"})
+
+
+async def test_an_empty_pool_cannot_fall_back_to_an_unregistered_worker():
+    async with _router_clients() as (router, client):
+        with pytest.raises(RuntimeError, match="No workers registered"):
+            await client.post("/generate", json={})
 
 
 @pytest.mark.parametrize("failure", ["timeout", "connection", "status"], ids=["timeout", "connection", "status"])

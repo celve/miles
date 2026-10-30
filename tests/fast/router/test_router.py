@@ -239,13 +239,13 @@ class TestLoadBalancing:
         assert selected == "http://w3:8000"
         assert router.worker_request_counts["http://w3:8000"] == 4
 
-    def test_use_url_raises_when_all_dead(self, router_factory):
+    def test_use_url_tries_least_loaded_registered_worker_when_all_quarantined(self, router_factory):
         router = router_factory()
-        router.worker_request_counts = {"http://w1:8000": 0}
-        router.dead_workers = {"http://w1:8000"}
+        router.worker_request_counts = {"http://w1:8000": 3, "http://w2:8000": 1}
+        router.dead_workers = {"http://w1:8000", "http://w2:8000"}
 
-        with pytest.raises(RuntimeError, match="No healthy workers"):
-            router._use_url()
+        assert router._use_url() == "http://w2:8000"
+        assert router.worker_request_counts["http://w2:8000"] == 2
 
 
 class TestFinishingARequestAfterDeregistration:

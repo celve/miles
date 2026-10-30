@@ -224,16 +224,17 @@ class MilesRouter:
     def _use_url(self):
         """Select worker URL with minimal active requests."""
 
+        if not self.worker_request_counts:
+            raise RuntimeError("No workers registered in the pool")
         if not self.dead_workers:
-            # Healthy path: select from all workers
             url = min(self.worker_request_counts, key=self.worker_request_counts.get)
         else:
-            # Degraded path: select from workers not in dead_workers
             valid_workers = (w for w in self.worker_request_counts if w not in self.dead_workers)
             try:
                 url = min(valid_workers, key=self.worker_request_counts.get)
             except ValueError:
-                raise RuntimeError("No healthy workers available in the pool") from None
+                # Busy engines can miss health probes while still serving requests.
+                url = min(self.worker_request_counts, key=self.worker_request_counts.get)
 
         self.worker_request_counts[url] += 1
         return url
