@@ -323,7 +323,7 @@ def dump_dp_padded_run(dump_dir: Path, *, raw_reward_override: list[float] | Non
         metadata={},
         custom_convert_samples_to_train_data_func=None,
         custom_reward_post_process_func=(
-            (lambda args, samples: (raw_reward_override, raw_reward_override))
+            (lambda args, samples: (list(raw_reward_override), list(raw_reward_override)))
             if raw_reward_override is not None
             else None
         ),

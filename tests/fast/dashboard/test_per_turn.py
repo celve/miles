@@ -1,4 +1,6 @@
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from threading import Barrier
 
 import polars as pl
 import pytest
@@ -126,3 +128,21 @@ def test_dp_padding_preserves_an_unsegmented_custom_reward_override(tmp_path):
 
     dump_dp_padded_run(tmp_path, raw_reward_override=[9.0, 8.0, 7.0])
     assert DumpReader(tmp_path).episodes(0)["raw_reward"].to_list() == [9.0, 8.0, 7.0]
+
+
+def test_concurrent_cold_views_publish_their_own_cache_files(tmp_path, monkeypatch):
+    dump_segmented_run(tmp_path)
+    reader = DumpReader(tmp_path)
+    reader.joined(0)
+    barrier = Barrier(3)
+    write_parquet = pl.DataFrame.write_parquet
+
+    def overlapping_write(frame, path, *args, **kwargs):
+        barrier.wait(timeout=60)
+        return write_parquet(frame, path, *args, **kwargs)
+
+    monkeypatch.setattr(pl.DataFrame, "write_parquet", overlapping_write)
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        frames = list(pool.map(lambda _: reader.summary(0), range(3)))
+    assert all(frame.equals(frames[0]) for frame in frames)
+    assert reader.summary(0).equals(frames[0])
