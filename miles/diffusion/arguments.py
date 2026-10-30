@@ -49,7 +49,7 @@ _UNSUPPORTED = [
     ("independent data parallelism (--indep-dp)", lambda a: a.indep_dp),
     (
         "the text LoRA stack (--lora-rank, --multi-lora); use --diffusion-lora-rank",
-        lambda a: a.lora_rank > 0 or a.multi_lora,
+        lambda a: a.lora_rank > 0 or a.multi_lora_n_adapters > 0,
     ),
     ("routing replay or true on-policy mode", lambda a: a.use_rollout_routing_replay or a.true_on_policy_mode),
     ("--debug-train-only or --debug-rollout-only", lambda a: a.debug_train_only or a.debug_rollout_only),
