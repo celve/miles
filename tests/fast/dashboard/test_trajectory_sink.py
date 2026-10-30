@@ -255,10 +255,27 @@ def test_custom_phase_helpers_are_noops_when_disabled_or_evaluating():
     assert _pushed(handle) == []
 
 
-def test_reported_phase_closes_without_waiting_for_another_event():
+def test_reported_phase_closes_after_batch_deadline_without_another_event(monkeypatch):
+    import time
+
     from miles.utils.lifecycle import report_trajectory_phase
 
+    monkeypatch.setattr(hooks, "BATCH_MAX_SECONDS", 0.01)
     handle = FakeHandle()
     TrajectoryLifecycle().sink = TrajectorySink(handle)
     report_trajectory_phase(_sample(), "settle", 10.0, 12.0, turn=1)
+    deadline = time.monotonic() + 5
+    while len(_pushed(handle)) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
     assert [(event.kind, event.ts) for event in _pushed(handle)] == [("phase_start", 10.0), ("phase_end", 12.0)]
+
+
+def test_phase_transport_failure_does_not_replace_the_rollout_error(monkeypatch):
+    from miles.utils import lifecycle
+
+    def broken_pipe(report):
+        raise BrokenPipeError("parent closed")
+
+    monkeypatch.setattr(lifecycle, "report_to_caller", broken_pipe)
+    with pytest.raises(ValueError, match="rollout error"), lifecycle.trajectory_phase(_sample(), "setup"):
+        raise ValueError("rollout error")

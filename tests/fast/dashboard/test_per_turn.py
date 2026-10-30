@@ -43,14 +43,13 @@ def test_segmented_rollouts_keep_tokens_and_equal_episode_weight(tmp_path, expli
     assert tokens.json()["token_ids"] == samples[0].tokens
 
 
-def test_bad_reward_cardinality_is_reported_instead_of_misattributed(tmp_path):
+def test_episode_rewards_survive_a_train_only_compact_reward_layout(tmp_path):
     dump_segmented_run(tmp_path)
-    path = tmp_path / "train_data/0_0.pt"
-    pack = torch.load(path, weights_only=False)
-    pack["rollout_data"]["raw_reward"] = [99.0, 88.0]
-    torch.save(pack, path)
-    with pytest.raises(AssertionError, match="8 samples or 4 rollouts, got 2"):
-        DumpReader(tmp_path).load_joined(0)
+    for path in (tmp_path / "train_data").glob("*.pt"):
+        pack = torch.load(path, weights_only=False)
+        pack["rollout_data"]["raw_reward"] = [99.0, 88.0]
+        torch.save(pack, path)
+    assert DumpReader(tmp_path).episodes(0)["raw_reward"].to_list() == [1.0, 0.0, 0.25, 0.75]
 
 
 def test_segment_lifecycle_uses_source_identity(tmp_path):
@@ -69,3 +68,61 @@ def test_segment_lifecycle_uses_source_identity(tmp_path):
     for endpoint in ("/api/rollout/0/trajectories", "/api/rollout/0/trajectories?sample_index=1"):
         assert client.get(endpoint).json()["lanes"][0]["sample_index"] == 88
     assert DumpReader(tmp_path).summary(0).filter(pl.col("sample_index") == 1)["lifecycle_index"].item() == 88
+
+
+def test_real_dp_padding_does_not_join_dummy_rows_or_count_their_rewards(tmp_path):
+    from tests.fast.dashboard.dummy_dump import dump_dp_padded_run
+
+    samples = dump_dp_padded_run(tmp_path)
+    reader = DumpReader(tmp_path)
+    joined = reader.load_joined(0)
+    assert joined.train_coverage == 1.0
+    assert reader.episodes(0)["raw_reward"].to_list() == [1.0, 0.0, 0.5]
+    for sample in samples:
+        token = reader.tokens(0, sample.index)
+        assert token["token_ids"] == sample.tokens
+        assert token["train_log_probs"] is not None
+
+
+def test_known_episode_reward_survives_unjoined_zero_loss_replacements(tmp_path):
+    samples = dump_segmented_run(tmp_path, explicit_ids=False)
+    for path in (tmp_path / "train_data").glob("*.pt"):
+        pack = torch.load(path, weights_only=False)
+        data = pack["rollout_data"]
+        for row, index in enumerate(data["sample_indices"]):
+            if index == 0:
+                data["tokens"][row] = torch.tensor([0, 0])
+                data["loss_masks"][row] = torch.tensor([0])
+                data["response_lengths"][row] = 1
+                data["total_lengths"][row] = 2
+        torch.save(pack, path)
+    reader = DumpReader(tmp_path)
+    assert reader.episodes(0)["raw_reward"].to_list() == [1.0, 0.0, 0.25, 0.75]
+    assert reader.groups(0)["reward_mean"].to_list() == [0.5, 0.5]
+    assert reader.tokens(0, samples[0].index)["train_log_probs"] is None
+
+
+def test_unsegmented_global_reward_overrides_survive_missing_token_rows(tmp_path):
+    from tests.fast.dashboard.dummy_dump import dump_dummy_run
+
+    dump_dummy_run(tmp_path, steps=1, dp_size=2, tp_dup=1)
+    for path in (tmp_path / "train_data").glob("*.pt"):
+        pack = torch.load(path, weights_only=False)
+        data = pack["rollout_data"]
+        data["raw_reward"] = [i + 0.25 for i in range(8)]
+        count = len(data["sample_indices"])
+        retained = [i for i, index in enumerate(data["sample_indices"]) if index != 0]
+        for key, values in data.items():
+            if key != "raw_reward" and isinstance(values, list) and len(values) == count:
+                data[key] = [values[i] for i in retained]
+        torch.save(pack, path)
+    summary = DumpReader(tmp_path).summary(0).sort("sample_index")
+    assert summary["raw_reward"].to_list() == [i + 0.25 for i in range(8)]
+    assert summary["dumped_rank"][0] is None
+
+
+def test_dp_padding_preserves_an_unsegmented_custom_reward_override(tmp_path):
+    from tests.fast.dashboard.dummy_dump import dump_dp_padded_run
+
+    dump_dp_padded_run(tmp_path, raw_reward_override=[9.0, 8.0, 7.0])
+    assert DumpReader(tmp_path).episodes(0)["raw_reward"].to_list() == [9.0, 8.0, 7.0]

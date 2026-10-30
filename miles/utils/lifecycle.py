@@ -7,8 +7,12 @@ the sink when enabled; while it is ``None`` every probe site is a no-op.
 
 from __future__ import annotations
 
+import logging
+import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 
+from miles.rollout.agentic.agent_function import report_to_caller
 from miles.utils.misc import SingletonMeta
 
 
@@ -34,25 +38,64 @@ def attach_lifecycle_metadata(sample, record, prev_record, turn: int) -> None:
     sample.metadata["lifecycle"] = segment
 
 
+@dataclass(frozen=True)
+class TrajectoryIdentity:
+    sample_index: int
+    group_index: int = -1
+    weight_version: str = ""
+
+    @classmethod
+    def from_sample(cls, sample):
+        versions = [span.version for span in sample.all_weight_version_spans]
+        return cls(
+            (
+                sample.lineage.source_sample_index
+                if sample.lineage is not None
+                else sample.index if sample.index is not None else -1
+            ),
+            sample.group_index if sample.group_index is not None else -1,
+            str(versions[-1]) if versions else "",
+        )
+
+
+@dataclass(frozen=True)
+class TrajectoryPhaseReport:
+    identity: TrajectoryIdentity
+    name: str
+    boundary: str
+    ts: float
+    turn: int
+
+
+def _report_phase(sample, name: str, boundary: str, *, turn: int, ts: float | None, evaluation: bool):
+    if evaluation:
+        return
+    try:
+        identity = sample if isinstance(sample, TrajectoryIdentity) else TrajectoryIdentity.from_sample(sample)
+        report = TrajectoryPhaseReport(identity, name, boundary, time.time() if ts is None else ts, turn)
+        if report_to_caller(report):
+            return
+        sink = TrajectoryLifecycle().sink
+        if sink is not None:
+            sink.phase_report(report)
+    except Exception:
+        logging.getLogger(__name__).warning("trajectory phase report failed", exc_info=True)
+
+
 @contextmanager
 def trajectory_phase(sample, name: str, *, turn: int = -1, evaluation: bool = False):
-    """Time one custom-generator phase; concurrent samples and nested named phases stay separate."""
-    sink = None if evaluation else TrajectoryLifecycle().sink
-    if sink is not None:
-        sink.phase_start(sample, name, turn=turn)
+    """Time one phase using a Sample or the dispatcher-provided TrajectoryIdentity in a child agent."""
+    _report_phase(sample, name, "start", turn=turn, ts=None, evaluation=evaluation)
     try:
         yield
     finally:
-        if sink is not None:
-            sink.phase_end(sample, name, turn=turn)
+        _report_phase(sample, name, "end", turn=turn, ts=None, evaluation=evaluation)
 
 
 def report_trajectory_phase(sample, name: str, t0: float, t1: float, *, turn: int = -1, evaluation: bool = False):
     """Report an externally measured phase using wall-clock timestamps in seconds."""
-    sink = None if evaluation else TrajectoryLifecycle().sink
-    if sink is not None:
-        sink.phase_start(sample, name, turn=turn, ts=t0)
-        sink.phase_end(sample, name, turn=turn, ts=t1)
+    _report_phase(sample, name, "start", turn=turn, ts=t0, evaluation=evaluation)
+    _report_phase(sample, name, "end", turn=turn, ts=t1, evaluation=evaluation)
 
 
 @contextmanager

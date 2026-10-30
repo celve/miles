@@ -14,7 +14,7 @@ import asyncio
 import logging
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 from miles.dashboard.logging_utils import RateLimitedWarner
 from miles.dashboard.sandbox_health import STATUSES, SandboxReport, SandboxStatus
@@ -28,7 +28,7 @@ from miles.dashboard.store import (
     TrajectoryEventKind,
 )
 from miles.rollout.agentic.agent_function import report_to_caller
-from miles.utils.lifecycle import TrajectoryLifecycle
+from miles.utils.lifecycle import TrajectoryIdentity, TrajectoryLifecycle, TrajectoryPhaseReport
 from miles.utils.timer import Timer
 from miles.utils.workers.worker_provider.base import BaseWorkerProvider
 
@@ -60,6 +60,24 @@ def _default_resolve_identity() -> _Identity:
 
 # test seams; production always uses the defaults
 _resolve_identity = _default_resolve_identity
+
+
+def _ensure_flusher(sink) -> None:
+    """Flush idle process-owned sinks after their batching deadline."""
+    if sink._flusher is not None:
+        return
+    import threading
+
+    def _loop():
+        while True:
+            time.sleep(BATCH_MAX_SECONDS)
+            with sink._lock:
+                due = bool(sink._buffer)
+            if due:
+                sink.flush()
+
+    sink._flusher = threading.Thread(target=_loop, daemon=True, name="dashboard-event-flush")
+    sink._flusher.start()
 
 
 class PhaseSink:
@@ -118,7 +136,7 @@ class PhaseSink:
                     )
                 )
                 batch = self._take_batch_if_due()
-            self._ensure_flusher()
+            _ensure_flusher(self)
             if batch:
                 self._handle.push_phases.remote(batch)
         except Exception:
@@ -135,37 +153,16 @@ class PhaseSink:
         try:
             with self._lock:
                 batch, self._buffer = self._buffer, []
+                self._last_flush = time.monotonic()
             if batch:
                 self._handle.push_phases.remote(batch)
         except Exception:
             self._warner.warn("dashboard phase sink flush failed; dropping events")
 
-    def _ensure_flusher(self) -> None:
-        """Background flush: _take_batch_if_due only runs when a new event
-        arrives, so on a process that goes idle (train ranks during a
-        shared-engine eval) the closing events of its last phases sit in the
-        buffer indefinitely and the UI shows them as still-open."""
-        if self._flusher is not None:
-            return
-        import threading
-
-        def _loop():
-            while True:
-                time.sleep(BATCH_MAX_SECONDS)
-                with self._lock:
-                    due = bool(self._buffer)
-                if due:
-                    self.flush()
-
-        self._flusher = threading.Thread(target=_loop, daemon=True, name="dashboard-phase-flush")
-        self._flusher.start()
-
 
 class TrajectorySink:
     """Per-sample lifecycle events from the rollout process, batched to the
-    collector (fire-and-forget). Core code reaches it via
-    ``miles.dashboard.lifecycle.trajectory_sink()`` — duck-typed so the core
-    call sites never import this module."""
+    collector through the core TrajectoryLifecycle seam."""
 
     def __init__(self, handle):
         self._handle = handle
@@ -173,6 +170,7 @@ class TrajectorySink:
         self._lock = threading.Lock()
         self._last_flush = time.monotonic()
         self._warner = RateLimitedWarner(logger)
+        self._flusher = None
 
     # ------------------------- core-facing emitters -------------------------
 
@@ -216,35 +214,33 @@ class TrajectorySink:
         self._emit(TrajectoryEventKind.TOOL_START, sample, ts=t0, turn=turn, detail=detail)
         self._emit(TrajectoryEventKind.TOOL_END, sample, ts=t1, turn=turn, detail=detail)
 
-    def phase_start(self, sample, name: str, *, turn: int = -1, ts: float | None = None) -> None:
-        self._emit(TrajectoryEventKind.PHASE_START, sample, ts=ts, turn=turn, detail=name)
-        self.flush()
-
-    def phase_end(self, sample, name: str, *, turn: int = -1, ts: float | None = None) -> None:
-        self._emit(TrajectoryEventKind.PHASE_END, sample, ts=ts, turn=turn, detail=name)
-        self.flush()
-
-    # ------------------------------ internals -------------------------------
+    def phase_report(self, report: TrajectoryPhaseReport) -> None:
+        self._push(
+            TrajectoryEvent(
+                ts=report.ts,
+                kind=f"phase_{report.boundary}",
+                turn=report.turn,
+                detail=report.name,
+                **asdict(report.identity),
+            )
+        )
 
     def _emit(self, kind: str, sample, *, ts: float | None = None, turn: int = -1, detail: str = "") -> None:
         try:
-            versions = [span.version for span in getattr(sample, "all_weight_version_spans", None) or []]
+            identity = TrajectoryIdentity.from_sample(sample)
             event = TrajectoryEvent(
-                ts=time.time() if ts is None else ts,
-                kind=kind,
-                sample_index=(
-                    sample.lineage.source_sample_index
-                    if sample.lineage is not None
-                    else sample.index if sample.index is not None else -1
-                ),
-                group_index=sample.group_index if sample.group_index is not None else -1,
-                turn=turn,
-                weight_version=str(versions[-1]) if versions else "",
-                detail=detail,
+                ts=time.time() if ts is None else ts, kind=kind, turn=turn, detail=detail, **asdict(identity)
             )
+            self._push(event)
+        except Exception:
+            self._warner.warn("dashboard trajectory sink failed; dropping events")
+
+    def _push(self, event: TrajectoryEvent) -> None:
+        try:
             with self._lock:
                 self._buffer.append(event)
                 batch = self._take_batch_if_due()
+            _ensure_flusher(self)
             if batch:
                 self._handle.push_trajectories.remote(batch)
         except Exception:
@@ -261,6 +257,7 @@ class TrajectorySink:
         try:
             with self._lock:
                 batch, self._buffer = self._buffer, []
+                self._last_flush = time.monotonic()
             if batch:
                 self._handle.push_trajectories.remote(batch)
         except Exception:
@@ -413,6 +410,23 @@ def report_sandbox(
         push_sandbox_reports([report])
     except Exception:
         _warner.warn("dashboard sandbox report failed")
+
+
+def push_agent_reports(reports: list, *, evaluation: bool = False) -> None:
+    sandboxes = []
+    for report in reports:
+        if isinstance(report, TrajectoryPhaseReport):
+            if evaluation:
+                continue
+            sink = TrajectoryLifecycle().sink
+            if sink is not None:
+                sink.phase_report(report)
+        elif isinstance(report, SandboxReport):
+            sandboxes.append(report)
+        else:
+            _warner.warn(f"unsupported agent dashboard report: {type(report).__name__}")
+    if sandboxes:
+        push_sandbox_reports(sandboxes)
 
 
 def push_sandbox_reports(reports: list[SandboxReport]) -> None:

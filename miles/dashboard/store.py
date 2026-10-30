@@ -728,7 +728,7 @@ class MetricStore:
                             segment["weight_version"] = event.weight_version or segment["weight_version"]
             if attempt_t0 is not None:
                 attempts.append(dict(t0=attempt_t0, t1=None))  # attempt still running
-            if any(s["kind"] not in ("gen", "tool") or (s["kind"] == "gen" and s["turn"] > 0) for s in segments):
+            if any(s["kind"] == "model_call" or (s["kind"] == "gen" and s["turn"] > 0) for s in segments):
                 # per-turn spans (multi_turn / agentic) supersede the coarse
                 # attempt-level gen span the generate_and_rm probe emits
                 segments = [s for s in segments if not (s["kind"] == "gen" and s["turn"] < 0)]

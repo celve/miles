@@ -149,3 +149,19 @@ def test_rollout_trajectories_empty_for_probe_less_runs(tmp_path):
     client = TestClient(make_app(MetricStore.load(tmp_path / "dashboard"), DumpReader(tmp_path)))
     payload = client.get("/api/rollout/0/trajectories").json()
     assert payload["lanes"] == []
+
+
+def test_partial_custom_phases_keep_coarse_generation(tmp_path):
+    kinds = TrajectoryEventKind
+    store = MetricStore(tmp_path)
+    for event in (
+        _event(10, kinds.ATTEMPT_START),
+        _event(10, kinds.GEN_START),
+        _event(11, kinds.PHASE_START, detail="setup"),
+        _event(12, kinds.PHASE_END, detail="setup"),
+        _event(20, kinds.ATTEMPT_END),
+    ):
+        store.append(event)
+    store.flush()
+    lane = store.trajectory_lanes()[0]
+    assert {(s["kind"], s["t0"], s["t1"]) for s in lane["segments"]} == {("gen", 10, 20), ("setup", 11, 12)}

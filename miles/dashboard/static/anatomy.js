@@ -1,3 +1,4 @@
+import { CUSTOM_PHASE_COLORS } from "./lifecycle.js";
 import { el, fmtNum } from "./app.js";
 import { hideTooltip, showTooltip } from "./charts.js";
 
@@ -5,11 +6,6 @@ import { hideTooltip, showTooltip } from "./charts.js";
 const COLORS = {
   gen: "#d55816",
   tool: "#1baf7a",
-  model_call: "#d55816",
-  env_step: "#1baf7a",
-  settle: "#eda100",
-  reset: "#8b7bd8",
-  setup: "#2a78d6",
   attempt: "#efe8dc", // queue/underlay: idle recedes, activity pops
   consume: "#2a78d6",
   text: "#231f1c",
@@ -96,7 +92,7 @@ export function createAnatomy({ lanes, consumeTs, rowsByIndex, onClickSample }) 
       legendSwatch(COLORS.tool, "tool wait"),
       ...[...new Set(lanes.flatMap((l) => l.segments.map((s) => s.kind)))]
         .filter((kind) => kind !== "gen" && kind !== "tool")
-        .map((kind) => legendSwatch(COLORS[kind] ?? COLORS.tool, kind.replaceAll("_", " "))),
+        .map((kind) => legendSwatch(CUSTOM_PHASE_COLORS[kind] ?? COLORS[kind] ?? COLORS.tool, kind.replaceAll("_", " "))),
       legendSwatch(COLORS.attempt, "queue/attempt"),
       el("span", { style: `color: ${COLORS.consume}` }, ["│ consume"]),
     ]),
@@ -155,7 +151,7 @@ export function createAnatomy({ lanes, consumeTs, rowsByIndex, onClickSample }) 
       }
       for (const segment of lane.segments) {
         if ((segment.t1 ?? T1) < v0 || (segment.t0 ?? T0) > v1) continue;
-        ctx.fillStyle = segment.kind === "gen" ? versionColor(segmentVersion(segment, lane)) : (COLORS[segment.kind] ?? COLORS.tool);
+        ctx.fillStyle = segment.kind === "gen" ? versionColor(segmentVersion(segment, lane)) : (CUSTOM_PHASE_COLORS[segment.kind] ?? COLORS[segment.kind] ?? COLORS.tool);
         const x0 = X(segment.t0 ?? T0, W);
         ctx.fillRect(x0, y + padSegment, Math.max(X(segment.t1 ?? T1, W) - x0, 1.5), ROW - 2 * padSegment);
       }

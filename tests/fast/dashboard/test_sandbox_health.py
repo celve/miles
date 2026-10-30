@@ -249,3 +249,65 @@ def test_flush_loop_survives_a_failing_flush(tmp_path: Path, monkeypatch):
     collector._stop_event.set()
     collector._flush_thread.join(timeout=1)
     assert len(calls) >= 2
+
+
+def test_subproc_phases_and_sandboxes_share_the_parent_report_channel(handle):
+    from dataclasses import asdict
+
+    from miles.dashboard.hooks import TrajectorySink
+    from miles.utils.lifecycle import TrajectoryIdentity, TrajectoryLifecycle
+
+    class _TrajectoryRemote:
+        def __init__(self):
+            self.events = []
+
+        def remote(self, events):
+            self.events.extend(events)
+
+    phases = _TrajectoryRemote()
+    handle.push_trajectories = phases
+    sink = TrajectorySink(handle)
+    previous = TrajectoryLifecycle().sink
+    TrajectoryLifecycle().sink = sink
+    try:
+        result = asyncio.run(
+            call_agent_function(
+                sandbox_report_stubs.report_custom_phases,
+                mode="subproc",
+                on_child_reports=hooks.push_agent_reports,
+                metadata={"miles_lifecycle": asdict(TrajectoryIdentity(88, 3, "4"))},
+            )
+        )
+        sink.flush()
+        assert result == "reported"
+        assert {e.detail for e in phases.events} == {"setup", "env_step", "settle", "model_call"}
+        assert {e.sample_index for e in phases.events} == {88}
+        assert {e.group_index for e in phases.events} == {3}
+        assert {e.weight_version for e in phases.events} == {"4"}
+        assert len(phases.events) == 8
+        [([sandbox],)] = handle.push_sandbox_reports.calls
+        assert sandbox.sandbox_key == "phase-desktop"
+    finally:
+        TrajectoryLifecycle().sink = previous
+
+
+def test_parent_filters_eval_phases_while_retaining_sandbox_health(handle):
+    from types import SimpleNamespace
+
+    from miles.utils.lifecycle import TrajectoryIdentity, TrajectoryLifecycle, TrajectoryPhaseReport
+
+    received = []
+    previous = TrajectoryLifecycle().sink
+    TrajectoryLifecycle().sink = SimpleNamespace(phase_report=received.append)
+    try:
+        hooks.push_agent_reports(
+            [
+                TrajectoryPhaseReport(TrajectoryIdentity(88), "setup", "start", 1.0, -1),
+                _report(1.0, "eval-desktop"),
+            ],
+            evaluation=True,
+        )
+        assert received == []
+        assert handle.push_sandbox_reports.calls[0][0][0].sandbox_key == "eval-desktop"
+    finally:
+        TrajectoryLifecycle().sink = previous

@@ -299,3 +299,49 @@ def dump_segmented_run(dump_dir: Path, *, explicit_ids: bool = True, compact_rew
             save_debug_train_data_for_rank(args, rollout_id=0, rollout_data=shard, rank=rank * 2 + replica)
     age_files(dump_dir)
     return samples
+
+
+def dump_dp_padded_run(dump_dir: Path, *, raw_reward_override: list[float] | None = None) -> list[Sample]:
+    from miles.ray.rollout.train_data_conversion import split_train_data_by_dp_scheduled_raw
+    from miles.utils.dp_schedule import TrainParallelConfig
+
+    args = _make_args(dump_dir, num_prompts=1, n_samples_per_prompt=3)
+    args.use_dynamic_batch_size = True
+    args.max_tokens_per_gpu = 8192
+    args.balance_data = False
+    args.balance_by_flops = False
+    args.allow_partial_train_step = False
+    args.pad_steps_for_dp_alignment = True
+    samples = [_make_sample(random.Random(i), index=i, group_index=0, max_response_len=16) for i in range(3)]
+    for sample, reward in zip(samples, [1.0, 0.0, 0.5], strict=True):
+        sample.tokens = [1] * 5000
+        sample.reward = reward
+    save_debug_rollout_data(args, samples, rollout_id=0, evaluation=False)
+    data = convert_samples_to_train_data(
+        args,
+        samples,
+        metadata={},
+        custom_convert_samples_to_train_data_func=None,
+        custom_reward_post_process_func=(
+            (lambda args, samples: (raw_reward_override, raw_reward_override))
+            if raw_reward_override is not None
+            else None
+        ),
+    )
+    config = TrainParallelConfig(
+        dp_size=2,
+        cp_size=1,
+        vpp_size=1,
+        microbatch_group_size_per_vp_stage=None,
+        independent_dp=False,
+        supports_precomputed_schedule=True,
+    )
+    shards = split_train_data_by_dp_scheduled_raw(args, data, train_parallel_config=config)
+    assert len(data["tokens"]) == len(data["raw_reward"]) == 4
+    for rank, shard in enumerate(shards):
+        shard = process_rollout_data_shard(args, shard)
+        _apply_dummy_actor_columns(shard, torch.Generator().manual_seed(rank), with_entropy=True)
+        for replica in range(2):
+            save_debug_train_data_for_rank(args, rollout_id=0, rollout_data=shard, rank=rank * 2 + replica)
+    age_files(dump_dir)
+    return samples

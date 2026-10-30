@@ -336,6 +336,10 @@ class Sample:
 
         return sample
 
+    @property
+    def rollout_identity(self) -> int | None:
+        return self.rollout_id if self.rollout_id is not None else self.index
+
     def get_reward_value(self, args) -> float:
         return self.reward if not args.reward_key else self.reward[args.reward_key]
 
