@@ -37,6 +37,9 @@ Args:
         and the TITO session server with images, which assembles the samples.
         ``--max-sandboxes``, ``--recorder-upstream`` and the OSWorld runner
         belong to ``generate``.
+    --vlm-cache-size-mb: the engines' ViT embedding cache, ``SGLANG_VLM_CACHE_SIZE_MB``;
+        above 0 the run refuses an SGLang that does not clear it on weight updates
+        (celve/sglang 55bdbddf84, sgl-project/sglang#47480). 0 runs on an older SGLang.
     --media-refs: with ``--rollout-path session``, hand the trainer each retained
         screenshot as a file under ``--output-dir``/media instead of pixel tensors; the
         trainer rebuilds the pixels with SGLang's token-space processor, which the
@@ -52,9 +55,11 @@ Usage:
     python3 scripts/run_qwen3_vl_4b_harbor_cua.py --harbor-env-type e2b --rollout-path session --media-refs
 """
 
+import importlib.machinery
 import os
 import shlex
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 import typer
@@ -115,6 +120,8 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     rollout_path: Literal["generate", "session"] = "generate"
     session_server_workers: int = 4
     media_refs: bool = False
+    # Keeps the resent screenshot's ViT embedding (~42 MB at 1080p) for 64 desktops.
+    vlm_cache_size_mb: int = 4096
     # megatron by default because LIN-2046 measured FSDP training Qwen3-VL with linear
     # 1-D positions, so its multimodal RoPE never runs (max |logit diff| 32.72 on a
     # three-image sample) while megatron-bridge reconstructs the 3-D positions itself.
@@ -369,13 +376,34 @@ def _worker_env(args: ScriptArgs, harbor_env: dict[str, str]) -> dict:
         "AGENT_MAX_OUTPUT_TOKENS": os.environ.get("AGENT_MAX_OUTPUT_TOKENS", "2048"),
         # Room for 64 desktops' screenshots in flight, so the IPC pool never falls back to CPU transport.
         "SGLANG_MM_FEATURE_CACHE_MB": "4096",
-        # Keeps the resent screenshot's ViT embedding (~42 MB at 1080p) for 64 desktops; needs an SGLang that clears it on weight updates.
-        "SGLANG_VLM_CACHE_SIZE_MB": "4096",
+        "SGLANG_VLM_CACHE_SIZE_MB": str(args.vlm_cache_size_mb),
     }
     if args.rollout_path == "session":
         env["HARBOR_AGENT_MAX_ITERATIONS"] = str(args.max_turns)
     env.update(harbor_env)
     return env
+
+
+def _sglang_mm_schedule() -> Path | None:
+    # PathFinder skips sys.modules, so this finds the SGLang the engines will import from this PYTHONPATH.
+    spec = importlib.machinery.PathFinder.find_spec("sglang")
+    if spec is None or not spec.submodule_search_locations:
+        return None
+    return Path(next(iter(spec.submodule_search_locations))) / "srt/managers/mm_schedule.py"
+
+
+def _require_vlm_cache_clearing(args: ScriptArgs) -> None:
+    if args.vlm_cache_size_mb <= 0:
+        return
+    mm_schedule = _sglang_mm_schedule()
+    if mm_schedule is not None and mm_schedule.exists() and "def clear_mm_embedding_cache(" in mm_schedule.read_text():
+        return
+    raise typer.BadParameter(
+        f"--vlm-cache-size-mb {args.vlm_cache_size_mb} needs an SGLang that clears its ViT embedding cache on "
+        f"weight updates, and {mm_schedule or 'no sglang on this PYTHONPATH'} does not, so screenshots seen again "
+        "after an update would get embeddings from the old vision weights. Put celve/sglang 55bdbddf84 "
+        "(sgl-project/sglang#47480) first on PYTHONPATH, or pass --vlm-cache-size-mb 0."
+    )
 
 
 @command_utils.dataclass_cli
@@ -391,6 +419,7 @@ def main(args: ScriptArgs):
         )
     if args.media_refs and args.rollout_path != "session":
         raise typer.BadParameter("--media-refs is implemented for --rollout-path session only")
+    _require_vlm_cache_clearing(args)
     args.agent_model_name = args.served_model_name
     harbor_env = harbor_env_vars(args)
     if not args.skip_prepare:

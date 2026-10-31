@@ -87,3 +87,42 @@ def test_engines_keep_image_features_on_the_gpu(monkeypatch, tmp_path, rollout_p
     assert "--sglang-mm-feature-transport cuda_ipc" in command
     assert env["SGLANG_MM_FEATURE_CACHE_MB"] == "4096"
     assert env["SGLANG_VLM_CACHE_SIZE_MB"] == "4096"
+
+
+def _sglang_on_path(monkeypatch, root, *, clears_cache: bool) -> None:
+    managers = root / "site/sglang/srt/managers"
+    managers.mkdir(parents=True)
+    (root / "site/sglang/__init__.py").write_text("")
+    body = "def clear_mm_embedding_cache() -> None:\n    pass\n" if clears_cache else "embedding_cache = None\n"
+    (managers / "mm_schedule.py").write_text(body)
+    monkeypatch.syspath_prepend(str(root / "site"))
+
+
+def test_the_cache_refuses_an_sglang_that_never_clears_it(monkeypatch, tmp_path):
+    """Without the SGLang fix, a screenshot seen again after a weight update is embedded by the old vision weights."""
+    _sglang_on_path(monkeypatch, tmp_path, clears_cache=False)
+    freeze_environment(monkeypatch)
+    recording = install_command_recorder(monkeypatch)
+
+    with pytest.raises(typer.BadParameter, match="clears its ViT embedding cache"):
+        call_entrypoint(
+            import_launch_script(LAUNCHER), "main", {"harbor_env_type": "e2b", "skip_prepare": True}, tmp_path
+        )
+    assert recording.commands == []
+
+
+@pytest.mark.parametrize(("clears_cache", "cache_mb"), [(True, 4096), (False, 0)])
+def test_the_run_starts_with_a_clearing_sglang_or_no_cache(monkeypatch, tmp_path, clears_cache, cache_mb):
+    _sglang_on_path(monkeypatch, tmp_path, clears_cache=clears_cache)
+    freeze_environment(monkeypatch)
+    recording = install_command_recorder(monkeypatch)
+
+    call_entrypoint(
+        import_launch_script(LAUNCHER),
+        "main",
+        {"harbor_env_type": "e2b", "skip_prepare": True, "vlm_cache_size_mb": cache_mb},
+        tmp_path,
+    )
+
+    (command,) = [cmd for cmd in recording.commands if "ray job submit" in cmd]
+    assert f'"SGLANG_VLM_CACHE_SIZE_MB": "{cache_mb}"' in command
