@@ -99,7 +99,10 @@ def _sglang_at(site, *, clears_cache: bool) -> str:
 
 
 def _sglang_on_path(monkeypatch, root, *, clears_cache: bool) -> None:
-    monkeypatch.setenv("PYTHONPATH", _sglang_at(root / "site", clears_cache=clears_cache))
+    """As if the launcher was started with this SGLang on PYTHONPATH: in its environment and on its sys.path."""
+    site = _sglang_at(root / "site", clears_cache=clears_cache)
+    monkeypatch.setenv("PYTHONPATH", site)
+    monkeypatch.syspath_prepend(site)
 
 
 def _launcher_without_harbor_preflight(monkeypatch):
