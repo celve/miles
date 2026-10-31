@@ -94,6 +94,31 @@ def image_decoder(hf_checkpoint: str, mm_process_config: dict | None) -> Callabl
     )
 
 
+def compute_image_train_inputs(
+    hf_checkpoint: str,
+    mm_process_config: dict | None,
+    path: str,
+    *,
+    device: torch.device,
+    image_loader: Callable[[str], Any] | None = None,
+    keep_on_device: bool = False,
+) -> dict[str, torch.Tensor]:
+    """One image's processor tensors on its own, for Qwen-VL strategies, which process each image independently."""
+    processor = _token_space_processor(
+        hf_checkpoint, json.dumps(mm_process_config or {}, sort_keys=True), keep_on_device=keep_on_device
+    )
+    params = processor.strategy.mm_token_expansion_params
+    placeholder = [params["vision_start_token_id"], params["image_token_id"], params["vision_end_token_id"]]
+    return _sample_train_inputs(
+        processor,
+        {"images": [path]},
+        torch.tensor(placeholder),
+        device=device,
+        image_loader=image_loader,
+        expansion_start_len=0,
+    )
+
+
 def _sample_train_inputs(
     processor,
     multimodal_inputs: dict[str, list[str]],
@@ -101,6 +126,7 @@ def _sample_train_inputs(
     *,
     device: torch.device,
     image_loader: Callable[[str], Any] | None = None,
+    expansion_start_len: int | None = None,
 ):
     input_ids = tokens.tolist()
     images = multimodal_inputs.get("images")
@@ -112,7 +138,7 @@ def _sample_train_inputs(
             video_data=multimodal_inputs.get("videos"),
             audio_data=multimodal_inputs.get("audios"),
             input_ids=input_ids,
-            mm_token_expansion_start_len=len(input_ids),
+            mm_token_expansion_start_len=len(input_ids) if expansion_start_len is None else expansion_start_len,
             image_device=str(device),
             video_device=str(device),
         )
