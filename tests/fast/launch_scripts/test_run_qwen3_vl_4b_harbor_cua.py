@@ -89,13 +89,17 @@ def test_engines_keep_image_features_on_the_gpu(monkeypatch, tmp_path, rollout_p
     assert env["SGLANG_VLM_CACHE_SIZE_MB"] == "4096"
 
 
-def _sglang_on_path(monkeypatch, root, *, clears_cache: bool) -> None:
-    managers = root / "site/sglang/srt/managers"
+def _sglang_at(site, *, clears_cache: bool) -> str:
+    managers = site / "sglang/srt/managers"
     managers.mkdir(parents=True)
-    (root / "site/sglang/__init__.py").write_text("")
+    (site / "sglang/__init__.py").write_text("")
     body = "def clear_mm_embedding_cache() -> None:\n    pass\n" if clears_cache else "embedding_cache = None\n"
     (managers / "mm_schedule.py").write_text(body)
-    monkeypatch.syspath_prepend(str(root / "site"))
+    return str(site)
+
+
+def _sglang_on_path(monkeypatch, root, *, clears_cache: bool) -> None:
+    monkeypatch.syspath_prepend(_sglang_at(root / "site", clears_cache=clears_cache))
 
 
 def _launcher_without_harbor_preflight(monkeypatch):
@@ -114,6 +118,24 @@ def test_the_cache_refuses_an_sglang_that_never_clears_it(monkeypatch, tmp_path)
 
     with pytest.raises(typer.BadParameter, match="clears its ViT embedding cache"):
         call_entrypoint(launcher, "main", {"harbor_env_type": "e2b", "skip_prepare": True}, tmp_path)
+    assert recording.commands == []
+
+
+@pytest.mark.parametrize("override", ["cache", "pythonpath"])
+def test_extra_env_vars_cannot_route_around_the_refusal(monkeypatch, tmp_path, override):
+    """--extra-env-vars lands after the recipe's worker env, so the workers' cache size and SGLang are what count."""
+    _sglang_on_path(monkeypatch, tmp_path, clears_cache=override == "pythonpath")
+    freeze_environment(monkeypatch)
+    recording = install_command_recorder(monkeypatch)
+    launcher = _launcher_without_harbor_preflight(monkeypatch)
+    if override == "cache":
+        overrides = {"vlm_cache_size_mb": 0, "extra_env_vars": "SGLANG_VLM_CACHE_SIZE_MB=4096"}
+    else:
+        old_sglang = _sglang_at(tmp_path / "old", clears_cache=False)
+        overrides = {"extra_env_vars": f"PYTHONPATH={old_sglang}"}
+
+    with pytest.raises(typer.BadParameter, match="clears its ViT embedding cache"):
+        call_entrypoint(launcher, "main", {"harbor_env_type": "e2b", "skip_prepare": True, **overrides}, tmp_path)
     assert recording.commands == []
 
 

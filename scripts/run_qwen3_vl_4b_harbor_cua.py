@@ -38,8 +38,9 @@ Args:
         ``--max-sandboxes``, ``--recorder-upstream`` and the OSWorld runner
         belong to ``generate``.
     --vlm-cache-size-mb: the engines' ViT embedding cache, ``SGLANG_VLM_CACHE_SIZE_MB``;
-        above 0 the run refuses an SGLang that does not clear it on weight updates
-        (celve/sglang 55bdbddf84, sgl-project/sglang#47480). 0 runs on an older SGLang.
+        when the workers' value, after ``--extra-env-vars``, is above 0, the run refuses
+        unless the workers' SGLang clears it on weight updates (celve/sglang 55bdbddf84,
+        sgl-project/sglang#47480). 0 runs on an older SGLang.
     --media-refs: with ``--rollout-path session``, hand the trainer each retained
         screenshot as a file under ``--output-dir``/media instead of pixel tensors; the
         trainer rebuilds the pixels with SGLang's token-space processor, which the
@@ -58,6 +59,7 @@ Usage:
 import importlib.machinery
 import os
 import shlex
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -66,6 +68,7 @@ import typer
 
 from examples.experimental.harbor.launch_common import agentic_pythonpath_dirs, agentic_train_args, harbor_env_vars
 from miles.utils.external_utils import command_utils
+from miles.utils.external_utils.command_utils.common import _pythonpath_with_sources
 
 HF_REPO = "Qwen/Qwen3-VL-4B-Instruct"
 MODEL_NAME = "Qwen3-VL-4B-Instruct"
@@ -384,24 +387,27 @@ def _worker_env(args: ScriptArgs, harbor_env: dict[str, str]) -> dict:
     return env
 
 
-def _sglang_mm_schedule() -> Path | None:
-    # PathFinder skips sys.modules, so this finds the SGLang the engines will import from this PYTHONPATH.
-    spec = importlib.machinery.PathFinder.find_spec("sglang")
+def _worker_sglang_mm_schedule(worker_pythonpath: str) -> Path | None:
+    # PathFinder skips sys.modules; the worker's PYTHONPATH entries come before this interpreter's site-packages.
+    spec = importlib.machinery.PathFinder.find_spec("sglang", [*worker_pythonpath.split(os.pathsep), *sys.path])
     if spec is None or not spec.submodule_search_locations:
         return None
     return Path(next(iter(spec.submodule_search_locations))) / "srt/managers/mm_schedule.py"
 
 
-def _require_vlm_cache_clearing(args: ScriptArgs) -> None:
-    if args.vlm_cache_size_mb <= 0:
+def _require_vlm_cache_clearing(args: ScriptArgs, harbor_env: dict[str, str]) -> None:
+    """Checks the cache size and PYTHONPATH the Ray workers get, after --extra-env-vars."""
+    worker_env = command_utils.resolve_extra_env_vars(_worker_env(args, harbor_env), args)
+    cache_mb = int(worker_env.get("SGLANG_VLM_CACHE_SIZE_MB", "0"))
+    if cache_mb <= 0:
         return
-    mm_schedule = _sglang_mm_schedule()
+    mm_schedule = _worker_sglang_mm_schedule(_pythonpath_with_sources(args.megatron_path, worker_env.get("PYTHONPATH")))
     if mm_schedule is not None and mm_schedule.exists() and "def clear_mm_embedding_cache(" in mm_schedule.read_text():
         return
     raise typer.BadParameter(
-        f"--vlm-cache-size-mb {args.vlm_cache_size_mb} needs an SGLang that clears its ViT embedding cache on "
-        f"weight updates, and {mm_schedule or 'no sglang on this PYTHONPATH'} does not, so screenshots seen again "
-        "after an update would get embeddings from the old vision weights. Put celve/sglang 55bdbddf84 "
+        f"SGLANG_VLM_CACHE_SIZE_MB={cache_mb} needs an SGLang that clears its ViT embedding cache on weight "
+        f"updates, and the workers' {mm_schedule or 'PYTHONPATH has no sglang, which'} does not, so screenshots seen "
+        "again after an update would get embeddings from the old vision weights. Put celve/sglang 55bdbddf84 "
         "(sgl-project/sglang#47480) first on PYTHONPATH, or pass --vlm-cache-size-mb 0."
     )
 
@@ -419,9 +425,9 @@ def main(args: ScriptArgs):
         )
     if args.media_refs and args.rollout_path != "session":
         raise typer.BadParameter("--media-refs is implemented for --rollout-path session only")
-    _require_vlm_cache_clearing(args)
     args.agent_model_name = args.served_model_name
     harbor_env = harbor_env_vars(args)
+    _require_vlm_cache_clearing(args, harbor_env)
     if not args.skip_prepare:
         prepare(args, harbor_env=harbor_env)
     execute(args, harbor_env=harbor_env)
