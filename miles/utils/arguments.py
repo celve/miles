@@ -1387,6 +1387,13 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Rebuild the next micro-batch's media on a background thread while the current one computes.",
             )
             parser.add_argument(
+                "--multimodal-rebuild-feature-cache-mb",
+                type=int,
+                default=0,
+                help="Keep each image's processed features in pinned host memory up to this many MiB per rank for the round, "
+                "so a screenshot shared by samples or by the log-probs and train passes is processed once.",
+            )
+            parser.add_argument(
                 "--multimodal-rebuild-cache-mb",
                 type=int,
                 default=0,

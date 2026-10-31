@@ -1,4 +1,4 @@
-"""Decoded media for the trainer-side rebuild: parallel decode, prefetch and a byte-bounded cache keyed by path."""
+"""Media caches for the trainer-side rebuild: parallel decode, prefetch, and byte-bounded caches keyed by path."""
 
 import threading
 import weakref
@@ -6,6 +6,8 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
+
+import torch
 
 
 def decoded_nbytes(image: Any) -> int:
@@ -68,3 +70,34 @@ class DecodedImages:
                 del self._entries[path]
                 if not future.exception():
                     held -= decoded_nbytes(future.result())
+
+
+class ImageFeatureCache:
+    """Each image's processor rows and grid in pinned host memory, keyed by path, least recently used evicted first.
+
+    Not thread-safe: one rebuild thread owns it.
+    """
+
+    def __init__(self, cache_bytes: int) -> None:
+        self._cache_bytes = cache_bytes
+        self._entries: OrderedDict[str, tuple[torch.Tensor, torch.Tensor]] = OrderedDict()
+        self._held = 0
+
+    def get(self, paths: list[str]) -> list[tuple[torch.Tensor, torch.Tensor]] | None:
+        """Every path's (rows, grid), or None unless all are cached."""
+        if not all(path in self._entries for path in paths):
+            return None
+        for path in paths:
+            self._entries.move_to_end(path)
+        return [self._entries[path] for path in paths]
+
+    def put(self, path: str, rows: torch.Tensor, grid: torch.Tensor) -> None:
+        if path in self._entries:
+            return
+        host = torch.empty(rows.shape, dtype=rows.dtype, pin_memory=rows.is_cuda)
+        host.copy_(rows, non_blocking=True)
+        self._entries[path] = (host, grid.cpu())
+        self._held += host.nbytes
+        while self._held > self._cache_bytes and self._entries:
+            _, (evicted, _) = self._entries.popitem(last=False)
+            self._held -= evicted.nbytes

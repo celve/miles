@@ -55,6 +55,7 @@ def _lazy_args(**overrides):
         multimodal_rebuild_decode_workers=0,
         multimodal_rebuild_prefetch=False,
         multimodal_rebuild_cache_mb=0,
+        multimodal_rebuild_feature_cache_mb=0,
         multimodal_rebuild_keep_on_device=False,
     )
     return SimpleNamespace(**{**defaults, **overrides})
@@ -227,3 +228,57 @@ def test_dump_details_can_pickle_rebuild_inputs_that_hold_thread_pools(monkeypat
 
     assert restored._multimodal_inputs == [{"images": ["/s/a.png"]}]
     assert restored._token_ids == [[1, 9, 2]]
+
+
+class _PerImageProcessor:
+    """Two rows per image, valued by the image's path, as Qwen-VL processes each image on its own."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def process(self, **kwargs):
+        self.calls.append(kwargs["image_data"])
+        values = [float(sum(map(ord, path))) for path in kwargs["image_data"]]
+        return {
+            "input_ids": torch.tensor([kwargs["input_ids"]]),
+            "pixel_values": torch.tensor([[v, v + 1] for v in values for _ in range(2)]),
+            "image_grid_thw": torch.tensor([[1, 1, 2]] * len(values)),
+        }
+
+
+def test_feature_cache_processes_a_shared_screenshot_once_and_matches_the_processor(monkeypatch):
+    from miles.backends.training_utils.data import rollout as data_rollout
+
+    processor = _PerImageProcessor()
+    monkeypatch.setattr(
+        token_space_media_process,
+        "_token_space_processor",
+        lambda hf_checkpoint, mm_process_config_json, keep_on_device=False: processor,
+    )
+    monkeypatch.setattr(data_rollout.current_platform, "current_device", lambda: torch.device("cpu"))
+    multimodal_inputs = [{"images": ["/s/a.png", "/s/b.png"]}, {"images": ["/s/b.png", "/s/c.png"]}, {"images": ["/s/b.png"]}]
+    token_ids = [[1, 9, 9, 2], [1, 9, 9, 2], [1, 9, 2]]
+
+    expected = data_rollout.LazyMultimodalTrainInputs(_lazy_args(), multimodal_inputs, token_ids).get_many([0, 1, 2])
+    processor.calls.clear()
+    lazy = data_rollout.LazyMultimodalTrainInputs(
+        _lazy_args(multimodal_rebuild_feature_cache_mb=1), multimodal_inputs, token_ids
+    )
+    first_pass = lazy.get_many([0, 1, 2])
+    second_pass = lazy.get_many([2, 1, 0])
+
+    assert processor.calls == [["/s/a.png", "/s/b.png"], ["/s/b.png", "/s/c.png"]]
+    for got, want in zip(first_pass + second_pass[::-1], expected + expected, strict=True):
+        assert got.keys() == want.keys()
+        assert all(torch.equal(got[key], want[key]) for key in got)
+
+
+def test_feature_cache_evicts_past_its_byte_cap():
+    from miles.backends.training_utils.data.decoded_media import ImageFeatureCache
+
+    cache = ImageFeatureCache(cache_bytes=64)
+    for path in ("a", "b", "c"):
+        cache.put(path, torch.zeros(4, 2), torch.tensor([1, 2, 2]))
+
+    assert cache.get(["a"]) is None
+    assert cache.get(["b", "c"]) is not None

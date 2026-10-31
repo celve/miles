@@ -10,7 +10,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 
 from miles.backends.training_utils.data.context_parallel import slice_log_prob_with_cp, slice_with_cp
-from miles.backends.training_utils.data.decoded_media import DecodedImages
+from miles.backends.training_utils.data.decoded_media import DecodedImages, ImageFeatureCache
 from miles.backends.training_utils.data.multimodal import expand_multimodal_rollout_data_in_place
 from miles.backends.training_utils.data.token_space_media_process import compute_multimodal_train_inputs, image_decoder
 from miles.backends.training_utils.parallel import get_parallel_state
@@ -67,6 +67,9 @@ class LazyMultimodalTrainInputs(Sequence):
                 # A new thread starts on cuda:0; SGLang's GPU JPEG decode must land on this rank's device instead.
                 thread_initializer=functools.partial(_use_device, device),
             )
+        self._features = None
+        if args.multimodal_rebuild_feature_cache_mb > 0:
+            self._features = ImageFeatureCache(args.multimodal_rebuild_feature_cache_mb * 2**20)
         self._rebuilder = None
         self._stream = None
         self._pending: tuple[tuple[int, ...], Future] | None = None
@@ -86,7 +89,14 @@ class LazyMultimodalTrainInputs(Sequence):
 
     def __getstate__(self) -> dict:
         # --dump-details pickles the round's data; the thread pools stay behind.
-        return {**self.__dict__, "_images": None, "_rebuilder": None, "_stream": None, "_pending": None}
+        return {
+            **self.__dict__,
+            "_images": None,
+            "_features": None,
+            "_rebuilder": None,
+            "_stream": None,
+            "_pending": None,
+        }
 
     def __len__(self) -> int:
         return len(self._multimodal_inputs)
@@ -97,6 +107,13 @@ class LazyMultimodalTrainInputs(Sequence):
         return self.get_many([index])[0]
 
     def _rebuild(self, index):
+        paths = self._cacheable_image_paths(index)
+        if paths and (cached := self._features.get(paths)) is not None:
+            device = current_platform.current_device()
+            return {
+                "pixel_values": torch.cat([rows.to(device, non_blocking=True) for rows, _ in cached]),
+                "image_grid_thw": torch.stack([grid for _, grid in cached]).to(device),
+            }
         (mm,) = compute_multimodal_train_inputs(
             self._args.hf_checkpoint,
             # Pre-refactor args: the base engine flag; per-group overrides are not read on this branch.
@@ -108,7 +125,19 @@ class LazyMultimodalTrainInputs(Sequence):
             keep_on_device=self._args.multimodal_rebuild_keep_on_device,
         )
         # SGLang's processor returns fp32 pixels; held for every sample, they double the eager path's bf16 footprint.
-        return _cast_floating(mm, self._dtype)
+        mm = _cast_floating(mm, self._dtype)
+        if paths and mm is not None and set(mm) == {"pixel_values", "image_grid_thw"}:
+            # Qwen-VL processes each image on its own, so a sample's rows split per image by its grid.
+            rows = mm["image_grid_thw"].prod(dim=1).tolist()
+            for path, image_rows, grid in zip(paths, mm["pixel_values"].split(rows), mm["image_grid_thw"], strict=True):
+                self._features.put(path, image_rows, grid)
+        return mm
+
+    def _cacheable_image_paths(self, index) -> list[str]:
+        sample = self._multimodal_inputs[index] or {}
+        if self._features is None or sample.get("videos") or sample.get("audios"):
+            return []
+        return list(sample.get("images") or [])
 
     def _image_paths(self, indices) -> list[str]:
         return [path for i in indices for path in (self._multimodal_inputs[i] or {}).get("images", [])]
