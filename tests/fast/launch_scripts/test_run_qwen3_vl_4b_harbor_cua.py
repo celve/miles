@@ -87,3 +87,74 @@ def test_engines_keep_image_features_on_the_gpu(monkeypatch, tmp_path, rollout_p
     assert "--sglang-mm-feature-transport cuda_ipc" in command
     assert env["SGLANG_MM_FEATURE_CACHE_MB"] == "4096"
     assert env["SGLANG_VLM_CACHE_SIZE_MB"] == "4096"
+
+
+def _sglang_at(site, *, clears_cache: bool) -> str:
+    managers = site / "sglang/srt/managers"
+    managers.mkdir(parents=True)
+    (site / "sglang/__init__.py").write_text("")
+    body = "def clear_mm_embedding_cache() -> None:\n    pass\n" if clears_cache else "embedding_cache = None\n"
+    (managers / "mm_schedule.py").write_text(body)
+    return str(site)
+
+
+def _sglang_on_path(monkeypatch, root, *, clears_cache: bool) -> None:
+    """As if the launcher was started with this SGLang on PYTHONPATH: in its environment and on its sys.path."""
+    site = _sglang_at(root / "site", clears_cache=clears_cache)
+    monkeypatch.setenv("PYTHONPATH", site)
+    monkeypatch.syspath_prepend(site)
+
+
+def _launcher_without_harbor_preflight(monkeypatch):
+    launcher = import_launch_script(LAUNCHER)
+    # main's harbor preflight needs the harbor package, which the CPU test environment lacks.
+    monkeypatch.setattr(launcher, "harbor_env_vars", lambda args: {})
+    return launcher
+
+
+def test_the_cache_refuses_an_sglang_that_never_clears_it(monkeypatch, tmp_path):
+    """Without the SGLang fix, a screenshot seen again after a weight update is embedded by the old vision weights."""
+    freeze_environment(monkeypatch)
+    _sglang_on_path(monkeypatch, tmp_path, clears_cache=False)
+    recording = install_command_recorder(monkeypatch)
+    launcher = _launcher_without_harbor_preflight(monkeypatch)
+
+    with pytest.raises(typer.BadParameter, match="clears its ViT embedding cache"):
+        call_entrypoint(launcher, "main", {"harbor_env_type": "e2b", "skip_prepare": True}, tmp_path)
+    assert recording.commands == []
+
+
+@pytest.mark.parametrize("override", ["cache", "pythonpath"])
+def test_extra_env_vars_cannot_route_around_the_refusal(monkeypatch, tmp_path, override):
+    """--extra-env-vars lands after the recipe's worker env, so the workers' cache size and SGLang are what count."""
+    freeze_environment(monkeypatch)
+    _sglang_on_path(monkeypatch, tmp_path, clears_cache=override == "pythonpath")
+    recording = install_command_recorder(monkeypatch)
+    launcher = _launcher_without_harbor_preflight(monkeypatch)
+    if override == "cache":
+        overrides = {"vlm_cache_size_mb": 0, "extra_env_vars": "SGLANG_VLM_CACHE_SIZE_MB=4096"}
+    else:
+        old_sglang = _sglang_at(tmp_path / "old", clears_cache=False)
+        overrides = {"extra_env_vars": f"PYTHONPATH={old_sglang}"}
+
+    with pytest.raises(typer.BadParameter, match="clears its ViT embedding cache"):
+        call_entrypoint(launcher, "main", {"harbor_env_type": "e2b", "skip_prepare": True, **overrides}, tmp_path)
+    assert recording.commands == []
+
+
+@pytest.mark.parametrize(("clears_cache", "cache_mb"), [(True, 4096), (False, 0)])
+def test_the_run_starts_with_a_clearing_sglang_or_no_cache(monkeypatch, tmp_path, clears_cache, cache_mb):
+    freeze_environment(monkeypatch)
+    _sglang_on_path(monkeypatch, tmp_path, clears_cache=clears_cache)
+    recording = install_command_recorder(monkeypatch)
+    launcher = _launcher_without_harbor_preflight(monkeypatch)
+
+    call_entrypoint(
+        launcher,
+        "main",
+        {"harbor_env_type": "e2b", "skip_prepare": True, "vlm_cache_size_mb": cache_mb},
+        tmp_path,
+    )
+
+    (command,) = [cmd for cmd in recording.commands if "ray job submit" in cmd]
+    assert f'"SGLANG_VLM_CACHE_SIZE_MB": "{cache_mb}"' in command
