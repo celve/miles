@@ -1,4 +1,3 @@
-import contextlib
 import functools
 import logging
 import weakref
@@ -69,6 +68,7 @@ class LazyMultimodalTrainInputs(Sequence):
                 thread_initializer=functools.partial(_use_device, device),
             )
         self._rebuilder = None
+        self._stream = None
         self._pending: tuple[tuple[int, ...], Future] | None = None
         if args.multimodal_rebuild_prefetch:
             # One thread runs every rebuild, so SGLang's processor is never entered from two threads at once.
@@ -78,13 +78,15 @@ class LazyMultimodalTrainInputs(Sequence):
                 initializer=functools.partial(_use_device, device),
             )
             weakref.finalize(self, self._rebuilder.shutdown, wait=False, cancel_futures=True)
+            # The processor's blocking copies synchronize their stream; on its own stream they never wait for the forward.
+            self._stream = torch.cuda.Stream(device) if device.type == "cuda" else None
 
     # Token-space ids are expanded by SGLang already, so no expansion pass has to read these.
     tokens_already_expanded = True
 
     def __getstate__(self) -> dict:
         # --dump-details pickles the round's data; the thread pools stay behind.
-        return {**self.__dict__, "_images": None, "_rebuilder": None, "_pending": None}
+        return {**self.__dict__, "_images": None, "_rebuilder": None, "_stream": None, "_pending": None}
 
     def __len__(self) -> int:
         return len(self._multimodal_inputs)
@@ -111,19 +113,23 @@ class LazyMultimodalTrainInputs(Sequence):
     def _image_paths(self, indices) -> list[str]:
         return [path for i in indices for path in (self._multimodal_inputs[i] or {}).get("images", [])]
 
-    def _rebuild_many(self, indices: tuple[int, ...], stream=None) -> list:
-        # The caller's stream orders these kernels and allocations before the forward that reads them.
-        with torch.cuda.stream(stream) if stream is not None else contextlib.nullcontext():
-            if self._images is None:
-                return [self._rebuild(i) for i in indices]
-            self._images.request(self._image_paths(indices))
-            out = [self._rebuild(i) for i in indices]
-            self._images.trim(keep=set(self._image_paths(indices)))
-            return out
+    def _rebuild_many(self, indices: tuple[int, ...]) -> list:
+        if self._images is None:
+            return [self._rebuild(i) for i in indices]
+        self._images.request(self._image_paths(indices))
+        out = [self._rebuild(i) for i in indices]
+        self._images.trim(keep=set(self._image_paths(indices)))
+        return out
+
+    def _rebuild_on_stream(self, indices: tuple[int, ...]):
+        if self._stream is None:
+            return self._rebuild_many(indices), None
+        with torch.cuda.stream(self._stream):
+            out = self._rebuild_many(indices)
+            return out, self._stream.record_event()
 
     def _submit(self, indices: tuple[int, ...]) -> Future:
-        stream = torch.cuda.current_stream() if current_platform.current_device().type == "cuda" else None
-        return self._rebuilder.submit(self._rebuild_many, indices, stream)
+        return self._rebuilder.submit(self._rebuild_on_stream, indices)
 
     def get_many(self, indices) -> list:
         with timer("multimodal_rebuild"):
@@ -132,7 +138,16 @@ class LazyMultimodalTrainInputs(Sequence):
                 return self._rebuild_many(indices)
             pending, self._pending = self._pending, None
             future = pending[1] if pending is not None and pending[0] == indices else self._submit(indices)
-            return future.result()
+            out, ready = future.result()
+            if ready is not None:
+                consumer = torch.cuda.current_stream()
+                consumer.wait_event(ready)
+                # The allocator must not hand these blocks back to the rebuild stream while the forward still reads them.
+                for mm in out:
+                    for value in (mm or {}).values():
+                        if isinstance(value, torch.Tensor) and value.is_cuda:
+                            value.record_stream(consumer)
+            return out
 
     def prefetch(self, indices) -> None:
         if self._rebuilder is not None:
