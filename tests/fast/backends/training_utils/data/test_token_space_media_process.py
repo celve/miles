@@ -45,9 +45,22 @@ def test_trainer_rebuilds_tensors_without_expanding_the_rollout_tokens(monkeypat
     assert torch.equal(train_inputs[0]["image_grid_thw"], torch.tensor([[1, 2, 2], [1, 2, 2]]))
 
 
-def test_per_micro_batch_rebuild_matches_the_round_rebuild_and_skips_expansion(monkeypatch):
+def _lazy_args(**overrides):
     from types import SimpleNamespace
 
+    return SimpleNamespace(
+        hf_checkpoint="ckpt",
+        fp16=False,
+        sglang_mm_process_config=None,
+        multimodal_rebuild_decode_workers=0,
+        multimodal_rebuild_prefetch=False,
+        multimodal_rebuild_cache_mb=0,
+        multimodal_rebuild_keep_on_device=False,
+        **overrides,
+    )
+
+
+def test_per_micro_batch_rebuild_matches_the_round_rebuild_and_skips_expansion(monkeypatch):
     from miles.backends.training_utils.data import rollout as data_rollout
     from miles.backends.training_utils.data.multimodal import expand_multimodal_rollout_data_in_place
 
@@ -58,23 +71,16 @@ def test_per_micro_batch_rebuild_matches_the_round_rebuild_and_skips_expansion(m
         lambda hf_checkpoint, mm_process_config_json, keep_on_device=False: processor,
     )
     monkeypatch.setattr(data_rollout.current_platform, "current_device", lambda: torch.device("cpu"))
-    args = SimpleNamespace(
-        hf_checkpoint="ckpt",
-        fp16=False,
-        sglang_mm_process_config=None,
-        multimodal_rebuild_decode_workers=0,
-        multimodal_rebuild_prefetch=False,
-        multimodal_rebuild_cache_mb=0,
-        multimodal_rebuild_keep_on_device=False,
-    )
+    args = _lazy_args()
     multimodal_inputs = [{"images": ["/shared/a.png"]}, None, {"images": ["/shared/b.png", "/shared/c.png"]}]
-    tokens = [torch.tensor([1, 9, 2]), torch.tensor([1, 2]), torch.tensor([1, 9, 9, 2])]
+    token_ids = [[1, 9, 2], [1, 2], [1, 9, 9, 2]]
+    tokens = [torch.tensor(ids) for ids in token_ids]
 
     from miles.utils.timer import Timer
 
     phases = []
     monkeypatch.setattr(Timer(), "event_sinks", [lambda name, t0, t1: phases.append((name, t0, t1))])
-    lazy = data_rollout.LazyMultimodalTrainInputs(args, multimodal_inputs, tokens)
+    lazy = data_rollout.LazyMultimodalTrainInputs(args, multimodal_inputs, token_ids)
     rollout_data = {"tokens": tokens, "multimodal_train_inputs": lazy}
     expand_multimodal_rollout_data_in_place(rollout_data)
     assert processor.calls == []
@@ -85,6 +91,7 @@ def test_per_micro_batch_rebuild_matches_the_round_rebuild_and_skips_expansion(m
     assert rebuilt["pixel_values"].dtype == torch.bfloat16
     assert torch.equal(rebuilt["image_grid_thw"], torch.tensor([[1, 2, 2], [1, 2, 2]]))
     assert [call["image_data"] for call in processor.calls] == [["/shared/b.png", "/shared/c.png"]]
+    assert processor.calls[0]["input_ids"] == [1, 9, 9, 2]
     assert len(phases) == 1
     assert all(name == "multimodal_rebuild" and t1 >= t0 for name, t0, t1 in phases)
 
@@ -110,7 +117,7 @@ def test_decoded_images_decode_once_and_trim_to_the_byte_cap():
     assert sorted(decoded) == ["a", "a", "b", "c"]
 
 
-def test_parallel_decode_and_prefetch_feed_the_processor_decoded_images(monkeypatch):
+def test_parallel_decode_feeds_the_processor_decoded_images(monkeypatch):
     from types import SimpleNamespace
 
     from miles.backends.training_utils.data import rollout as data_rollout
@@ -127,22 +134,12 @@ def test_parallel_decode_and_prefetch_feed_the_processor_decoded_images(monkeypa
         lambda hf_checkpoint, mm_config: lambda path: SimpleNamespace(nbytes=10, path=path),
     )
     monkeypatch.setattr(data_rollout.current_platform, "current_device", lambda: torch.device("cpu"))
-    args = SimpleNamespace(
-        hf_checkpoint="ckpt",
-        fp16=False,
-        sglang_mm_process_config=None,
-        multimodal_rebuild_decode_workers=2,
-        multimodal_rebuild_prefetch=True,
-        multimodal_rebuild_cache_mb=1,
-        multimodal_rebuild_keep_on_device=False,
-    )
+    args = _lazy_args(multimodal_rebuild_decode_workers=2, multimodal_rebuild_prefetch=True, multimodal_rebuild_cache_mb=1)
     multimodal_inputs = [{"images": ["/s/a.png", "/s/b.png"]}, {"images": ["/s/b.png", "/s/c.png"]}]
-    tokens = [torch.tensor([1, 9, 9, 2]), torch.tensor([1, 9, 9, 2])]
-    lazy = data_rollout.LazyMultimodalTrainInputs(args, multimodal_inputs, tokens)
+    lazy = data_rollout.LazyMultimodalTrainInputs(args, multimodal_inputs, [[1, 9, 9, 2], [1, 9, 9, 2]])
     iterator = data_rollout.DataIterator({"multimodal_train_inputs": lazy}, micro_batch_indices=[[0], [1]])
 
     iterator.get_next(["multimodal_train_inputs"])
-    assert "/s/c.png" in lazy._images._entries
     iterator.get_next(["multimodal_train_inputs"])
 
     assert [[image.path for image in call["image_data"]] for call in processor.calls] == [
@@ -150,6 +147,55 @@ def test_parallel_decode_and_prefetch_feed_the_processor_decoded_images(monkeypa
         ["/s/b.png", "/s/c.png"],
     ]
     assert lazy._images.decodes == 3
+
+
+def test_prefetch_rebuilds_the_next_micro_batch_on_one_thread_before_it_is_asked_for(monkeypatch):
+    import threading
+
+    from miles.backends.training_utils.data import rollout as data_rollout
+
+    processor = _RecordingProcessor()
+    original_process = processor.process
+    threads = []
+
+    async def process(**kwargs):
+        threads.append(threading.get_ident())
+        return await original_process(**kwargs)
+
+    processor.process = process
+    monkeypatch.setattr(
+        token_space_media_process,
+        "_token_space_processor",
+        lambda hf_checkpoint, mm_process_config_json, keep_on_device=False: processor,
+    )
+    monkeypatch.setattr(data_rollout.current_platform, "current_device", lambda: torch.device("cpu"))
+    multimodal_inputs = [{"images": ["/s/a.png"]}, {"images": ["/s/b.png", "/s/c.png"]}, {"images": ["/s/c.png"]}]
+    token_ids = [[1, 9, 2], [1, 9, 9, 2], [1, 9, 2]]
+    schedule = [[0], [1], [2]]
+
+    inline = data_rollout.LazyMultimodalTrainInputs(_lazy_args(), multimodal_inputs, token_ids)
+    expected = [inline.get_many(indices) for indices in schedule]
+    processor.calls.clear()
+    threads.clear()
+
+    lazy = data_rollout.LazyMultimodalTrainInputs(
+        _lazy_args(multimodal_rebuild_prefetch=True), multimodal_inputs, token_ids
+    )
+    iterator = data_rollout.DataIterator({"multimodal_train_inputs": lazy}, micro_batch_indices=schedule)
+    first = iterator.get_next(["multimodal_train_inputs"])["multimodal_train_inputs"]
+    lazy._pending[1].result()
+    assert [call["input_ids"] for call in processor.calls] == [[1, 9, 2], [1, 9, 9, 2]]
+
+    batches = [first] + [iterator.get_next(["multimodal_train_inputs"])["multimodal_train_inputs"] for _ in range(2)]
+    # A request that is not the prefetched micro-batch is rebuilt on the same thread.
+    batches.append(lazy.get_many([0]))
+
+    assert len(processor.calls) == 4
+    assert len(set(threads)) == 1 and threads[0] != threading.get_ident()
+    for got, want in zip(batches, expected + [expected[0]], strict=True):
+        for got_mm, want_mm in zip(got, want, strict=True):
+            assert got_mm.keys() == want_mm.keys()
+            assert all(torch.equal(got_mm[key], want_mm[key]) for key in got_mm)
 
 
 def test_decode_threads_run_the_initializer_before_decoding():
@@ -165,3 +211,19 @@ def test_decode_threads_run_the_initializer_before_decoding():
         thread_initializer=lambda: initialized.add(threading.get_ident()),
     )
     assert images.get("a")[0] and images.get("b")[0]
+
+
+def test_dump_details_can_pickle_rebuild_inputs_that_hold_thread_pools(monkeypatch):
+    import pickle
+
+    from miles.backends.training_utils.data import rollout as data_rollout
+
+    monkeypatch.setattr(data_rollout, "image_decoder", lambda hf_checkpoint, mm_config: lambda path: path)
+    monkeypatch.setattr(data_rollout.current_platform, "current_device", lambda: torch.device("cpu"))
+    args = _lazy_args(multimodal_rebuild_decode_workers=2, multimodal_rebuild_prefetch=True)
+    lazy = data_rollout.LazyMultimodalTrainInputs(args, [{"images": ["/s/a.png"]}], [[1, 9, 2]])
+
+    restored = pickle.loads(pickle.dumps(lazy))
+
+    assert restored._multimodal_inputs == [{"images": ["/s/a.png"]}]
+    assert restored._token_ids == [[1, 9, 2]]

@@ -1384,7 +1384,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "--multimodal-rebuild-prefetch",
                 action="store_true",
                 default=False,
-                help="Decode the next micro-batch's images while the current one computes (needs --multimodal-rebuild-decode-workers).",
+                help="Rebuild the next micro-batch's media on a background thread while the current one computes.",
             )
             parser.add_argument(
                 "--multimodal-rebuild-cache-mb",
@@ -4295,12 +4295,8 @@ def miles_validate_args(args):
 
     if args.multimodal_rebuild_per_micro_batch and not args.multimodal_token_space_processing:
         raise ValueError("--multimodal-rebuild-per-micro-batch needs --multimodal-token-space-processing")
-    if (
-        args.multimodal_rebuild_prefetch or args.multimodal_rebuild_cache_mb
-    ) and not args.multimodal_rebuild_decode_workers:
-        raise ValueError(
-            "--multimodal-rebuild-prefetch and --multimodal-rebuild-cache-mb need --multimodal-rebuild-decode-workers"
-        )
+    if args.multimodal_rebuild_cache_mb and not args.multimodal_rebuild_decode_workers:
+        raise ValueError("--multimodal-rebuild-cache-mb needs --multimodal-rebuild-decode-workers")
     if args.multimodal_token_space_processing:
         # SGLang registers --sglang-enable-token-space-processor only in builds with the token-space processor.
         if not hasattr(

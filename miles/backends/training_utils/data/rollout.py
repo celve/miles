@@ -1,7 +1,10 @@
+import contextlib
 import functools
 import logging
+import weakref
 from argparse import Namespace
 from collections.abc import Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 
 import torch
 import torch.distributed as dist
@@ -49,12 +52,13 @@ def _cast_floating(mm: dict[str, torch.Tensor] | None, dtype: torch.dtype) -> di
 class LazyMultimodalTrainInputs(Sequence):
     """Rebuilds a sample's processor tensors from its media refs each time a micro-batch indexes it, holding none."""
 
-    def __init__(self, args: Namespace, multimodal_inputs: list, tokens: list[torch.Tensor]) -> None:
+    def __init__(self, args: Namespace, multimodal_inputs: list, token_ids: list) -> None:
         self._args = args
         self._multimodal_inputs = multimodal_inputs
-        self._tokens = tokens
+        # Host-side ids: reading the device tokens would synchronize the GPU before every rebuild.
+        self._token_ids = token_ids
         self._dtype = torch.float16 if args.fp16 else torch.bfloat16
-        self._prefetch = args.multimodal_rebuild_prefetch
+        device = current_platform.current_device()
         self._images = None
         if args.multimodal_rebuild_decode_workers > 0:
             self._images = DecodedImages(
@@ -62,11 +66,25 @@ class LazyMultimodalTrainInputs(Sequence):
                 workers=args.multimodal_rebuild_decode_workers,
                 cache_bytes=args.multimodal_rebuild_cache_mb * 2**20,
                 # A new thread starts on cuda:0; SGLang's GPU JPEG decode must land on this rank's device instead.
-                thread_initializer=functools.partial(_use_device, current_platform.current_device()),
+                thread_initializer=functools.partial(_use_device, device),
             )
+        self._rebuilder = None
+        self._pending: tuple[tuple[int, ...], Future] | None = None
+        if args.multimodal_rebuild_prefetch:
+            # One thread runs every rebuild, so SGLang's processor is never entered from two threads at once.
+            self._rebuilder = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="miles-media-rebuild",
+                initializer=functools.partial(_use_device, device),
+            )
+            weakref.finalize(self, self._rebuilder.shutdown, wait=False, cancel_futures=True)
 
     # Token-space ids are expanded by SGLang already, so no expansion pass has to read these.
     tokens_already_expanded = True
+
+    def __getstate__(self) -> dict:
+        # --dump-details pickles the round's data; the thread pools stay behind.
+        return {**self.__dict__, "_images": None, "_rebuilder": None, "_pending": None}
 
     def __len__(self) -> int:
         return len(self._multimodal_inputs)
@@ -74,8 +92,7 @@ class LazyMultimodalTrainInputs(Sequence):
     def __getitem__(self, index):
         if isinstance(index, slice):
             return self.get_many(range(*index.indices(len(self))))
-        with timer("multimodal_rebuild"):
-            return self._rebuild(index)
+        return self.get_many([index])[0]
 
     def _rebuild(self, index):
         (mm,) = compute_multimodal_train_inputs(
@@ -83,7 +100,7 @@ class LazyMultimodalTrainInputs(Sequence):
             # Pre-refactor args: the base engine flag; per-group overrides are not read on this branch.
             getattr(self._args, "sglang_mm_process_config", None),
             [self._multimodal_inputs[index]],
-            [self._tokens[index]],
+            [torch.as_tensor(self._token_ids[index])],
             device=current_platform.current_device(),
             image_loader=self._images.get if self._images is not None else None,
             keep_on_device=self._args.multimodal_rebuild_keep_on_device,
@@ -94,9 +111,9 @@ class LazyMultimodalTrainInputs(Sequence):
     def _image_paths(self, indices) -> list[str]:
         return [path for i in indices for path in (self._multimodal_inputs[i] or {}).get("images", [])]
 
-    def get_many(self, indices) -> list:
-        with timer("multimodal_rebuild"):
-            indices = list(indices)
+    def _rebuild_many(self, indices: tuple[int, ...], stream=None) -> list:
+        # The caller's stream orders these kernels and allocations before the forward that reads them.
+        with torch.cuda.stream(stream) if stream is not None else contextlib.nullcontext():
             if self._images is None:
                 return [self._rebuild(i) for i in indices]
             self._images.request(self._image_paths(indices))
@@ -104,9 +121,23 @@ class LazyMultimodalTrainInputs(Sequence):
             self._images.trim(keep=set(self._image_paths(indices)))
             return out
 
+    def _submit(self, indices: tuple[int, ...]) -> Future:
+        stream = torch.cuda.current_stream() if current_platform.current_device().type == "cuda" else None
+        return self._rebuilder.submit(self._rebuild_many, indices, stream)
+
+    def get_many(self, indices) -> list:
+        with timer("multimodal_rebuild"):
+            indices = tuple(indices)
+            if self._rebuilder is None:
+                return self._rebuild_many(indices)
+            pending, self._pending = self._pending, None
+            future = pending[1] if pending is not None and pending[0] == indices else self._submit(indices)
+            return future.result()
+
     def prefetch(self, indices) -> None:
-        if self._prefetch and self._images is not None:
-            self._images.request(self._image_paths(indices))
+        if self._rebuilder is not None:
+            indices = tuple(indices)
+            self._pending = (indices, self._submit(indices))
 
 
 def get_rollout_data(
@@ -126,6 +157,7 @@ def get_rollout_data(
         train_parallel_config=train_parallel_config,
         witness_info=witness_info,
     )
+    token_ids = rollout_data["tokens"]
     # move tokens to the device in advance
     rollout_data["tokens"] = [
         torch.tensor(t, dtype=torch.long, device=current_platform.current_device()) for t in rollout_data["tokens"]
@@ -145,7 +177,7 @@ def get_rollout_data(
         ]
 
     if "multimodal_inputs" in rollout_data:
-        lazy = LazyMultimodalTrainInputs(args, rollout_data.pop("multimodal_inputs"), rollout_data["tokens"])
+        lazy = LazyMultimodalTrainInputs(args, rollout_data.pop("multimodal_inputs"), token_ids)
         if args.multimodal_rebuild_per_micro_batch:
             rollout_data["multimodal_train_inputs"] = lazy
         else:
