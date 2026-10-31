@@ -116,9 +116,12 @@ def test_the_run_starts_with_a_clearing_sglang_or_no_cache(monkeypatch, tmp_path
     _sglang_on_path(monkeypatch, tmp_path, clears_cache=clears_cache)
     freeze_environment(monkeypatch)
     recording = install_command_recorder(monkeypatch)
+    launcher = import_launch_script(LAUNCHER)
+    # main's harbor preflight needs the harbor package, which the CPU test environment lacks.
+    monkeypatch.setattr(launcher, "harbor_env_vars", lambda args: {})
 
     call_entrypoint(
-        import_launch_script(LAUNCHER),
+        launcher,
         "main",
         {"harbor_env_type": "e2b", "skip_prepare": True, "vlm_cache_size_mb": cache_mb},
         tmp_path,
