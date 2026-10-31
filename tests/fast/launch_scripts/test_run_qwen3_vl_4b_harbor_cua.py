@@ -98,16 +98,22 @@ def _sglang_on_path(monkeypatch, root, *, clears_cache: bool) -> None:
     monkeypatch.syspath_prepend(str(root / "site"))
 
 
+def _launcher_without_harbor_preflight(monkeypatch):
+    launcher = import_launch_script(LAUNCHER)
+    # main's harbor preflight needs the harbor package, which the CPU test environment lacks.
+    monkeypatch.setattr(launcher, "harbor_env_vars", lambda args: {})
+    return launcher
+
+
 def test_the_cache_refuses_an_sglang_that_never_clears_it(monkeypatch, tmp_path):
     """Without the SGLang fix, a screenshot seen again after a weight update is embedded by the old vision weights."""
     _sglang_on_path(monkeypatch, tmp_path, clears_cache=False)
     freeze_environment(monkeypatch)
     recording = install_command_recorder(monkeypatch)
+    launcher = _launcher_without_harbor_preflight(monkeypatch)
 
     with pytest.raises(typer.BadParameter, match="clears its ViT embedding cache"):
-        call_entrypoint(
-            import_launch_script(LAUNCHER), "main", {"harbor_env_type": "e2b", "skip_prepare": True}, tmp_path
-        )
+        call_entrypoint(launcher, "main", {"harbor_env_type": "e2b", "skip_prepare": True}, tmp_path)
     assert recording.commands == []
 
 
@@ -116,9 +122,7 @@ def test_the_run_starts_with_a_clearing_sglang_or_no_cache(monkeypatch, tmp_path
     _sglang_on_path(monkeypatch, tmp_path, clears_cache=clears_cache)
     freeze_environment(monkeypatch)
     recording = install_command_recorder(monkeypatch)
-    launcher = import_launch_script(LAUNCHER)
-    # main's harbor preflight needs the harbor package, which the CPU test environment lacks.
-    monkeypatch.setattr(launcher, "harbor_env_vars", lambda args: {})
+    launcher = _launcher_without_harbor_preflight(monkeypatch)
 
     call_entrypoint(
         launcher,
