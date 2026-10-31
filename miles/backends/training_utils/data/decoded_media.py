@@ -83,13 +83,11 @@ class ImageFeatureCache:
         self._entries: OrderedDict[str, tuple[torch.Tensor, torch.Tensor]] = OrderedDict()
         self._held = 0
 
-    def get(self, paths: list[str]) -> list[tuple[torch.Tensor, torch.Tensor]] | None:
-        """Every path's (rows, grid), or None unless all are cached."""
-        if not all(path in self._entries for path in paths):
+    def get(self, path: str) -> tuple[torch.Tensor, torch.Tensor] | None:
+        if path not in self._entries:
             return None
-        for path in paths:
-            self._entries.move_to_end(path)
-        return [self._entries[path] for path in paths]
+        self._entries.move_to_end(path)
+        return self._entries[path]
 
     def put(self, path: str, rows: torch.Tensor, grid: torch.Tensor) -> None:
         if path in self._entries:

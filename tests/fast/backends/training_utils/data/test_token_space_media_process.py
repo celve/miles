@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import torch
 
 from miles.backends.training_utils.data import token_space_media_process
@@ -233,6 +235,10 @@ def test_dump_details_can_pickle_rebuild_inputs_that_hold_thread_pools(monkeypat
 class _PerImageProcessor:
     """Two rows per image, valued by the image's path, as Qwen-VL processes each image on its own."""
 
+    strategy = SimpleNamespace(
+        mm_token_expansion_params={"vision_start_token_id": 7, "image_token_id": 9, "vision_end_token_id": 8}
+    )
+
     def __init__(self):
         self.calls = []
 
@@ -267,7 +273,7 @@ def test_feature_cache_processes_a_shared_screenshot_once_and_matches_the_proces
     first_pass = lazy.get_many([0, 1, 2])
     second_pass = lazy.get_many([2, 1, 0])
 
-    assert processor.calls == [["/s/a.png", "/s/b.png"], ["/s/b.png", "/s/c.png"]]
+    assert processor.calls == [["/s/a.png"], ["/s/b.png"], ["/s/c.png"]]
     for got, want in zip(first_pass + second_pass[::-1], expected + expected, strict=True):
         assert got.keys() == want.keys()
         assert all(torch.equal(got[key], want[key]) for key in got)
@@ -280,5 +286,5 @@ def test_feature_cache_evicts_past_its_byte_cap():
     for path in ("a", "b", "c"):
         cache.put(path, torch.zeros(4, 2), torch.tensor([1, 2, 2]))
 
-    assert cache.get(["a"]) is None
-    assert cache.get(["b", "c"]) is not None
+    assert cache.get("a") is None
+    assert cache.get("b") is not None and cache.get("c") is not None

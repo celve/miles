@@ -12,7 +12,11 @@ import torch.nn.functional as F
 from miles.backends.training_utils.data.context_parallel import slice_log_prob_with_cp, slice_with_cp
 from miles.backends.training_utils.data.decoded_media import DecodedImages, ImageFeatureCache
 from miles.backends.training_utils.data.multimodal import expand_multimodal_rollout_data_in_place
-from miles.backends.training_utils.data.token_space_media_process import compute_multimodal_train_inputs, image_decoder
+from miles.backends.training_utils.data.token_space_media_process import (
+    compute_image_train_inputs,
+    compute_multimodal_train_inputs,
+    image_decoder,
+)
 from miles.backends.training_utils.parallel import get_parallel_state
 from miles.platforms import current_platform
 from miles.utils.audit_utils.witness.allocator import WitnessInfo
@@ -107,12 +111,11 @@ class LazyMultimodalTrainInputs(Sequence):
         return self.get_many([index])[0]
 
     def _rebuild(self, index):
-        paths = self._cacheable_image_paths(index)
-        if paths and (cached := self._features.get(paths)) is not None:
-            device = current_platform.current_device()
+        if paths := self._cacheable_image_paths(index):
+            parts = [self._image_features(path) for path in paths]
             return {
-                "pixel_values": torch.cat([rows.to(device, non_blocking=True) for rows, _ in cached]),
-                "image_grid_thw": torch.stack([grid for _, grid in cached]).to(device),
+                "pixel_values": torch.cat([rows for rows, _ in parts]),
+                "image_grid_thw": torch.stack([grid for _, grid in parts]),
             }
         (mm,) = compute_multimodal_train_inputs(
             self._args.hf_checkpoint,
@@ -125,13 +128,26 @@ class LazyMultimodalTrainInputs(Sequence):
             keep_on_device=self._args.multimodal_rebuild_keep_on_device,
         )
         # SGLang's processor returns fp32 pixels; held for every sample, they double the eager path's bf16 footprint.
-        mm = _cast_floating(mm, self._dtype)
-        if paths and mm is not None and set(mm) == {"pixel_values", "image_grid_thw"}:
-            # Qwen-VL processes each image on its own, so a sample's rows split per image by its grid.
-            rows = mm["image_grid_thw"].prod(dim=1).tolist()
-            for path, image_rows, grid in zip(paths, mm["pixel_values"].split(rows), mm["image_grid_thw"], strict=True):
-                self._features.put(path, image_rows, grid)
-        return mm
+        return _cast_floating(mm, self._dtype)
+
+    def _image_features(self, path: str) -> tuple[torch.Tensor, torch.Tensor]:
+        device = current_platform.current_device()
+        if (cached := self._features.get(path)) is not None:
+            rows, grid = cached
+            return rows.to(device, non_blocking=True), grid.to(device)
+        mm = compute_image_train_inputs(
+            self._args.hf_checkpoint,
+            getattr(self._args, "sglang_mm_process_config", None),
+            path,
+            device=device,
+            image_loader=self._images.get if self._images is not None else None,
+            keep_on_device=self._args.multimodal_rebuild_keep_on_device,
+        )
+        if set(mm) != {"pixel_values", "image_grid_thw"}:
+            raise ValueError(f"--multimodal-rebuild-feature-cache-mb cannot cache image outputs {sorted(mm)}")
+        rows, (grid,) = _cast_floating(mm, self._dtype)["pixel_values"], mm["image_grid_thw"]
+        self._features.put(path, rows, grid)
+        return rows, grid
 
     def _cacheable_image_paths(self, index) -> list[str]:
         sample = self._multimodal_inputs[index] or {}
