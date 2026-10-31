@@ -263,7 +263,7 @@ def test_feature_cache_processes_a_shared_screenshot_once_and_matches_the_proces
     )
     monkeypatch.setattr(data_rollout.current_platform, "current_device", lambda: torch.device("cpu"))
     multimodal_inputs = [{"images": ["/s/a.png", "/s/b.png"]}, {"images": ["/s/b.png", "/s/c.png"]}, {"images": ["/s/b.png"]}]
-    token_ids = [[1, 9, 9, 2], [1, 9, 9, 2], [1, 9, 2]]
+    token_ids = [torch.tensor([1, 9, 9, 2]), torch.tensor([1, 9, 9, 2]), torch.tensor([1, 9, 2])]
 
     expected = data_rollout.LazyMultimodalTrainInputs(_lazy_args(), multimodal_inputs, token_ids).get_many([0, 1, 2])
     processor.calls.clear()
