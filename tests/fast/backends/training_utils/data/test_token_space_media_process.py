@@ -48,7 +48,7 @@ def test_trainer_rebuilds_tensors_without_expanding_the_rollout_tokens(monkeypat
 def _lazy_args(**overrides):
     from types import SimpleNamespace
 
-    return SimpleNamespace(
+    defaults = dict(
         hf_checkpoint="ckpt",
         fp16=False,
         sglang_mm_process_config=None,
@@ -56,8 +56,8 @@ def _lazy_args(**overrides):
         multimodal_rebuild_prefetch=False,
         multimodal_rebuild_cache_mb=0,
         multimodal_rebuild_keep_on_device=False,
-        **overrides,
     )
+    return SimpleNamespace(**{**defaults, **overrides})
 
 
 def test_per_micro_batch_rebuild_matches_the_round_rebuild_and_skips_expansion(monkeypatch):
