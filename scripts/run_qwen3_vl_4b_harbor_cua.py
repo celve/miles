@@ -56,9 +56,9 @@ Usage:
     python3 scripts/run_qwen3_vl_4b_harbor_cua.py --harbor-env-type e2b --rollout-path session --media-refs
 """
 
-import importlib.machinery
 import os
 import shlex
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -77,6 +77,10 @@ GENERATE_FN = "examples.experimental.harbor_cua.rollout.generate"
 # text_config.rope_theta of Qwen/Qwen3-VL-4B-Instruct; the shared qwen3-4B model args
 # default to 1000000, which is the text model's, not this checkpoint's.
 ROTARY_BASE = 5_000_000
+_FIND_SGLANG = (
+    "import importlib.util; s = importlib.util.find_spec('sglang'); "
+    "print(next(iter(s.submodule_search_locations or []), '') if s else '')"
+)
 
 
 @dataclass
@@ -388,11 +392,15 @@ def _worker_env(args: ScriptArgs, harbor_env: dict[str, str]) -> dict:
 
 
 def _worker_sglang_mm_schedule(worker_pythonpath: str) -> Path | None:
-    # PathFinder skips sys.modules; the worker's PYTHONPATH entries come before this interpreter's site-packages.
-    spec = importlib.machinery.PathFinder.find_spec("sglang", [*worker_pythonpath.split(os.pathsep), *sys.path])
-    if spec is None or not spec.submodule_search_locations:
-        return None
-    return Path(next(iter(spec.submodule_search_locations))) / "srt/managers/mm_schedule.py"
+    # A child interpreter resolves sglang as a worker would, editable-install finders included, without importing it.
+    found = subprocess.run(
+        [sys.executable, "-c", _FIND_SGLANG],
+        env={**os.environ, "PYTHONPATH": worker_pythonpath},
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    return Path(found) / "srt/managers/mm_schedule.py" if found else None
 
 
 def _require_vlm_cache_clearing(args: ScriptArgs, harbor_env: dict[str, str]) -> None:
@@ -406,8 +414,8 @@ def _require_vlm_cache_clearing(args: ScriptArgs, harbor_env: dict[str, str]) ->
         return
     raise typer.BadParameter(
         f"SGLANG_VLM_CACHE_SIZE_MB={cache_mb} needs an SGLang that clears its ViT embedding cache on weight "
-        f"updates, and the workers' {mm_schedule or 'PYTHONPATH has no sglang, which'} does not, so screenshots seen "
-        "again after an update would get embeddings from the old vision weights. Put celve/sglang 55bdbddf84 "
+        f"updates, and the workers' SGLang ({mm_schedule or 'none on their PYTHONPATH'}) does not, so screenshots "
+        "seen again after an update would get embeddings from the old vision weights. Put celve/sglang 55bdbddf84 "
         "(sgl-project/sglang#47480) first on PYTHONPATH, or pass --vlm-cache-size-mb 0."
     )
 

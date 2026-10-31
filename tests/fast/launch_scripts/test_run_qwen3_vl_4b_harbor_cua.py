@@ -99,7 +99,7 @@ def _sglang_at(site, *, clears_cache: bool) -> str:
 
 
 def _sglang_on_path(monkeypatch, root, *, clears_cache: bool) -> None:
-    monkeypatch.syspath_prepend(_sglang_at(root / "site", clears_cache=clears_cache))
+    monkeypatch.setenv("PYTHONPATH", _sglang_at(root / "site", clears_cache=clears_cache))
 
 
 def _launcher_without_harbor_preflight(monkeypatch):
@@ -111,8 +111,8 @@ def _launcher_without_harbor_preflight(monkeypatch):
 
 def test_the_cache_refuses_an_sglang_that_never_clears_it(monkeypatch, tmp_path):
     """Without the SGLang fix, a screenshot seen again after a weight update is embedded by the old vision weights."""
-    _sglang_on_path(monkeypatch, tmp_path, clears_cache=False)
     freeze_environment(monkeypatch)
+    _sglang_on_path(monkeypatch, tmp_path, clears_cache=False)
     recording = install_command_recorder(monkeypatch)
     launcher = _launcher_without_harbor_preflight(monkeypatch)
 
@@ -124,8 +124,8 @@ def test_the_cache_refuses_an_sglang_that_never_clears_it(monkeypatch, tmp_path)
 @pytest.mark.parametrize("override", ["cache", "pythonpath"])
 def test_extra_env_vars_cannot_route_around_the_refusal(monkeypatch, tmp_path, override):
     """--extra-env-vars lands after the recipe's worker env, so the workers' cache size and SGLang are what count."""
-    _sglang_on_path(monkeypatch, tmp_path, clears_cache=override == "pythonpath")
     freeze_environment(monkeypatch)
+    _sglang_on_path(monkeypatch, tmp_path, clears_cache=override == "pythonpath")
     recording = install_command_recorder(monkeypatch)
     launcher = _launcher_without_harbor_preflight(monkeypatch)
     if override == "cache":
@@ -141,8 +141,8 @@ def test_extra_env_vars_cannot_route_around_the_refusal(monkeypatch, tmp_path, o
 
 @pytest.mark.parametrize(("clears_cache", "cache_mb"), [(True, 4096), (False, 0)])
 def test_the_run_starts_with_a_clearing_sglang_or_no_cache(monkeypatch, tmp_path, clears_cache, cache_mb):
-    _sglang_on_path(monkeypatch, tmp_path, clears_cache=clears_cache)
     freeze_environment(monkeypatch)
+    _sglang_on_path(monkeypatch, tmp_path, clears_cache=clears_cache)
     recording = install_command_recorder(monkeypatch)
     launcher = _launcher_without_harbor_preflight(monkeypatch)
 
