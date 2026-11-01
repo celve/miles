@@ -13,6 +13,7 @@ from miles.diffusion.rollout.ocr import image_to_rgb_uint8, ocr_reward, ocr_targ
 from miles.diffusion.rollout.response import parse_rollout_response
 from miles.diffusion.rollout.step_strategy import sde_window
 from miles.ray.rollout.rollout_executor import RolloutExecutor
+from miles.utils.simple_checkpointer import save_simple_checkpoint
 
 
 def _tensor(t):
@@ -147,3 +148,24 @@ def test_rollout_shuffle_permutes_each_epoch_by_seed_and_resumes(tmp_path):
         expected.append([f"p{i}" for i in order])
     assert first_epoch == expected[0] != [f"p{i}" for i in range(5)]
     assert [g[0].prompt for g in resumed.get_samples(3)] == expected[1][2:]
+
+
+def test_a_checkpoint_saved_before_rollout_shuffle_still_loads(tmp_path):
+    path = tmp_path / "prompts.jsonl"
+    path.write_text("".join(f'{{"input": "p{i}"}}\n' for i in range(3)))
+    args = Namespace(
+        prompt_data=str(path),
+        input_key="input",
+        metadata_key="metadata",
+        n_samples_per_prompt=1,
+        rollout_shuffle=False,
+        rollout_seed=0,
+    )
+    save_simple_checkpoint(
+        directory=tmp_path / "ckpt", data=dict(prompt_offset=2, sample_group_index=5, sample_index=5)
+    )
+    source = DiffusionPromptDataSource(args)
+
+    source.load(tmp_path / "ckpt")
+
+    assert [(g[0].prompt, g[0].index) for g in source.get_samples(2)] == [("p2", 5), ("p0", 6)]

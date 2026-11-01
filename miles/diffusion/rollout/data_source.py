@@ -76,7 +76,8 @@ class DiffusionPromptDataSource(DataSource):
     def load(self, directory: Path) -> None:
         state = load_simple_checkpoint(directory=directory)
         self.prompt_offset = state["prompt_offset"]
-        self.epoch = state["epoch"]
+        # Checkpoints saved before --rollout-shuffle hold no epoch; their prompt order was the file order of epoch 0.
+        self.epoch = state.get("epoch", 0)
         self.order = self._epoch_order()
         self.sample_group_index = state["sample_group_index"]
         self.sample_index = state["sample_index"]
