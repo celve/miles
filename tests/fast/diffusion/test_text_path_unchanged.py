@@ -26,6 +26,7 @@ def test_text_modules_import_and_parse_without_diffusion_packages():
         import miles.ray.rollout.train_data_conversion
         import miles.ray.specs.inference
         import miles.ray.specs.train
+        import miles.rollout.rm_hub
         from tests.fast.fixtures.args_fixtures import parse_fsdp_test_config
 
         assert parse_fsdp_test_config().model_kind == "text"

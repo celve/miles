@@ -8,6 +8,8 @@ from concurrent.futures import ProcessPoolExecutor
 import numpy as np
 import torch
 
+from miles.utils.types import Sample
+
 logger = logging.getLogger(__name__)
 
 
@@ -97,3 +99,10 @@ class OcrRewardPool:
 
     def shutdown(self) -> None:
         self._executor.shutdown(cancel_futures=True)
+
+
+async def ocr_rm(args, sample: Sample, *, ocr_pool: OcrRewardPool) -> float:
+    """`--rm-type ocr`: the reward of one generated image, scored on the rollout's own pool."""
+    assert sample.diffusion is not None, "--rm-type ocr scores diffusion samples only"
+    image = image_to_rgb_uint8(sample.diffusion.generated_output)
+    return (await ocr_pool.score([image], [sample.prompt]))[0]

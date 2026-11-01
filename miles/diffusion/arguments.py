@@ -37,8 +37,8 @@ _UNSUPPORTED = [
     ("fully async or partial rollout", lambda a: a.fully_async or a.partial_rollout),
     ("dynamic sampling filters", lambda a: a.dynamic_sampling_filter_path is not None),
     (
-        "text reward models (--rm-type, --custom-rm-path); the OCR reward is built in",
-        lambda a: a.rm_type is not None or a.custom_rm_path is not None,
+        "a reward other than --rm-type ocr or a --custom-rm-path",
+        lambda a: a.custom_rm_path is None and a.rm_type != "ocr",
     ),
     (
         "the output store or the Mooncake object store",
