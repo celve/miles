@@ -1113,3 +1113,27 @@ def test_a_sandbox_trials_record_is_copied_out_before_the_kill(
     assert (tmp_path / "records" / "x" / "agent" / "timings.jsonl").read_text() == '{"span": "model"}\n'
     assert not (tmp_path / "records" / "x" / "trial.log").exists()
     assert FakeAsyncSandbox.killed == ["sbx-0"]
+
+
+def test_a_sandbox_env_file_reaches_the_servers_boot_env(tasks_dir, fake_harbor, job_server, tmp_path, monkeypatch):
+    env_file = tmp_path / "env.json"
+    env_file.write_text(json.dumps({"LITE_EVAL_FILE_CACHE": "/opt/cache"}))
+    monkeypatch.setenv("AGENT_SERVER_SANDBOX_ENV_FILE", str(env_file))
+    job_server.finish_with(_verdict(reward=1.0))
+
+    _remote_run()
+
+    (sandbox,) = FakeAsyncSandbox.created
+    assert json.loads(sandbox.written["/tmp/harness_boot.json"]) == {
+        "env": {"E2B_API_KEY": "test-key", "LITE_EVAL_FILE_CACHE": "/opt/cache"}
+    }
+
+
+def test_a_malformed_sandbox_env_file_stops_the_run(tasks_dir, fake_harbor, job_server, tmp_path, monkeypatch):
+    env_file = tmp_path / "env.json"
+    env_file.write_text(json.dumps({"N": 1}))
+    monkeypatch.setenv("AGENT_SERVER_SANDBOX_ENV_FILE", str(env_file))
+
+    with pytest.raises(ValueError, match="JSON object of strings"):
+        _remote_run()
+    assert FakeAsyncSandbox.created == []

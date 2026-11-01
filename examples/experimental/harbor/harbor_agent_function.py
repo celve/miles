@@ -79,6 +79,9 @@ Env vars (read on the rollout worker):
   AGENT_SERVER_SANDBOX_OWNER
                          the ``owner`` metadata on those sandboxes (default:
                          this host's name), for finding the ones a run left
+  AGENT_SERVER_SANDBOX_ENV_FILE
+                         a JSON object of strings added to each server's env
+                         (by path, so secrets stay out of env dumps and logs)
   AGENT_SERVER_SANDBOX_TRIALS_DIR
                          copy each trial's record files (result.json,
                          config.json, trial.log, agent/timings.jsonl) here
@@ -641,14 +644,16 @@ async def _run_on_agent_server(url: str, config, metadata: dict[str, Any], sessi
     return _trial_from_reply(url, payload, instance_id)
 
 
-async def _run_on_harness_sandbox(template: str, config, metadata: dict[str, Any], session_url: str):
+async def _run_on_harness_sandbox(
+    template: str, env: dict[str, str], config, metadata: dict[str, Any], session_url: str
+):
     """Run the built trial on an agent server in its own sandbox, created for it and killed after it."""
     import harness_sandbox
 
     instance_id = metadata.get("instance_id")
     request = _agent_server_request(config, metadata, session_url)
     lifetime_s = _trial_timeout_s() + 600
-    async with harness_sandbox.open_server(template, str(instance_id), lifetime_s) as server:
+    async with harness_sandbox.open_server(template, str(instance_id), lifetime_s, env) as server:
         payload = await harness_sandbox.run_job(server, request)
         if payload.get("trial_dir") and (records := os.getenv("AGENT_SERVER_SANDBOX_TRIALS_DIR", "").strip()):
             # the sandbox and its trial dir go when the block exits; the reply names the copy instead
@@ -713,7 +718,11 @@ async def run(
     if agent_server_url:
         trial_run = _run_on_agent_server(agent_server_url, config, metadata, session_url)
     elif sandbox_template:
-        trial_run = _run_on_harness_sandbox(sandbox_template, config, metadata, session_url)
+        import harness_sandbox
+
+        trial_run = _run_on_harness_sandbox(
+            sandbox_template, harness_sandbox.boot_env(), config, metadata, session_url
+        )
     else:
         trial_run = _run_in_process(config)
 

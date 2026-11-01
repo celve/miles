@@ -58,6 +58,17 @@ def _e2b_api_key() -> str:
     )
 
 
+def boot_env() -> dict[str, str]:
+    """The env each server boots with: the E2B key it creates desktops with, plus AGENT_SERVER_SANDBOX_ENV_FILE's."""
+    env = {"E2B_API_KEY": _e2b_api_key()}
+    if path := os.getenv("AGENT_SERVER_SANDBOX_ENV_FILE", "").strip():
+        extra = json.loads(Path(path).expanduser().read_text())
+        if not isinstance(extra, dict) or not all(isinstance(v, str) for v in extra.values()):
+            raise ValueError(f"AGENT_SERVER_SANDBOX_ENV_FILE {path} must hold a JSON object of strings")
+        env.update(extra)
+    return env
+
+
 def _gateway_url() -> str:
     # header routing goes through the same gateway the e2b SDK reaches envd by
     url = os.getenv("E2B_SANDBOX_URL", "").strip().rstrip("/")
@@ -67,11 +78,10 @@ def _gateway_url() -> str:
 
 
 @asynccontextmanager
-async def open_server(template: str, label: str, lifetime_s: int) -> AsyncIterator[SandboxServer]:
+async def open_server(template: str, label: str, lifetime_s: int, env: dict[str, str]) -> AsyncIterator[SandboxServer]:
     """A booted agent server in a fresh sandbox from ``template``, killed when the block exits, however it exits."""
     from e2b import AsyncSandbox
 
-    api_key = _e2b_api_key()
     gateway = _gateway_url()
     t0 = time.monotonic()
     try:
@@ -79,7 +89,7 @@ async def open_server(template: str, label: str, lifetime_s: int) -> AsyncIterat
         sandbox = await AsyncSandbox.create(
             template,
             timeout=lifetime_s,
-            api_key=api_key,
+            api_key=env["E2B_API_KEY"],
             metadata={"owner": _owner(), "role": "harness", "trial": label[:63]},
         )
     except Exception as exc:
@@ -92,7 +102,7 @@ async def open_server(template: str, label: str, lifetime_s: int) -> AsyncIterat
             sandbox=sandbox,
         )
         try:
-            await sandbox.files.write(BOOT_CONFIG, json.dumps({"env": {"E2B_API_KEY": api_key}}))
+            await sandbox.files.write(BOOT_CONFIG, json.dumps({"env": env}))
             await _wait_healthy(server)
         except InfraAbort:
             raise
