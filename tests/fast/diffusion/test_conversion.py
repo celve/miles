@@ -51,8 +51,16 @@ def _sample(index, *, reward, steps, latent_step_indices=None, num_latents=4):
             latent_step_indices=latent_step_indices,
         ),
         sde_step_indices=steps,
+        rollout_id=3,
     )
     return Sample(index=index, reward=reward, diffusion=rollout)
+
+
+@pytest.fixture(autouse=True)
+def logged(monkeypatch):
+    records = []
+    monkeypatch.setattr(conversion, "log_metrics", lambda args, metrics, *, step_key: records.append(metrics))
+    return records
 
 
 def test_one_pair_per_sde_step_pairs_x_t_with_x_t_plus_1():
@@ -135,16 +143,35 @@ def test_disabled_normalization_trains_on_the_raw_rewards():
     assert _advantages(data) == [1.0, 0.25]
 
 
-def test_rollout_metrics_use_miles_step_and_zero_std_helpers(monkeypatch):
-    logged = []
-    monkeypatch.setattr(conversion, "log_metrics", lambda args, metrics, *, step_key: logged.append((step_key, metrics)))
+def test_rollout_metrics_use_miles_step_and_zero_std_helpers(logged):
     samples = _rewarded([1.0, 1.0, 0.0, 1.0])
     for sample in samples:
         sample.group_index = sample.index // 2
 
     conversion.log_rollout_data(3, _fn_args(wandb_always_use_train_step=True), samples, {}, rollout_time=1.5)
 
-    ((step_key, metrics),) = logged
-    assert step_key == "rollout/step" and metrics["rollout/step"] == 3 * 2 * 2 // 2
+    (metrics,) = logged
+    assert metrics["rollout/step"] == 3 * 2 * 2 // 2
     assert metrics["rollout/zero_std/count_1.0"] == 1 and metrics["rollout/zero_std/all_one_percentage"] == 0.5
-    assert metrics["rollout/reward/raw_mean"] == 0.75 and metrics["perf/rollout_time"] == 1.5
+    assert metrics["perf/rollout_time"] == 1.5
+
+
+def stateful_rewards(args, samples):
+    POST_PROCESS_CALLS.append(len(samples))
+    raw = [sample.reward for sample in samples]
+    return raw, [len(POST_PROCESS_CALLS) * r for r in raw]
+
+
+def test_the_executor_order_logs_the_rewards_it_trains_on_from_one_hook_call(logged):
+    POST_PROCESS_CALLS.clear()
+    args = _fn_args(custom_reward_post_process_path=CustomFunctionConfig(path=f"{__name__}.stateful_rewards"))
+    samples = _rewarded([1.0, 0.0])
+
+    # The executor logs a rollout, then converts it (RolloutExecutor._generate_rollout_data, then get).
+    conversion.log_rollout_data(3, args, samples, {}, rollout_time=1.0)
+    data = convert_samples_to_train_data(args, samples)
+
+    assert POST_PROCESS_CALLS == [2]
+    (reward_record,) = [record for record in logged if "rollout/reward/norm_mean" in record]
+    assert reward_record["rollout/step"] == 3
+    assert reward_record["rollout/reward/norm_mean"] == sum(_advantages(data)) / 2

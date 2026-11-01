@@ -47,6 +47,8 @@ class DiffusionRolloutFn(BaseRolloutFn):
             self.semaphore = asyncio.Semaphore(self.args.sglang_server_concurrency * num_engines)
         groups = self.data_source.get_samples(self.args.rollout_batch_size)
         groups = await asyncio.gather(*(self._generate_group(group) for group in groups))
+        for sample in (sample for group in groups for sample in group):
+            sample.diffusion.rollout_id = input.rollout_id
         logger.info(f"Rollout {input.rollout_id}: first prompt {groups[0][0].prompt!r}, reward {groups[0][0].reward}")
         return RolloutFnTrainOutput(samples=sorted(groups, key=lambda group: group[0].index))
 
