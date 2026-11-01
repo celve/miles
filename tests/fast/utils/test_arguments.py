@@ -3117,6 +3117,15 @@ def test_skip_actor_forward_only_is_gated_during_miles_validation():
         miles_validate_args(args)
 
 
+def test_freeze_vision_model_needs_the_bridge_path():
+    parser = argparse.ArgumentParser()
+    get_miles_extra_args_provider()(parser)
+    args = parser.parse_args(["--freeze-vision-model", "--num-rollout", "1"] + REQUIRED_ARGS)
+
+    with pytest.raises(AssertionError, match="--freeze-vision-model"):
+        miles_validate_args(args)
+
+
 def _make_skip_actor_forward_only_args(**overrides) -> SimpleNamespace:
     defaults = dict(
         compute_advantages_and_returns=True,

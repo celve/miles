@@ -102,6 +102,12 @@ def _apply_bridge_runtime_config(provider, args: argparse.Namespace) -> None:
     if getattr(args, "moe_aux_loss_coeff", None) is not None:
         provider.moe_aux_loss_coeff = args.moe_aux_loss_coeff
 
+    if getattr(args, "freeze_vision_model", False):
+        assert hasattr(provider, "freeze_vision_model"), (
+            f"--freeze-vision-model: {type(provider).__name__} has no vision tower to freeze"
+        )
+        provider.freeze_vision_model = True
+
     # Imported here: test_bridge_mtp_detachment.py exec()s this function's AST in a bare namespace (no module names).
     from miles.utils.megatron_bridge_utils import apply_dsa_backend_args
 

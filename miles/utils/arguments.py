@@ -571,6 +571,16 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="The method to convert megatron weights to hugging face weights for SGLang.",
             )
             parser.add_argument(
+                "--freeze-vision-model",
+                action="store_true",
+                default=False,
+                help=(
+                    "Train with the vision tower frozen, under --megatron-to-hf-mode bridge on a provider that "
+                    "supports it (Qwen-VL). Its merger and DeepStack mergers stay trainable. This changes what "
+                    "the policy learns, unlike the trainer-speed flags."
+                ),
+            )
+            parser.add_argument(
                 "--dsa-attention-backend",
                 choices=["megatron", "tilelang"],
                 default="tilelang",
@@ -4364,6 +4374,10 @@ def miles_validate_args(args):
 
     if args.skip_actor_forward_only:
         validate_skip_actor_forward_only(args)
+
+    assert not args.freeze_vision_model or (
+        args.train_backend == "megatron" and args.megatron_to_hf_mode == "bridge"
+    ), "--freeze-vision-model needs --train-backend megatron with --megatron-to-hf-mode bridge"
 
     validate_score_centering_args(args)
 
