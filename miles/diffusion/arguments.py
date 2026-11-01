@@ -66,10 +66,6 @@ _UNSUPPORTED = [
         lambda a: a.eps_clip_high is not None or a.eps_clip_c is not None,
     ),
     (
-        "--optimizer-cpu-offload: the diffusion trainer keeps AdamW on the GPU",
-        lambda a: a.optimizer_cpu_offload,
-    ),
-    (
         "debug dumps (--save-debug-rollout-data, --save-debug-train-data, --dump-details)",
         lambda a: a.save_debug_rollout_data is not None
         or a.save_debug_train_data is not None

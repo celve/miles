@@ -34,9 +34,11 @@ def load_fsdp_dit(
 
     _sync_dtypes_from_rank0(model)
     full_state = model.state_dict() if is_source else {}
+    cpu_offload = args.backend.optimizer_cpu_offload
     model = apply_fsdp2(
         model,
         mesh=mesh,
+        cpu_offload=cpu_offload,
         args=args,
         param_dtype=DTYPES[args.diffusion_forward_dtype],
         reduce_dtype=torch.float32,
@@ -44,7 +46,7 @@ def load_fsdp_dit(
         # Inputs keep their dtype: autocast owns compute, so gradient-checkpoint recompute stays consistent.
         cast_forward_inputs=False,
     )
-    model = fsdp2_load_full_state_dict(model, full_state, cpu_offload=False)
+    model = fsdp2_load_full_state_dict(model, full_state, cpu_offload=cpu_offload)
     del full_state
     # FSDP fixes each group's gradient dtype at lazy init from the params requiring grad; run it now,
     # before a first forward with the adapter disabled would see none.

@@ -65,7 +65,6 @@ def test_the_recipe_layout_passes_and_resolves_the_family_defaults():
         (dict(true_on_policy_mode=True), "on-policy"),
         (dict(debug_rollout_only=True), "debug"),
         (dict(ci_test=True), "ci-test"),
-        (dict(optimizer_cpu_offload=True), "optimizer-cpu-offload"),
         (dict(eps_clip=0.2), "explicitly"),
         (dict(eps_clip_high=0.3), "asymmetric"),
         (dict(eps_clip_c=3.0), "dual-clip"),
@@ -90,11 +89,8 @@ def test_a_text_run_rejects_the_image_reward():
         parse_fsdp_test_config("--rm-type", "ocr")
 
 
-def test_the_fsdp_parse_rejects_optimizer_cpu_offload_for_diffusion():
-    from tests.fast.fixtures.args_fixtures import parse_fsdp_test_config
-
-    with pytest.raises(ValueError, match="optimizer-cpu-offload"):
-        parse_fsdp_test_config("--model-kind", "diffusion", "--optimizer-cpu-offload")
+def test_optimizer_cpu_offload_is_supported():
+    validate_diffusion_args(_supported(optimizer_cpu_offload=True))
 
 
 def test_model_kind_sets_the_four_hooks():
