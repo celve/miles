@@ -170,6 +170,45 @@ def test_a_rollout_abort_cancels_the_calls_running_on_workers(serve, tmp_path):
     assert _wait_for(cleaned_up)
 
 
+def test_the_rollout_abort_entrypoint_cancels_a_trial_waiting_on_its_environment(serve, tmp_path, monkeypatch):
+    """The oversampling abort awaits pending groups after the hook: the worker call must end, not run to its cap."""
+    from miles.rollout.inference_rollout import inference_rollout_train
+
+    async def no_engines(args):
+        return []
+
+    monkeypatch.setattr(inference_rollout_train, "get_worker_urls", no_engines)
+    monkeypatch.setattr(inference_rollout_train.SampleOwnershipRecorder, "log_dropped_samples", lambda **kw: None)
+    endpoint = serve()
+    pid_file, cleaned_up = tmp_path / "pid", tmp_path / "cleaned_up"
+
+    async def group():
+        # as generate does: a discarded call becomes an aborted sample of its group
+        try:
+            await call_agent_function(
+                stubs.wait_until_cancelled,
+                mode="worker",
+                worker=endpoint,
+                pid_file=str(pid_file),
+                cleaned_up=str(cleaned_up),
+            )
+        except InfraAbort as exc:
+            return [SimpleNamespace(exit_status=exc.exit_status)]
+
+    async def abort_mid_trial():
+        pending = {asyncio.create_task(group())}
+        while not pid_file.exists():
+            await asyncio.sleep(0.1)
+        state = SimpleNamespace(
+            args=SimpleNamespace(partial_rollout=False, custom_agent_function_path=None), aborted=False
+        )
+        await asyncio.wait_for(inference_rollout_train.abort(state, pending, rollout_id=0), timeout=60)
+
+    asyncio.run(abort_mid_trial())
+
+    assert _wait_for(cleaned_up)
+
+
 def test_secrets_are_not_forwarded_by_value(monkeypatch):
     monkeypatch.setenv("HARBOR_ADMIN_SECRET", "s3cret")
     monkeypatch.setenv("HARBOR_ADMIN_SECRET_FILE", "/secrets/harbor_admin")
