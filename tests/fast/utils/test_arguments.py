@@ -4408,6 +4408,7 @@ class TestMultimodalTokenSpaceProcessingArgs:
         "rl_on_policy_target": None,
         "true_on_policy_contract": None,
         "decrypted_config_file": None,
+        "model_path": "/ckpt",
         "tokenizer_path": None,
         "tokenizer_mode": "auto",
         "tokenizer_backend": "huggingface",
@@ -4420,6 +4421,21 @@ class TestMultimodalTokenSpaceProcessingArgs:
         "token_space_preprocess_cache_dir": None,
         "mm_attention_backend": None,
     }
+
+    @staticmethod
+    def _args(**overrides):
+        return SimpleNamespace(
+            **{
+                "multimodal_token_space_processing": True,
+                "rollout_external_engine_addrs": None,
+                "custom_inference_engine_provider_path": None,
+                "trainer_mm_processor_worker_num": 1,
+                "trainer_mm_io_worker_num": 0,
+                "hf_checkpoint": "/ckpt",
+                "train_backend": "megatron",
+                **overrides,
+            }
+        )
 
     @pytest.mark.parametrize(
         ("engine_overrides", "external_engines", "match"),
@@ -4436,6 +4452,7 @@ class TestMultimodalTokenSpaceProcessingArgs:
         args = SimpleNamespace(
             multimodal_token_space_processing=True,
             rollout_external_engine_addrs=external_engines,
+            custom_inference_engine_provider_path=None,
             trainer_mm_processor_worker_num=1,
             trainer_mm_io_worker_num=0,
             hf_checkpoint="/ckpt",
@@ -4452,6 +4469,7 @@ class TestMultimodalTokenSpaceProcessingArgs:
         args = SimpleNamespace(
             multimodal_token_space_processing=True,
             rollout_external_engine_addrs=None,
+            custom_inference_engine_provider_path=None,
             hf_checkpoint="/ckpt",
             train_backend=train_backend,
         )
@@ -4463,6 +4481,7 @@ class TestMultimodalTokenSpaceProcessingArgs:
         args = SimpleNamespace(
             multimodal_token_space_processing=True,
             rollout_external_engine_addrs=None,
+            custom_inference_engine_provider_path=None,
             trainer_mm_processor_worker_num=1,
             trainer_mm_io_worker_num=0,
             hf_checkpoint="/ckpt",
@@ -4477,6 +4496,7 @@ class TestMultimodalTokenSpaceProcessingArgs:
         args = SimpleNamespace(
             multimodal_token_space_processing=True,
             rollout_external_engine_addrs=None,
+            custom_inference_engine_provider_path=None,
             trainer_mm_processor_worker_num=1,
             trainer_mm_io_worker_num=0,
             hf_checkpoint="/ckpt",
@@ -4518,6 +4538,7 @@ class TestMultimodalTokenSpaceProcessingArgs:
         args = SimpleNamespace(
             multimodal_token_space_processing=True,
             rollout_external_engine_addrs=None,
+            custom_inference_engine_provider_path=None,
             trainer_mm_processor_worker_num=1,
             trainer_mm_io_worker_num=0,
             hf_checkpoint="/ckpt",
@@ -4534,7 +4555,21 @@ class TestMultimodalTokenSpaceProcessingArgs:
         ]
         actor = ModelConfig(name="actor", model_path=None, server_groups=groups, update_weights=True)
 
-        with pytest.raises(AssertionError, match="Field 'image_processor_backend' differs"):
+        with pytest.raises(ValueError, match="same processor settings: Field 'image_processor_backend' differs"):
             _check_multimodal_token_space_processing_args(
                 args, sglang=SglangConfig(models=[actor], base_args=self._SUPPORTED)
             )
+
+    def test_a_custom_inference_engine_provider_is_rejected(self):
+        args = SimpleNamespace(
+            multimodal_token_space_processing=True,
+            rollout_external_engine_addrs=None,
+            custom_inference_engine_provider_path="my.provider.fn",
+            trainer_mm_processor_worker_num=1,
+            trainer_mm_io_worker_num=0,
+            hf_checkpoint="/ckpt",
+            train_backend="megatron",
+        )
+
+        with pytest.raises(ValueError, match="external engines"):
+            _check_multimodal_token_space_processing_args(args, sglang=make_sglang_config(**self._SUPPORTED))
