@@ -444,3 +444,29 @@ class TestStorePlanOnTheSamplesWire:
         payload = encode_samples([_computed_sample()], {}, None)
         (out,) = decode_samples_and_merge_input_sample(payload, Sample(rollout_store_plan=self._plan())).samples
         assert out.rollout_store_plan is None
+
+
+class TestMediaRefsOnTheSamplesWire:
+    REFS = {"images": ["/shared/media/ab/ab12", "/shared/media/cd/cd34", "/shared/media/ab/ab12"]}
+
+    def test_refs_round_trip_in_order_without_tensors(self):
+        sample = _computed_sample()
+        sample.multimodal_inputs = self.REFS
+        payload = encode_samples([sample], {}, fields=COMPUTED_FIELDS_V2)
+        decoded = decode_samples_and_merge_input_sample(payload, Sample(), fields=COMPUTED_FIELDS_V2).samples[0]
+        assert decoded.multimodal_inputs == self.REFS
+        assert decoded.multimodal_train_inputs is None
+
+    def test_the_server_value_replaces_the_input_samples_media(self):
+        payload = encode_samples([_computed_sample()], {}, fields=COMPUTED_FIELDS_V2)
+        stale = Sample(multimodal_inputs={"images": ["/dataset/prompt.png"]})
+        decoded = decode_samples_and_merge_input_sample(payload, stale, fields=COMPUTED_FIELDS_V2).samples[0]
+        assert decoded.multimodal_inputs is None
+
+    def test_the_v1_wire_carries_no_refs(self):
+        sample = _computed_sample()
+        sample.multimodal_inputs = self.REFS
+        assert "multimodal_inputs" not in COMPUTED_FIELDS
+        assert encode_samples([sample], {}, fields=COMPUTED_FIELDS) == encode_samples(
+            [_computed_sample()], {}, fields=COMPUTED_FIELDS
+        )

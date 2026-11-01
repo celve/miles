@@ -63,6 +63,32 @@ class SessionConfig(BaseConfig):
             "the pretokenized prefix in multi-turn agentic sessions.",
         ),
     ] = "default"
+    use_session_images: A[
+        bool,
+        Arg(
+            help=(
+                "v2 only. Carry image_url parts (inline base64 data URLs) through the session server so a "
+                "screenshot agent can train through the agent-function interface; off, image content is refused. "
+                "Image turns go to the engine's chat route unexpanded, the engine expands them in token space, and "
+                "its prompt ids must equal the session server's own expansion. Each retained image is written under "
+                "--shared-media-dir and the trainer rebuilds its pixels. Requires --use-session-server v2, "
+                "--multimodal-token-space-processing, --shared-media-dir, --use-miles-router and --tito-model "
+                "qwen3_vl; refuses the routing and indexer replay side channels."
+            )
+        ),
+    ] = False
+    session_image_text_only_samples: A[
+        str,
+        Arg(
+            choices=["drop", "keep"],
+            help=(
+                "v2 only, with --use-session-images. What to do with a training sample whose retained tokens carry "
+                "no image, such as a text-only summary call. 'drop' (default) removes it: under FSDP the vision "
+                "tower's weight all-gathers are collectives, so a text-only sample in an image-bearing batch stalls "
+                "the ranks that issued them. 'keep' emits it, for a trainer that tolerates mixed modality."
+            ),
+        ),
+    ] = "drop"
     session_message_matcher: A[
         str,
         Arg(

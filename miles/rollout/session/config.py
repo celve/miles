@@ -2,6 +2,7 @@ import logging
 from typing import Any
 
 from miles.router.backend import make_router_backend
+from miles.utils.media_refs import run_media_dir
 from miles.utils.output_store.config import output_store_backend_config
 from miles.utils.pydantic_utils import FrozenStrictBaseModel
 
@@ -32,6 +33,9 @@ class SessionServerConfig(FrozenStrictBaseModel):
     lora_adapter_path: str | None
     lora_train_only: bool
     use_session_server: bool | str | None
+    use_session_images: bool
+    session_image_text_only_samples: str
+    run_media_dir: str | None
     session_message_matcher: str
     pause_generation_mode: str | None
     session_sample_picker_path: str | None
@@ -69,6 +73,9 @@ def compute_session_server_config(
         lora_adapter_path=args.lora_adapter_path,
         lora_train_only=args.lora_train_only,
         use_session_server=args.use_session_server,
+        use_session_images=args.use_session_images,
+        session_image_text_only_samples=args.session_image_text_only_samples,
+        run_media_dir=run_media_dir(args),
         session_message_matcher=args.session_message_matcher,
         pause_generation_mode=args.pause_generation_mode,
         session_sample_picker_path=args.session_sample_picker_path,

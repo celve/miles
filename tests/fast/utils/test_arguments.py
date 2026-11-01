@@ -30,6 +30,7 @@ from miles.utils.args.trainer_utils import compute_trainer_ckpt_load_config
 from miles.utils.arguments import (
     FULLY_ASYNC_ROLLOUT_PATH,
     _check_multimodal_token_space_processing_args,
+    _check_session_image_args,
     _compute_custom_inference_engine_provider_path,
     _compute_rollout_external,
     _maybe_apply_dumper_overrides,
@@ -2527,6 +2528,12 @@ class TestTitoFixedTemplateConfiguration:
         ]
         assert len(target_records) == int(expect_warning)
 
+    def test_qwen3_vl_uses_native_template(self):
+        args = self._parse(["--use-session-server", "--tito-model", "qwen3_vl"])
+        miles_validate_args(args)
+        assert args.chat_template_path is None
+        assert args.apply_chat_template_kwargs == {}
+
     def test_named_family_requires_session_server(self):
         args = self._parse(["--tito-model", "qwen3"])
         with pytest.raises(ValueError, match="--tito-model=qwen3 requires --use-session-server"):
@@ -4065,3 +4072,44 @@ class TestMultimodalTokenSpaceProcessingArgs:
 
         with pytest.raises(ValueError, match=f"same processor settings: Field '{next(iter(group_override))}'"):
             _check_multimodal_token_space_processing_args(self._args(), sglang=sglang)
+
+
+class TestSessionImageArgs:
+    @staticmethod
+    def _args(**overrides):
+        return SimpleNamespace(
+            **{
+                "use_session_images": True,
+                "use_session_server": "v2",
+                "multimodal_token_space_processing": True,
+                "shared_media_dir": "/shared/media",
+                "use_miles_router": True,
+                "tito_model": "qwen3_vl",
+                "use_rollout_routing_replay": False,
+                "use_rollout_indexer_replay": False,
+                **overrides,
+            }
+        )
+
+    def test_the_token_space_setup_passes(self):
+        _check_session_image_args(self._args())
+
+    def test_off_checks_nothing(self):
+        _check_session_image_args(self._args(use_session_images=False, use_session_server=False, tito_model="default"))
+
+    @pytest.mark.parametrize(
+        ("overrides", "match"),
+        [
+            ({"use_session_server": True}, "--use-session-server v2"),
+            ({"multimodal_token_space_processing": False}, "--multimodal-token-space-processing"),
+            ({"shared_media_dir": None}, "--shared-media-dir"),
+            ({"use_miles_router": False}, "--use-miles-router"),
+            ({"tito_model": "qwen3"}, "requires --tito-model qwen3_vl"),
+            ({"tito_model": "default"}, "requires --tito-model qwen3_vl"),
+            ({"use_rollout_routing_replay": True}, "--use-rollout-routing-replay"),
+            ({"use_rollout_indexer_replay": True}, "--use-rollout-indexer-replay"),
+        ],
+    )
+    def test_unsupported_launch_settings_are_rejected(self, overrides, match):
+        with pytest.raises(ValueError, match=match):
+            _check_session_image_args(self._args(**overrides))

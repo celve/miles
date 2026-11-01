@@ -17,7 +17,13 @@ from miles.rollout.session.core import (
     extract_completion,
     proxy_result_to_response,
 )
-from miles.rollout.session.errors import OutputStoreContractError, SessionNotFoundError, TokenizationError
+from miles.rollout.session.errors import (
+    MessageValidationError,
+    OutputStoreContractError,
+    SessionNotFoundError,
+    TokenizationError,
+)
+from miles.rollout.session.images.processing import assert_engine_expansion_matches, expand_input_ids
 from miles.rollout.session.request_args import filter_turn_args, parse_chat_request
 from miles.rollout.session.samples.codec import COMPUTED_FIELDS_V2, ROLLOUT_SAMPLING_MASK_FIELDS, encode_samples
 from miles.rollout.session.types import GetSessionResponse, SessionRecord
@@ -211,6 +217,7 @@ class SessionCoreV2(SessionCore):
                 config=self.config,
                 tito_tokenizer=self.registry.tito_tokenizer,
                 message_matcher=self.registry.message_matcher,
+                image_processor=self.registry.image_processor,
             )
             request_body, tito_tokenizer = prepared.body, self.registry.tito_tokenizer
             response_intent = prepared.response_intent
@@ -223,7 +230,9 @@ class SessionCoreV2(SessionCore):
             _add_session_extra_key(request_body, session)
 
             # orjson: the body carries the whole prompt's input_ids on every turn.
-            proxy_body = orjson.dumps(request_body)
+            proxy_body = orjson.dumps(
+                {**request_body, **self._image_turn_fields(prompt_token_ids)} if prepared.has_images else request_body
+            )
         # --- lock released ---
 
         # --- Phase 2: proxy to backend (NO lock held) ---
@@ -239,6 +248,8 @@ class SessionCoreV2(SessionCore):
             return proxy_result_to_response(result)
 
         response, choice, assistant_message, completion_token_ids = extract_completion(result)
+        if prepared.has_images:
+            self._check_engine_expansion(response, request_body, prepared)
         assistant_message = tito_tokenizer.postprocess_completion(
             choice=choice,
             assistant_message=assistant_message,
@@ -272,10 +283,32 @@ class SessionCoreV2(SessionCore):
                 response_id=response.get("id", ""),
                 finish_reason=choice.get("finish_reason") or "",
                 turn_args=request_body,
+                images=prepared.images,
             )
         # --- lock released ---
 
         return _chat_client_response(result, response, response_intent)
+
+    def _image_turn_fields(self, input_ids: list[int]) -> dict:
+        first = input_ids.index(self.registry.image_processor.placeholder_id)
+        if first == 0:
+            raise MessageValidationError("an image placeholder at position 0 cannot be expanded in token space")
+        return {"return_prompt_token_ids": True, "mm_token_expansion_start_len": first}
+
+    def _check_engine_expansion(self, response: dict, request_body: dict, prepared) -> None:
+        choices = response.get("choices") or [{}]
+        effective = choices[0].get("prompt_token_ids")
+        if not (request_body.get("return_prompt_token_ids") or request_body.get("return_token_ids")):
+            for choice in choices:
+                choice.pop("prompt_token_ids", None)
+        assert_engine_expansion_matches(
+            effective,
+            expand_input_ids(
+                request_body["input_ids"], prepared.image_token_counts, self.registry.image_processor.placeholder_id
+            ),
+            prepared.images,
+            prepared.image_token_counts,
+        )
 
 
 def _add_session_extra_key(request_body: dict, session: SessionStateV2) -> None:

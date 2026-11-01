@@ -881,6 +881,46 @@ def _check_multimodal_token_space_processing_args(args, *, sglang: SglangConfig)
         ) from error
 
 
+def _check_session_image_args(args) -> None:
+    if not args.use_session_images:
+        return
+    required = [
+        flag
+        for satisfied, flag in (
+            (args.use_session_server == "v2", "--use-session-server v2"),
+            (args.multimodal_token_space_processing, "--multimodal-token-space-processing"),
+            (args.shared_media_dir is not None, "--shared-media-dir"),
+            (args.use_miles_router, "--use-miles-router"),
+        )
+        if not satisfied
+    ]
+    if required:
+        raise ValueError(
+            f"--use-session-images needs {', '.join(required)}: image turns are expanded by the engine in token "
+            "space, the trainer rebuilds the pixels from files under --shared-media-dir, and the SGLang router's "
+            "chat route drops mm_token_expansion_start_len"
+        )
+    if args.tito_model != TITOTokenizerType.QWEN3_VL.value:
+        raise ValueError(
+            f"--use-session-images requires --tito-model {TITOTokenizerType.QWEN3_VL.value}, got "
+            f"{args.tito_model!r}: 'default' drops the newline Qwen3-VL's template puts after every <|im_end|>, and "
+            "'qwen3' renders Qwen3's text template, which has no image parts"
+        )
+    replays = [
+        flag
+        for enabled, flag in (
+            (args.use_rollout_routing_replay, "--use-rollout-routing-replay"),
+            (args.use_rollout_indexer_replay, "--use-rollout-indexer-replay"),
+        )
+        if enabled
+    ]
+    if replays:
+        raise ValueError(
+            f"--use-session-images does not support {', '.join(replays)}: those per-token rows are sized on the "
+            "sequence the engine expanded, while the session server's offsets are computed on the unexpanded render"
+        )
+
+
 def miles_validate_args(args):
     from miles.backends.training_utils.weight_update.session import weight_update_selector
 
@@ -976,6 +1016,8 @@ def miles_validate_args(args):
             raise ValueError(
                 f"--use-session-server v2 does not support {', '.join(unsupported)}; v2 returns list[Sample]"
             )
+
+    _check_session_image_args(args)
 
     if args.use_session_server and args.use_rollout_routing_replay and args.pause_generation_mode == "retract":
         logger.warning(

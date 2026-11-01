@@ -4,6 +4,7 @@ from typing import Any
 
 from miles.rollout.generate_utils.sample_utils import merge_samples
 from miles.rollout.session.errors import TokenizationError
+from miles.rollout.session.images.processing import expand_input_ids, retained_image_count
 from miles.rollout.session.request_args import filter_turn_args
 from miles.rollout.session.samples.merge import (
     adopt_session_records,
@@ -11,7 +12,9 @@ from miles.rollout.session.samples.merge import (
     merge_samples_with_addition_r3,
     truncate_samples_by_total_tokens,
 )
+from miles.rollout.session.types import SessionRecord
 from miles.rollout.session.v2.session_state import SessionRegistryV2, SessionStateV2
+from miles.rollout.session.v2.tree_trajectory import TrajectoryNode
 from miles.utils.types import Sample
 
 logger = logging.getLogger(__name__)
@@ -70,12 +73,12 @@ def build_leaf_material(
     material: list[Sample] = []
     for leaf in state.tree.leaves():
         path = leaf.path_nodes()
-        records = [node.record for node in path]
+        records, accumulated_token_ids, leaf_counts = _expanded_path(path, leaf, state, registry)
         turns = compute_samples_from_openai_records(
             args,
             records,
             registry.tokenizer,
-            accumulated_token_ids=leaf.token_ids,
+            accumulated_token_ids=accumulated_token_ids,
             max_trim_tokens=registry.tito_tokenizer.max_trim_tokens,
             use_addition_r3=use_addition_r3,
             evaluation=state.evaluation,
@@ -89,6 +92,10 @@ def build_leaf_material(
         else:
             sample = merge_samples(turns, registry.tokenizer)
         adopt_session_records(sample, records)
+        if registry.image_processor is not None and not _add_images_or_drop(
+            sample, leaf, leaf_counts, state, registry
+        ):
+            continue
         flat: dict[str, Any] = {
             "accumulated_token_ids": list(leaf.token_ids),
             "turn_args": filter_turn_args(leaf.turn_args),
@@ -99,6 +106,8 @@ def build_leaf_material(
                 "response_id": leaf.response_id,
             },
         }
+        if registry.image_processor is not None:
+            flat["prompt_image_ids"] = {str(node.seq): list(node.images.image_ids) for node in path}
         if computed_mismatch is not None and leaf.seq in computed_mismatch:
             mismatch = computed_mismatch[leaf.seq]
         else:
@@ -112,3 +121,53 @@ def build_leaf_material(
         sample.metadata = {**(sample.metadata or {}), **flat}
         material.append(sample)
     return material
+
+
+def _expanded_path(
+    path: list[TrajectoryNode],
+    leaf: TrajectoryNode,
+    state: SessionStateV2,
+    registry: SessionRegistryV2,
+) -> tuple[list[SessionRecord], list[int], list[int]]:
+    records = [node.record for node in path]
+    if registry.image_processor is None or state.session_images is None or not leaf.images.image_ids:
+        return records, leaf.token_ids, []
+    placeholder_id = registry.image_processor.placeholder_id
+    expanded_records = [
+        node.record.model_copy(
+            update={
+                "request": {
+                    **node.record.request,
+                    "input_ids": expand_input_ids(
+                        node.record.request["input_ids"], state.session_images.counts_for(node.images), placeholder_id
+                    ),
+                }
+            }
+        )
+        for node in path
+    ]
+    leaf_counts = state.session_images.counts_for(leaf.images)
+    return expanded_records, expand_input_ids(leaf.token_ids, leaf_counts, placeholder_id), leaf_counts
+
+
+def _add_images_or_drop(
+    sample: Sample,
+    leaf: TrajectoryNode,
+    leaf_counts: list[int],
+    state: SessionStateV2,
+    registry: SessionRegistryV2,
+) -> bool:
+    image_processor = registry.image_processor
+    retained = retained_image_count(sample.tokens, leaf_counts, image_processor.placeholder_id) if leaf_counts else 0
+    if retained == 0:
+        if image_processor.text_only_samples == "drop":
+            logger.info(
+                "Dropping leaf seq=%d: no image survives in its %d tokens (--session-image-text-only-samples=drop)",
+                leaf.seq,
+                len(sample.tokens),
+            )
+            return False
+        return True
+    image_ids = list(leaf.images.image_ids[:retained])
+    sample.multimodal_inputs = {"images": image_processor.write_media_refs(image_ids, state.session_images)}
+    return True

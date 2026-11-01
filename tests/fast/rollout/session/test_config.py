@@ -29,6 +29,8 @@ _ARGS_TO_CONFIG_FIELD = {
     "lora_adapter_path": "lora_adapter_path",
     "lora_train_only": "lora_train_only",
     "use_session_server": "use_session_server",
+    "use_session_images": "use_session_images",
+    "session_image_text_only_samples": "session_image_text_only_samples",
     "session_message_matcher": "session_message_matcher",
     "pause_generation_mode": "pause_generation_mode",
     "session_sample_picker_path": "session_sample_picker_path",
@@ -40,7 +42,7 @@ _ARGS_TO_CONFIG_FIELD = {
 
 _CALL_SITE_FIELDS = ("host", "port", "instance_id", "backend_url")
 # Derived from several args, tested on their own below.
-_DERIVED_FIELDS = ("output_store_backend_config",)
+_DERIVED_FIELDS = ("output_store_backend_config", "run_media_dir")
 _ROUTER_DERIVED_FIELDS = ("routing_key_header",)
 
 _DISTINCT_ARGS_VALUES = dict(
@@ -61,6 +63,10 @@ _DISTINCT_ARGS_VALUES = dict(
     lora_adapter_path="/fake/adapters/x",
     lora_train_only=True,
     use_session_server="v2",
+    use_session_images=True,
+    session_image_text_only_samples="keep",
+    shared_media_dir="/fake/media",
+    run_uuid="fakerun",
     session_message_matcher="fake.matcher",
     pause_generation_mode="in_place",
     session_sample_picker_path="fake.picker",
@@ -124,6 +130,18 @@ class TestComputeSessionServerConfig:
             backend_url="http://10.0.0.2:3000",
         )
         assert config.use_session_server is flag_value
+
+    def test_the_run_media_dir_is_this_runs_directory_under_the_shared_one(self):
+        config = compute_session_server_config(
+            _make_args(), host="10.0.0.1", port=5001, instance_id="abc", backend_url="http://10.0.0.2:3000"
+        )
+        assert config.run_media_dir == "/fake/media/fakerun"
+
+    def test_no_shared_media_dir_means_no_run_media_dir(self):
+        config = compute_session_server_config(
+            _make_args(shared_media_dir=None), host="10.0.0.1", port=5001, instance_id="abc", backend_url="http://x"
+        )
+        assert config.run_media_dir is None
 
     def test_the_output_store_config_deletes_only_and_leaves_the_host_to_the_server(self):
         store_args = dict(
@@ -198,6 +216,9 @@ _COMPLETE_CONFIG_KWARGS = dict(
     lora_adapter_path=None,
     lora_train_only=False,
     use_session_server=None,
+    use_session_images=False,
+    session_image_text_only_samples="drop",
+    run_media_dir=None,
     session_message_matcher="strict",
     pause_generation_mode=None,
     session_sample_picker_path=None,

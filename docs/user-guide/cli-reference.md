@@ -327,6 +327,8 @@ contract, session behavior, and model-family selection.
 | `--session-server-external-host` | str | – | Host that peers outside the cluster reach every session server on. Keeps the session servers on the head node. Leave unset when each node sets `MILES_NODE_EXTERNAL_IP`. |
 | `--session-server-port` | int | auto | First port for standalone session-server instances. When unset, each worker port is auto-allocated. |
 | `--session-server-workers` | int | `32` | Number of instances, at least 1; an explicit `--session-server-port` anchors a consecutive range. |
+| `--use-session-images` | flag | off | v2 only: carry `image_url` parts (inline base64 data URLs) through the session server; off, image content is refused. The engine expands each image turn in token space and its prompt ids must equal the session server's expansion; each retained image is written under `--shared-media-dir` for the trainer to rebuild. Requires `--multimodal-token-space-processing`, `--shared-media-dir`, `--use-miles-router` and `--tito-model qwen3_vl`; rejects the routing and indexer replay side channels. |
+| `--session-image-text-only-samples` | `drop` / `keep` | `drop` | With `--use-session-images`: what to do with a sample whose retained tokens carry no image. `drop` avoids stalling FSDP's vision-tower all-gathers in an image-bearing batch. |
 | `--session-sample-picker-path` | `<module>.<fn>` | `drop_same_prompt_retries` | v2 only: selects leaf samples before post-processing. The default trims identical re-sends, including a re-sent first turn; `drop_rolled_back_leaves` also trims a leaf whose later sibling sent a different request. |
 | `--session-sample-postprocessor-path` | `<module>.<fn>` | `default_postprocess` | v2 only: finalizes loss masks and rewards. |
 

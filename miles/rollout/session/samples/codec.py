@@ -51,10 +51,11 @@ SAMPLES_VALUE_SPEC: dict[str, ValueSpec] = {
     "metadata": ValueSpec("json"),
 }
 
-# Tree-serving v2 adds `Sample.reward` to the wire.
+# Tree-serving v2 adds `Sample.reward` and the session's image refs to the wire.
 SAMPLES_VALUE_SPEC_V2: dict[str, ValueSpec] = {
     **SAMPLES_VALUE_SPEC,
     "reward": ValueSpec("json"),
+    "multimodal_inputs": ValueSpec("json"),
 }
 
 ROLLOUT_SAMPLING_MASK_FIELDS = ("rollout_sampling_mask",)
