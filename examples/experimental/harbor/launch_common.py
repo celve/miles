@@ -91,7 +91,13 @@ def harbor_env_vars(args) -> dict[str, str]:
     }
     if args.harbor_env_kwargs:
         env["HARBOR_ENV_KWARGS"] = args.harbor_env_kwargs
-    if spec := PROVIDER_CREDENTIALS.get(env_type):
+    if agent_server_url := os.environ.get("AGENT_SERVER_URL", "").strip():
+        # the agent server creates the sandboxes, so the provider's key and SDK are needed there, not here
+        print(
+            f"harbor: trials run on the agent server at {agent_server_url}; skipping local provider provisioning",
+            flush=True,
+        )
+    elif spec := PROVIDER_CREDENTIALS.get(env_type):
         provision_provider(env, spec, arg_path=getattr(args, spec["arg_attr"], "") or "")
     else:
         # Any other Harbor backend still passes straight through; there is just
@@ -125,6 +131,8 @@ def harbor_env_vars(args) -> dict[str, str]:
         "HARBOR_AGENT_KWARGS",
         "HARBOR_VERIFIER_IMPORT_PATH",
         "HARBOR_VERIFIER_KWARGS",
+        "AGENT_SERVER_URL",
+        "HARBOR_ADMIN_SECRET_FILE",
     ):
         if value := os.environ.get(var, "").strip():
             env[var] = value

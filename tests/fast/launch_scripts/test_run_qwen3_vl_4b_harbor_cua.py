@@ -158,3 +158,18 @@ def test_the_run_starts_with_a_clearing_sglang_or_no_cache(monkeypatch, tmp_path
 
     (command,) = [cmd for cmd in recording.commands if "ray job submit" in cmd]
     assert f'"SGLANG_VLM_CACHE_SIZE_MB": "{cache_mb}"' in command
+
+
+@pytest.mark.parametrize(("harbor_env", "warms_here"), [({}, True), ({"AGENT_SERVER_URL": "http://vm:11000"}, False)])
+def test_templates_are_warmed_where_the_sandboxes_are_created(monkeypatch, tmp_path, harbor_env, warms_here):
+    freeze_environment(monkeypatch)
+    recording = install_command_recorder(monkeypatch)
+    launcher = import_launch_script(LAUNCHER)
+    monkeypatch.setattr(
+        launcher, "_prepare", lambda args: launcher.prepare(args, harbor_env=harbor_env), raising=False
+    )
+
+    call_entrypoint(launcher, "_prepare", {"harbor_env_type": "e2b"}, tmp_path)
+
+    assert any("make_harbor_cua_tasks" in cmd for cmd in recording.commands)
+    assert any("warm_templates" in cmd for cmd in recording.commands) == warms_here

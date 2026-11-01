@@ -7,16 +7,25 @@ REAL package lives in test_harbor_contract.py.
 
 import asyncio
 import enum
+import json
 import os
+import subprocess
 import sys
+import threading
+import time
 import types
 from datetime import datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 
 import harbor_agent_function as haf
+import httpx
 import pytest
+import swe_agent_function
 
 from miles.rollout.agentic.agent_function import InfraAbort
+
+from . import EXAMPLE_DIR
 
 
 class _EnvironmentType(str, enum.Enum):
@@ -26,11 +35,26 @@ class _EnvironmentType(str, enum.Enum):
     MODAL = "modal"
 
 
+class _Record(SimpleNamespace):
+    def model_dump(self, mode=None):
+        return {"_kind": self._kind}
+
+
 def _record(name):
     def ctor(**kwargs):
-        return SimpleNamespace(_kind=name, **kwargs)
+        return _Record(_kind=name, **kwargs)
 
     return ctor
+
+
+class FakeTrialResult:
+    """``model_validate`` hands back the scripted result the stub agent server's JSON names."""
+
+    by_ref: dict = {}
+
+    @classmethod
+    def model_validate(cls, data):
+        return cls.by_ref[data["ref"]]
 
 
 class FakeTrial:
@@ -70,14 +94,19 @@ def fake_harbor(monkeypatch):
     config = types.ModuleType("harbor.models.trial.config")
     for name in ("AgentConfig", "TaskConfig", "TrialConfig", "VerifierConfig", "EnvironmentConfig"):
         setattr(config, name, _record(name))
+    result = types.ModuleType("harbor.models.trial.result")
+    result.TrialResult = FakeTrialResult
     trial_pkg = types.ModuleType("harbor.trial")
     trial_mod = types.ModuleType("harbor.trial.trial")
     trial_mod.Trial = FakeTrial
-    for mod in (harbor, models, env_type, trial_models, config, trial_pkg, trial_mod):
+    for mod in (harbor, models, env_type, trial_models, config, result, trial_pkg, trial_mod):
         monkeypatch.setitem(sys.modules, mod.__name__, mod)
     FakeTrial.created = []
     FakeTrial.result = None
     FakeTrial.run_delay_s = 0.0
+    FakeTrialResult.by_ref = {}
+    monkeypatch.setattr(swe_agent_function, "_agent_server_client", None)
+    monkeypatch.delenv("AGENT_SERVER_URL", raising=False)
     yield FakeTrial
 
 
@@ -664,3 +693,217 @@ def test_run_raises_on_a_missing_task_instead_of_scoring_zero(tasks_dir, fake_ha
     with pytest.raises(FileNotFoundError):
         run_async(haf.run("http://s/sessions/s1", [], {}, {"instance_id": "missing"}))
     assert fake_harbor.created == []
+
+
+# --- agent server ----------------------------------------------------------
+
+
+class StubAgentServer:
+    """A real HTTP ``/run`` and ``/flush`` that record each body and answer with a scripted reply."""
+
+    def __init__(self):
+        self.requests: list[tuple[str, dict]] = []
+        self.headers: list[dict] = []
+        self.status = 200
+        self.reply: dict = {}
+        self.delay_s = 0.0
+        stub = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                stub.requests.append((self.path, json.loads(self.rfile.read(int(self.headers["content-length"])))))
+                stub.headers.append({k.lower(): v for k, v in self.headers.items()})
+                time.sleep(stub.delay_s)
+                body = json.dumps(stub.reply).encode()
+                self.send_response(stub.status)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._server.daemon_threads = True
+        self.url = f"http://127.0.0.1:{self._server.server_port}"
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+
+    def answer_with(self, result, trial_dir="/srv/trials/task-1__x"):
+        FakeTrialResult.by_ref["r1"] = result
+        self.reply = {"reward": 0.0, "exit_status": "", "trial_result": {"ref": "r1"}, "trial_dir": trial_dir}
+
+    def close(self):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+@pytest.fixture
+def agent_server(monkeypatch):
+    server = StubAgentServer()
+    monkeypatch.setenv("AGENT_SERVER_URL", server.url + "/")
+    yield server
+    server.close()
+
+
+def _remote_run(metadata=None):
+    return run_async(
+        haf.run(
+            "http://100.64.0.7:30001/sessions/s1",
+            [],
+            {"temperature": 1.0},
+            {"instance_id": "task-1", "agent_name": "computer-1", **(metadata or {})},
+        )
+    )
+
+
+def test_agent_server_runs_the_built_trial_instead_of_this_process(tasks_dir, fake_harbor, agent_server, monkeypatch):
+    """The server needs the provider key, not the worker: an unresolvable one here must not stop the run."""
+    monkeypatch.delenv("E2B_API_KEY", raising=False)
+    monkeypatch.setenv("E2B_API_KEY_FILE", "/nonexistent/api_key")
+    agent_server.answer_with(_verdict(reward=1.0))
+
+    out = _remote_run({"session_server_id": "10.0.0.5:30001", "session_server_instance_id": "inst-1"})
+
+    assert fake_harbor.created == []
+    assert out["reward"] == 1.0 and out["exit_status"] == "Submitted"
+    assert out["trial_dir"] == "/srv/trials/task-1__x"
+    ((path, body),) = agent_server.requests
+    assert path == "/run"
+    assert body["instance_id"] == "task-1" and body["agent_name"] == "computer-1"
+    assert body["base_url"] == "http://100.64.0.7:30001/sessions/s1/v1"
+    assert body["trial_config"] == {"_kind": "TrialConfig"}
+    # the server's heartbeat checks the session server it can reach, i.e. the one base_url names
+    assert body["session_server_id"] == "100.64.0.7:30001"
+    assert body["session_server_instance_id"] == "inst-1"
+
+
+def test_the_remote_client_is_the_agent_server_examples_keepalive_client(tasks_dir, fake_harbor, monkeypatch):
+    used = []
+    monkeypatch.setattr(swe_agent_function, "_get_agent_server_client", lambda: used.append(1) or _Unreachable())
+    monkeypatch.setenv("AGENT_SERVER_URL", "http://127.0.0.1:9")
+
+    with pytest.raises(InfraAbort):
+        _remote_run()
+
+    assert used == [1]
+
+
+class _Unreachable:
+    async def post(self, *args, **kwargs):
+        raise httpx.ConnectError("no server")
+
+
+def test_the_module_imports_by_package_without_the_agent_server_example_on_the_path():
+    """warm_templates and trial_driver import it package-qualified, from a repo-only path."""
+    repo = EXAMPLE_DIR.parents[2]
+    example_dirs = {str(EXAMPLE_DIR), str(EXAMPLE_DIR.parents[1] / "swe-agent-harbor-docker")}
+    path = [str(repo), *(p for p in sys.path if p and p not in example_dirs)]
+
+    subprocess.run(
+        [sys.executable, "-c", "import examples.experimental.harbor.harbor_agent_function"],
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(path)},
+        cwd=repo.parent,
+        check=True,
+    )
+
+
+def test_agent_server_results_keep_the_in_process_discards(tasks_dir, fake_harbor, agent_server):
+    agent_server.answer_with(_failed_trial("EnvironmentStartTimeoutError", agent_setup=True))
+
+    with pytest.raises(InfraAbort) as raised:
+        _remote_run()
+
+    assert raised.value.exit_status == "AgentSetupFailed"
+
+
+def test_an_unreachable_agent_server_discards_the_sample(tasks_dir, fake_harbor, agent_server):
+    agent_server.close()
+
+    with pytest.raises(InfraAbort) as raised:
+        _remote_run()
+
+    assert raised.value.exit_status == "AgentServerUnreachable"
+
+
+def test_an_agent_server_error_status_discards_the_sample(tasks_dir, fake_harbor, agent_server):
+    agent_server.status = 500
+
+    with pytest.raises(InfraAbort) as raised:
+        _remote_run()
+
+    assert raised.value.exit_status == "AgentServerUnreachable"
+
+
+@pytest.mark.parametrize("exit_status", ["Error: NoResult", "Flushed"])
+def test_a_trial_the_agent_server_lost_is_discarded(tasks_dir, fake_harbor, agent_server, exit_status):
+    agent_server.reply = {"reward": 0.0, "exit_status": exit_status}
+
+    with pytest.raises(InfraAbort) as raised:
+        _remote_run()
+
+    assert raised.value.exit_status == "AgentServerLost"
+
+
+def test_a_trial_that_raised_on_the_agent_server_scores_zero(tasks_dir, fake_harbor, agent_server):
+    """The same verdict as a Trial that raises in this process."""
+    agent_server.reply = {"reward": 0.0, "exit_status": "Error: RuntimeError"}
+
+    out = _remote_run()
+
+    assert out["reward"] == 0.0 and out["exit_status"] == "AgentError"
+
+
+# what celve/harbor's agent server answers: a missing task dir, an unsafe id, a class or kwarg the config names
+@pytest.mark.parametrize("exit_status", ["TaskNotFound", "InvalidInstanceId", "TrialConfigRefused: ValueError"])
+def test_an_agent_server_setup_error_discards_the_sample(tasks_dir, fake_harbor, agent_server, exit_status):
+    """Discarded, not scored: Miles's consecutive-abort guard then stops a run every sample of which is refused."""
+    agent_server.reply = {"reward": 0.0, "exit_status": exit_status}
+
+    with pytest.raises(InfraAbort, match=exit_status) as raised:
+        _remote_run()
+
+    assert raised.value.exit_status == "AgentServerRefused"
+
+
+def test_an_unreadable_trial_result_discards_the_sample(tasks_dir, fake_harbor, agent_server, monkeypatch):
+    def unreadable(data):
+        raise ValueError("unknown field")
+
+    agent_server.answer_with(_verdict())
+    monkeypatch.setattr(FakeTrialResult, "model_validate", staticmethod(unreadable))
+
+    with pytest.raises(InfraAbort) as raised:
+        _remote_run()
+
+    assert raised.value.exit_status == "AgentServerResultUnreadable"
+
+
+def test_an_agent_server_trial_past_the_cap_scores_zero(tasks_dir, fake_harbor, agent_server, monkeypatch):
+    agent_server.answer_with(_verdict())
+    agent_server.delay_s = 2
+    monkeypatch.setenv("AGENT_TRIAL_TIMEOUT", "0")
+
+    assert _remote_run()["exit_status"] == "TimeLimitExceeded"
+
+
+def test_abort_flushes_the_agent_server_for_each_session_server(fake_harbor, agent_server, monkeypatch):
+    args = SimpleNamespace(session_server_instances=[SimpleNamespace(instance_id="inst-1")])
+
+    run_async(haf.abort(args))
+
+    assert agent_server.requests == [("/flush", {"session_server_instance_id": "inst-1"})]
+
+
+def test_abort_sends_the_admin_secret_read_from_its_file(fake_harbor, agent_server, monkeypatch, tmp_path):
+    (secret := tmp_path / "harbor_admin").write_text("s3cret\n")
+    monkeypatch.setenv("HARBOR_ADMIN_SECRET", "")  # abort fills it in; this restores it unset afterwards
+    monkeypatch.setenv("HARBOR_ADMIN_SECRET_FILE", str(secret))
+
+    run_async(haf.abort(SimpleNamespace(session_server_instances=[SimpleNamespace(instance_id="inst-1")])))
+
+    assert agent_server.headers[0]["authorization"] == "Bearer s3cret"
+
+
+def test_abort_is_a_no_op_without_an_agent_server(fake_harbor):
+    run_async(haf.abort(SimpleNamespace(session_server_instances=[SimpleNamespace(instance_id="inst-1")])))

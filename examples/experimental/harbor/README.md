@@ -110,6 +110,29 @@ Harbor's `computer-1` screenshot agent trains with Qwen3-VL through
 `scripts/run_qwen3_vl_4b_harbor_cua.py --rollout-path session`, which passes
 `--use-session-server v2 --use-session-images --tito-model qwen3_vl`.
 
+## 5. Optional: run the trials on a CPU box
+
+Host-process harnesses (`computer-1`, `terminus-2`) and their verifiers spend
+the rollout host's CPUs, one Python process per trial. To move that work off the
+GPU box, run Harbor's agent server (`miles_agent_server.py` on
+`celve/harbor`'s `LIN-2510/run-the-cua-agent-harness-on-a` branch) on a CPU
+machine and set `AGENT_SERVER_URL` for the rollout. The agent function still
+builds each trial from its bindings and env vars here, sends it in `/run`'s
+`trial_config`, and maps the returned `TrialResult` exactly as it would
+in-process. Use `--custom-agent-function-mode inline`, since each call is now
+one HTTP request.
+
+On the CPU box, the server needs:
+
+- `HARBOR_TASKS_DIR` with the same task dirs;
+- the sandbox key (`E2B_API_KEY` or `E2B_API_KEY_FILE`, plus `E2B_API_URL`/`E2B_SANDBOX_URL` for a self-hosted service);
+- every agent and verifier class the trial config names, importable on its `PYTHONPATH`.
+
+The box must reach the session servers at the address the agents get:
+`--session-server-external-host` (and `--session-server-port` for a fixed range).
+The GPU box must reach `AGENT_SERVER_URL`. A `subproc` agent's dashboard reports
+do not cross the HTTP hop.
+
 ## Validation
 
 This README's command has been run end to end: 8×H200, real training mode with
