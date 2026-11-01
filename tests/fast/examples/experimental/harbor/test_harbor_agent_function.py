@@ -978,6 +978,11 @@ class FakeAsyncSandbox:
             async def write(self, path, data):
                 sandbox.written[path] = data
 
+            async def read(self, path, format="text"):
+                if path not in sandbox.written:
+                    raise FileNotFoundError(path)
+                return sandbox.written[path].encode()
+
         self.files = Files()
 
     @classmethod
@@ -1084,3 +1089,27 @@ def test_a_fixed_server_and_a_sandbox_template_together_stop_the_run(tasks_dir, 
 
     with pytest.raises(ValueError, match="not both"):
         _remote_run()
+
+
+def test_a_sandbox_trials_record_is_copied_out_before_the_kill(
+    tasks_dir, fake_harbor, job_server, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("AGENT_SERVER_SANDBOX_TRIALS_DIR", str(tmp_path / "records"))
+    job_server.finish_with(_verdict(reward=1.0))
+    real_create = FakeAsyncSandbox.create
+
+    async def create_with_record(template, **kwargs):
+        sandbox = await real_create(template, **kwargs)
+        sandbox.written["/opt/t/x/result.json"] = '{"reward": 1}'
+        sandbox.written["/opt/t/x/agent/timings.jsonl"] = '{"span": "model"}\n'
+        return sandbox
+
+    monkeypatch.setattr(FakeAsyncSandbox, "create", create_with_record)
+
+    out = _remote_run()
+
+    assert out["trial_dir"] == str(tmp_path / "records" / "x")
+    assert (tmp_path / "records" / "x" / "result.json").read_text() == '{"reward": 1}'
+    assert (tmp_path / "records" / "x" / "agent" / "timings.jsonl").read_text() == '{"span": "model"}\n'
+    assert not (tmp_path / "records" / "x" / "trial.log").exists()
+    assert FakeAsyncSandbox.killed == ["sbx-0"]

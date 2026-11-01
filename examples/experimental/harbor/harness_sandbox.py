@@ -15,7 +15,8 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -33,6 +34,8 @@ _HEALTH_DEADLINE_S = 120.0
 _TRANSIENT_ATTEMPTS = 5
 _TRANSIENT_STATUSES = {502, 503, 504}
 _KILL_ATTEMPTS = 3
+# what a trial leaves that analysis reads (LIN-2510's ab_report), small enough to copy before the kill
+_TRIAL_RECORD_FILES = ("result.json", "config.json", "trial.log", "agent/timings.jsonl")
 
 
 @dataclass(frozen=True)
@@ -40,6 +43,7 @@ class SandboxServer:
     sandbox_id: str
     base_url: str
     headers: dict[str, str]
+    sandbox: Any = field(repr=False, compare=False)
 
 
 def _owner() -> str:
@@ -85,6 +89,7 @@ async def open_server(template: str, label: str, lifetime_s: int) -> AsyncIterat
             sandbox_id=sandbox.sandbox_id,
             base_url=gateway,
             headers={"E2b-Sandbox-Id": sandbox.sandbox_id, "E2b-Sandbox-Port": str(SERVER_PORT)},
+            sandbox=sandbox,
         )
         try:
             await sandbox.files.write(BOOT_CONFIG, json.dumps({"env": {"E2B_API_KEY": api_key}}))
@@ -164,3 +169,17 @@ async def _call(server: SandboxServer, client: httpx.AsyncClient, method: str, p
             error = httpx.HTTPStatusError(f"{response.status_code}", request=response.request, response=response)
         await asyncio.sleep(min(2**attempt, 10))
     raise InfraAbort("AgentServerUnreachable", f"{where}: {method} {path}: {error!r}") from error
+
+
+async def copy_trial_record(server: SandboxServer, trial_dir: str, local_root: Path) -> Path:
+    """Copy the trial's record files out of its sandbox into ``local_root/<trial name>``; missing ones are skipped."""
+    local = local_root / Path(trial_dir).name
+    for name in _TRIAL_RECORD_FILES:
+        try:
+            data = await server.sandbox.files.read(f"{trial_dir}/{name}", format="bytes")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"trial record {name} not copied from sandbox {server.sandbox_id}: {exc!r}")
+            continue
+        (local / name).parent.mkdir(parents=True, exist_ok=True)
+        (local / name).write_bytes(bytes(data))
+    return local

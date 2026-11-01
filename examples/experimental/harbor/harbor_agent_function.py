@@ -79,6 +79,10 @@ Env vars (read on the rollout worker):
   AGENT_SERVER_SANDBOX_OWNER
                          the ``owner`` metadata on those sandboxes (default:
                          this host's name), for finding the ones a run left
+  AGENT_SERVER_SANDBOX_TRIALS_DIR
+                         copy each trial's record files (result.json,
+                         config.json, trial.log, agent/timings.jsonl) here
+                         before its sandbox is killed
 
 Failure semantics: a verdict is returned as-is. A trial the policy cannot have
 failed is discarded with ``InfraAbort``: one that failed before its agent
@@ -646,6 +650,11 @@ async def _run_on_harness_sandbox(template: str, config, metadata: dict[str, Any
     lifetime_s = _trial_timeout_s() + 600
     async with harness_sandbox.open_server(template, str(instance_id), lifetime_s) as server:
         payload = await harness_sandbox.run_job(server, request)
+        if payload.get("trial_dir") and (records := os.getenv("AGENT_SERVER_SANDBOX_TRIALS_DIR", "").strip()):
+            # the sandbox and its trial dir go when the block exits; the reply names the copy instead
+            payload["trial_dir"] = str(
+                await harness_sandbox.copy_trial_record(server, payload["trial_dir"], Path(records))
+            )
     return _trial_from_reply(f"harness sandbox {server.sandbox_id}", payload, instance_id)
 
 
