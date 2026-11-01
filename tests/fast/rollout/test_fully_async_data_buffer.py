@@ -447,12 +447,28 @@ class TestAdmission:
 
         assert not under_test.buffer.admits(in_flight_groups=2)
 
-    def test_a_composed_buffer_admits_only_while_every_policy_does(self) -> None:
-        multi = _make_multi_buffer(max_weight_staleness=2, rollout_batch_size=1, global_batch_size=GROUP_SIZE)
-        multi._inners["verifier"]._buffer.append(DataBufferInput(prompt_group=[], group=_make_finished_group(1)))
+    async def test_two_drains_replace_the_optimizer_step_estimate_with_the_version_step_they_show(self) -> None:
+        under_test = _make_admission_buffer(max_weight_staleness=1, steps_per_drain=2)
+        for version in (0, 1):
+            for group_index in (1, 2):
+                await _put(under_test.buffer, _make_finished_group(10 * version + group_index, weight_version=version))
+            await under_test.buffer.get(num_groups=2, current_version=version)
 
-        assert multi._inners["solver"].admits(in_flight_groups=1)
-        assert not multi.admits(in_flight_groups=1)
+        assert under_test.buffer.admits(in_flight_groups=1)
+        assert not under_test.buffer.admits(in_flight_groups=2)
+
+    async def test_a_composed_buffer_never_holds_the_shared_producer_back(self) -> None:
+        multi = _make_multi_buffer(max_weight_staleness=2, rollout_batch_size=1, global_batch_size=GROUP_SIZE)
+        for group_index in (1, 2):
+            await multi.put(
+                DataBufferInput(prompt_group=[], group=_make_policy_group(group_index, "solver", "solver"))
+            )
+        waiting = asyncio.create_task(multi.get(num_groups=1, current_version=0, trainer_model_id="verifier"))
+        await _settle()
+
+        assert not multi._inners["solver"].admits(in_flight_groups=0)
+        assert multi.admits(in_flight_groups=0)
+        waiting.cancel()
 
 
 # ============================== batched get ===============================

@@ -605,6 +605,20 @@ async def test_the_producer_starts_only_the_groups_the_staleness_cap_lets_the_ne
     assert data_source.num_get_calls == 6
 
 
+async def test_a_backend_publishing_one_version_per_update_gets_the_lookahead_its_cap_allows(monkeypatch):
+    data_source = FakeDataSource()
+    engine = {"version": 0}
+    args = make_args(rollout_batch_size=2, max_weight_staleness=1, global_batch_size=2)
+    fn = make_fn(monkeypatch, args, data_source, generate=make_version_stamping_generate(engine))
+
+    await fn(train_input(rollout_id=0, weight_version=0))
+    engine["version"] = 1
+    await fn(train_input(rollout_id=1, weight_version=1))
+    await asyncio.sleep(0.05)
+
+    assert data_source.num_get_calls == 6
+
+
 async def test_a_producer_ahead_of_the_trainer_generates_no_group_that_goes_stale(monkeypatch):
     engine = {"version": 0}
     args = make_args(

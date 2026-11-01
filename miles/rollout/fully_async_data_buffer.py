@@ -154,7 +154,9 @@ class DefaultDataBuffer(DataBuffer):
         are discarded directly.
     (3) admission: with ``--max-weight-staleness`` set, the producer starts a
         group only while the groups in flight and buffered fit in the batches
-        that will be consumed within that staleness, as AReaL does.
+        that will be consumed within that staleness, as AReaL does. A drain's
+        version step is estimated from the optimizer steps per drain until two
+        drains show the one the trainer publishes.
     """
 
     def __init__(self, input: DataBufferConstructorInput):
@@ -174,7 +176,12 @@ class DefaultDataBuffer(DataBuffer):
         self._cond = asyncio.Condition()
         self._current_version: int | None = None
         self._staleness_measure = _STALENESS_MEASURES[args.weight_staleness_measure]
-        self._admission_drains = _admission_drains(args)
+        self._estimated_versions_per_drain = (
+            get_steps_per_rollout(args) * args.update_weights_interval
+            if args.max_weight_staleness is not None
+            else None
+        )
+        self._observed_versions_per_drain: int | None = None
         self._get_pending = False
 
         self._metric_gatherer = MetricGatherer()
@@ -225,10 +232,11 @@ class DefaultDataBuffer(DataBuffer):
         return True
 
     def admits(self, *, in_flight_groups: int) -> bool:
-        if self._admission_drains is None:
+        if (limit := self._args.max_weight_staleness) is None:
             return True
+        versions_per_drain = self._observed_versions_per_drain or self._estimated_versions_per_drain
         # A drain follows each weight update, so only a waiting get takes groups of this version without lag.
-        batches = self._admission_drains + int(self._get_pending)
+        batches = limit // versions_per_drain + int(self._get_pending)
         return in_flight_groups + len(self._buffer) < batches * self._args.rollout_batch_size
 
     async def get(self, *, num_groups: int, current_version: int | None = None, **_) -> list[DataBufferInput]:
@@ -240,7 +248,7 @@ class DefaultDataBuffer(DataBuffer):
 
     async def _get(self, *, num_groups: int, current_version: int | None) -> list[DataBufferInput]:
         if current_version is not None:
-            self._current_version = current_version
+            self._observe_version(current_version)
         async with self._cond:
             deadline = time.monotonic() + NO_PROGRESS_WARN_SECS
             while True:
@@ -266,6 +274,12 @@ class DefaultDataBuffer(DataBuffer):
                     self._metric_consumed_staleness.append(staleness)
                 self._record_selected_version_stats(version_stats, current_version)
             return entries
+
+    def _observe_version(self, current_version: int) -> None:
+        if self._current_version is not None and current_version > self._current_version:
+            step = current_version - self._current_version
+            self._observed_versions_per_drain = max(step, self._observed_versions_per_drain or 0)
+        self._current_version = current_version
 
     def _drop_stale(self, current_version: int | None) -> None:
         limit = self._args.max_weight_staleness
@@ -361,14 +375,6 @@ _STALENESS_MEASURES = {
 }
 
 
-def _admission_drains(args: Namespace) -> int | None:
-    """Drains after the current one that a group started now may still reach within --max-weight-staleness."""
-    if args.max_weight_staleness is None:
-        return None
-    versions_per_drain = get_steps_per_rollout(args) * args.update_weights_interval
-    return args.max_weight_staleness // versions_per_drain
-
-
 # ============================ multi policy buffer =============================
 
 
@@ -376,7 +382,8 @@ class DefaultMultiDataBuffer(DataBuffer):
     """One plain ``DefaultDataBuffer`` per policy model, composed.
 
     Each policy consumes at its own pace, so each gets its own capacity, staleness accounting and
-    metrics, and the single-policy buffer stays untouched.
+    metrics, and the single-policy buffer stays untouched. Admission stays permissive: a policy
+    holding the shared producer back can starve another that a save or eval barrier waits on.
     """
 
     def __init__(self, input: DataBufferConstructorInput):
@@ -400,9 +407,6 @@ class DefaultMultiDataBuffer(DataBuffer):
 
     def get_metrics(self, trainer_model_id: str | None = None) -> dict[str, float]:
         return self._inner_of(trainer_model_id).get_metrics(trainer_model_id=trainer_model_id)
-
-    def admits(self, *, in_flight_groups: int) -> bool:
-        return all(inner.admits(in_flight_groups=in_flight_groups) for inner in self._inners.values())
 
     def state_dict(self) -> Any:
         logger.warning(MULTI_POLICY_CHECKPOINT_UNSUPPORTED)
