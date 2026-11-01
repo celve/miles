@@ -554,6 +554,7 @@ class MegatronTrainRayActor(TrainRayActor):
         num_microbatches: list[int],
         rollout_id: int,
         store_prefix: str = "",
+        first_step: int = 0,
     ) -> dict[str, list[torch.Tensor]]:
 
         with timer(f"{store_prefix}log_probs"):
@@ -567,6 +568,7 @@ class MegatronTrainRayActor(TrainRayActor):
                 store_prefix=store_prefix,
                 fp32_output=False,
                 use_rollout_sampling_mask=store_prefix == "" and self.args.use_sampling_support_replay,
+                first_step=first_step,
             )
 
     @with_logs
@@ -675,10 +677,14 @@ class MegatronTrainRayActor(TrainRayActor):
         data_iterator, num_microbatches = get_data_iterator(self.args, self.model, rollout_data)
         num_optimizer_steps = len(num_microbatches)
         skip_actor_forward_only = self.args.skip_actor_forward_only
+        # Later steps train on weights the first step moved, so their old-policy log-probs still need the pass.
+        score_later_steps = skip_actor_forward_only and num_optimizer_steps > 1 and not self.args.use_rollout_logprobs
         if skip_actor_forward_only:
             option = "--skip-actor-forward-only"
-            assert num_optimizer_steps == 1, f"{option} requires 1 optimizer step, got {num_optimizer_steps}"
             assert rollout_data.get("log_probs") is None, f"{option} requires rollout data without actor log probs"
+            assert not (score_later_steps and any(m.enabled for m in all_replay_managers)), (
+                f"{option} with {num_optimizer_steps} optimizer steps does not support replay managers"
+            )
 
         for m in all_replay_managers:
             if self._use_rollout_replay(m):
@@ -766,6 +772,11 @@ class MegatronTrainRayActor(TrainRayActor):
                 self.rollout_data_postprocess(self.args)
 
             log_rollout_data(rollout_id, self.args, rollout_data)
+
+            if score_later_steps:
+                rollout_data.update(
+                    self._compute_log_prob(data_iterator, num_microbatches, rollout_id=rollout_id, first_step=1)
+                )
 
             # Train
             num_rollouts = get_num_rollouts(self.args, rollout_data, num_optimizer_steps)

@@ -571,6 +571,16 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="The method to convert megatron weights to hugging face weights for SGLang.",
             )
             parser.add_argument(
+                "--freeze-vision-model",
+                action="store_true",
+                default=False,
+                help=(
+                    "Train with the vision tower frozen, under --megatron-to-hf-mode bridge on a provider that "
+                    "supports it (Qwen-VL). Its merger and DeepStack mergers stay trainable. This changes what "
+                    "the policy learns, unlike the trainer-speed flags."
+                ),
+            )
+            parser.add_argument(
                 "--dsa-attention-backend",
                 choices=["megatron", "tilelang"],
                 default="tilelang",
@@ -1931,8 +1941,9 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help=(
                     "Skip the standalone Megatron actor forward-only pass. With --use-rollout-logprobs, "
                     "those log-probs remain the old-policy baseline; otherwise detached training log-probs "
-                    "are reused and the actor importance log-ratio is exactly 0. This requires a single "
-                    "optimizer step. The skipped pass's rollout/log_probs metric is not emitted. "
+                    "are reused and the actor importance log-ratio is exactly 0. With several optimizer "
+                    "steps per rollout only the first step's samples skip the pass; the later steps' are "
+                    "still scored before training. The skipped pass's rollout/log_probs metric is not emitted. "
                     "Custom model providers and the before-train-step hook must not make the training "
                     "forward differ from the skipped forward."
                 ),
@@ -4398,6 +4409,12 @@ def miles_validate_args(args):
     if args.skip_actor_forward_only:
         validate_skip_actor_forward_only(args)
 
+    assert not args.freeze_vision_model or (
+        args.train_backend == "megatron"
+        and args.megatron_to_hf_mode == "bridge"
+        and args.custom_model_provider_path is None
+    ), "--freeze-vision-model needs --train-backend megatron with --megatron-to-hf-mode bridge and no custom model provider"
+
     validate_score_centering_args(args)
 
     _maybe_apply_dumper_overrides(args)
@@ -4461,17 +4478,6 @@ def validate_skip_actor_forward_only(args) -> None:
         if enabled
     ]
     assert not incompatible_options, f"{option} is incompatible with: {', '.join(incompatible_options)}"
-
-    assert args.num_steps_per_rollout in (None, 1), (
-        f"{option} requires exactly one optimizer step per rollout; "
-        f"got --num-steps-per-rollout {args.num_steps_per_rollout}"
-    )
-    if not args.use_dynamic_global_batch_size and not args.multi_lora:
-        samples_per_rollout = args.rollout_batch_size * args.n_samples_per_prompt
-        assert args.global_batch_size == samples_per_rollout, (
-            f"{option} requires exactly one optimizer step for {samples_per_rollout} rollout samples; "
-            f"got --global-batch-size {args.global_batch_size}"
-        )
 
 
 def validate_async_off_policy_correction(args) -> None:
