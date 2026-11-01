@@ -54,6 +54,16 @@ _UNSUPPORTED = [
     ("routing replay or true on-policy mode", lambda a: a.use_rollout_routing_replay or a.true_on_policy_mode),
     ("--debug-train-only or --debug-rollout-only", lambda a: a.debug_train_only or a.debug_rollout_only),
     ("--ci-test: its version readback and sample-ownership audit read token fields", lambda a: a.ci_test),
+    (
+        "--optimizer-cpu-offload: the diffusion trainer keeps AdamW on the GPU",
+        lambda a: a.optimizer_cpu_offload,
+    ),
+    (
+        "debug dumps (--save-debug-rollout-data, --save-debug-train-data, --dump-details)",
+        lambda a: a.save_debug_rollout_data is not None
+        or a.save_debug_train_data is not None
+        or a.dump_details is not None,
+    ),
 ]
 
 

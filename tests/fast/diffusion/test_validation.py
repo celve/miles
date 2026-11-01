@@ -20,6 +20,8 @@ def _supported(**overrides):
         n_samples_per_prompt=16,
         global_batch_size=64,
         hf_checkpoint="/models/stable-diffusion-3.5-medium",
+        # An FSDP backend flag, absent from the shared parser's defaults.
+        optimizer_cpu_offload=False,
         **_HOOKS,
     )
     return Namespace(**(defaults | recipe | overrides))
@@ -60,11 +62,22 @@ def test_the_recipe_layout_passes_and_resolves_the_family_defaults():
         (dict(true_on_policy_mode=True), "on-policy"),
         (dict(debug_rollout_only=True), "debug"),
         (dict(ci_test=True), "ci-test"),
+        (dict(optimizer_cpu_offload=True), "optimizer-cpu-offload"),
+        (dict(save_debug_rollout_data="/dump/{rollout_id}.pt"), "debug dumps"),
+        (dict(save_debug_train_data="/dump/{rollout_id}_{rank}.pt"), "debug dumps"),
+        (dict(dump_details="/dump"), "debug dumps"),
     ],
 )
 def test_each_unsupported_option_is_rejected_at_startup(override, message):
     with pytest.raises(ValueError, match=message):
         validate_diffusion_args(_supported(**override))
+
+
+def test_the_fsdp_parse_rejects_optimizer_cpu_offload_for_diffusion():
+    from tests.fast.fixtures.args_fixtures import parse_fsdp_test_config
+
+    with pytest.raises(ValueError, match="optimizer-cpu-offload"):
+        parse_fsdp_test_config("--model-kind", "diffusion", "--optimizer-cpu-offload")
 
 
 def test_a_foreign_hook_is_rejected():

@@ -1,7 +1,12 @@
+import dataclasses
 import json
 import shlex
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
+import pytest
+
+from miles.diffusion import engine_main
 from miles.diffusion.engine import compute_diffusion_engine_launch_cmd
 
 
@@ -65,3 +70,38 @@ def _engine_spec_for(tmp_path, model_kind):
 def test_only_diffusion_engines_drop_the_launch_gate(tmp_path):
     assert "gate" in {port.name for port in _engine_spec_for(tmp_path, "text").port_infos}
     assert "gate" not in {port.name for port in _engine_spec_for(tmp_path, "diffusion").port_infos}
+
+
+@dataclasses.dataclass
+class _ServerArgs:
+    model_path: str = ""
+    lora_merge_mode: str = ""
+
+    @classmethod
+    def from_kwargs(cls, **kwargs):
+        return cls(**kwargs)
+
+
+def _run_engine_main(monkeypatch, server_args):
+    launched = []
+    launch_module = ModuleType("sglang.multimodal_gen.runtime.launch_server")
+    launch_module.launch_server = launched.append
+    args_module = ModuleType("sglang.multimodal_gen.runtime.server_args")
+    args_module.ServerArgs = _ServerArgs
+    monkeypatch.setitem(sys.modules, launch_module.__name__, launch_module)
+    monkeypatch.setitem(sys.modules, args_module.__name__, args_module)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3")
+    monkeypatch.setattr(sys, "argv", ["engine_main", "--base-gpu-id", "0", "--server-args", json.dumps(server_args)])
+    engine_main.main()
+    return launched
+
+
+def test_an_engine_arg_multimodal_gen_lacks_fails_naming_it(monkeypatch):
+    with pytest.raises(ValueError, match="mem_fraction_static"):
+        _run_engine_main(monkeypatch, {"model_path": "/m", "mem_fraction_static": 0.8})
+
+
+def test_only_the_key_miles_injects_into_every_group_is_filtered(monkeypatch):
+    launched = _run_engine_main(monkeypatch, {"model_path": "/m", "enable_memory_saver": False})
+
+    assert launched == [_ServerArgs(model_path="/m")]
