@@ -125,6 +125,8 @@ def harbor_env_vars(args) -> dict[str, str]:
         "HARBOR_AGENT_KWARGS",
         "HARBOR_VERIFIER_IMPORT_PATH",
         "HARBOR_VERIFIER_KWARGS",
+        "AGENT_SERVER_URL",
+        "HARBOR_ADMIN_SECRET_FILE",
     ):
         if value := os.environ.get(var, "").strip():
             env[var] = value

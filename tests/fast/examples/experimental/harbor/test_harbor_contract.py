@@ -27,6 +27,8 @@ from harbor.models.environment_type import EnvironmentType  # noqa: E402
 from harbor.models.trial.config import TrialConfig  # noqa: E402
 from harbor.trial.trial import Trial  # noqa: E402
 
+from miles.rollout.agentic.agent_function import InfraAbort  # noqa: E402
+
 _SESSION_SAMPLING = {"temperature": 1.0, "top_p": 1.0, "top_k": -1, "max_tokens": 512}
 
 
@@ -192,3 +194,107 @@ def test_the_built_config_survives_the_agent_server_json_round_trip(tasks_dir, m
     assert received.agent.import_path == "lin2399_agent:LiteOSWorldComputer1"
     assert received.verifier.import_path == "harbor_liteosworld.verifier:LiteOSWorldVerifier"
     assert received.environment.kwargs == {"prebuilt_template_id": "lin2139-liteosworld"}
+
+
+def _recorded(cfg, *, exception=None, agent_started=False, reward=None):
+    from datetime import UTC, datetime
+
+    from harbor.models.task.id import LocalTaskId
+    from harbor.models.trial.result import AgentInfo, ExceptionInfo, TimingInfo, TrialResult
+    from harbor.models.verifier.result import VerifierResult
+
+    now = datetime.now(UTC)
+    stamp = TimingInfo(started_at=now, finished_at=now)
+    return TrialResult(
+        task_name="task-1",
+        trial_name=cfg.trial_name,
+        trial_uri="file:///srv/trials/task-1",
+        task_id=LocalTaskId(path=cfg.task.path),
+        task_checksum="0",
+        config=cfg,
+        agent_info=AgentInfo(name="computer-1", version="1"),
+        exception_info=(
+            ExceptionInfo(exception_type=exception, exception_message="boom", exception_traceback="", occurred_at=now)
+            if exception
+            else None
+        ),
+        verifier_result=VerifierResult(rewards={"reward": reward}) if reward is not None else None,
+        started_at=now,
+        finished_at=now,
+        environment_setup=stamp,
+        agent_setup=stamp if agent_started else None,
+        agent_execution=stamp if agent_started else None,
+    )
+
+
+@pytest.fixture
+def agent_server(monkeypatch):
+    """A real HTTP /run that answers with the TrialResult JSON a test puts in ``reply``."""
+    reply: dict = {}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers["content-length"]))
+            body = json.dumps(reply).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    monkeypatch.setenv("AGENT_SERVER_URL", f"http://127.0.0.1:{server.server_port}")
+    monkeypatch.setattr(haf, "_agent_server_client", None, raising=False)
+    yield reply
+    server.shutdown()
+    server.server_close()
+
+
+def _run_remote(reply, result):
+    reply.update(
+        {"reward": 0.0, "exit_status": "", "trial_result": result.model_dump(mode="json"), "trial_dir": "/srv/x"}
+    )
+    return asyncio.run(
+        haf.run(
+            "http://trainer:30000/sessions/s1",
+            [],
+            _SESSION_SAMPLING,
+            {"instance_id": "task-1", "agent_name": "computer-1"},
+        )
+    )
+
+
+def _built(tasks_dir):
+    return haf.build_trial_config(
+        {"instance_id": "task-1", "agent_name": "computer-1"}, "http://trainer:30000/sessions/s1/v1", _SESSION_SAMPLING
+    )
+
+
+def test_a_serialized_sandbox_failure_is_discarded_through_the_agent_server(tasks_dir, agent_server):
+    with pytest.raises(InfraAbort) as raised:
+        _run_remote(agent_server, _recorded(_built(tasks_dir), exception="EnvironmentStartTimeoutError"))
+
+    assert raised.value.exit_status == "SandboxUnavailable"
+
+
+def test_a_serialized_lost_desktop_is_discarded_through_the_agent_server(tasks_dir, agent_server):
+    with pytest.raises(InfraAbort) as raised:
+        _run_remote(agent_server, _recorded(_built(tasks_dir), exception="RuntimeRequestError", agent_started=True))
+
+    assert raised.value.exit_status == "SandboxLost"
+
+
+def test_a_serialized_policy_timeout_scores_zero_through_the_agent_server(tasks_dir, agent_server):
+    out = _run_remote(agent_server, _recorded(_built(tasks_dir), exception="AgentTimeoutError", agent_started=True))
+
+    assert out["reward"] == 0.0 and out["exit_status"] == "TimeLimitExceeded"
+
+
+def test_a_serialized_verdict_keeps_its_reward_through_the_agent_server(tasks_dir, agent_server):
+    out = _run_remote(agent_server, _recorded(_built(tasks_dir), agent_started=True, reward=1.0))
+
+    assert out == {**out, "reward": 1.0, "exit_status": "Submitted", "trial_dir": "/srv/x"}

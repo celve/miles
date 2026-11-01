@@ -66,6 +66,9 @@ Env vars (read on the rollout worker):
                          returns the ``TrialResult``. The sandbox provider key,
                          the task dirs and the agent/verifier classes are then
                          needed on the server, not here.
+  HARBOR_ADMIN_SECRET_FILE
+                         the agent server's admin secret, by path, for the
+                         ``/flush`` that ``abort`` sends
 
 Failure semantics: a verdict is returned as-is. A trial the policy cannot have
 failed is discarded with ``InfraAbort``: one that failed before its agent
@@ -580,7 +583,11 @@ _agent_server_client: httpx.AsyncClient | None = None
 
 
 class AgentServerRefused(Exception):
-    """The agent server refused the trial for a reason that fails every sample (missing task dir, bad import)."""
+    """The agent server could not set the trial up (its task dir, Harbor, or a class or kwarg the config names).
+
+    These fail every sample alike, so the run stops. In-process, the same Trial.create failure scores 0 instead:
+    there the worker's environment is the one the bindings were checked against, and on the server it need not be.
+    """
 
 
 def _agent_server_url() -> str | None:
@@ -699,6 +706,8 @@ async def abort(args) -> None:
     """Flush the agent server's trials for this run's session servers when Miles aborts a rollout."""
     if _agent_server_url() is None:
         return
+    if not os.getenv("HARBOR_ADMIN_SECRET") and (secret_file := os.getenv("HARBOR_ADMIN_SECRET_FILE")):
+        os.environ["HARBOR_ADMIN_SECRET"] = Path(secret_file).expanduser().read_text().strip()
     # the agent-server example's module, which the reward hook (generate.py) already puts on the path
     from swe_agent_function import abort as flush_agent_server
 

@@ -106,6 +106,19 @@ def test_agent_and_verifier_classes_are_forwarded_with_their_kwargs(monkeypatch)
     assert {var: env[var] for var in knobs} == knobs
 
 
+def test_the_agent_server_and_its_flush_secret_path_reach_the_workers(monkeypatch):
+    monkeypatch.setenv("E2B_API_KEY", "e2b_x")
+    monkeypatch.setenv("AGENT_SERVER_URL", "http://100.87.162.43:11000")
+    monkeypatch.setenv("HARBOR_ADMIN_SECRET_FILE", "/secrets/harbor_admin")
+    monkeypatch.setenv("HARBOR_ADMIN_SECRET", "s3cret")
+
+    env = launch_common.harbor_env_vars(_args())
+
+    assert env["AGENT_SERVER_URL"] == "http://100.87.162.43:11000"
+    assert env["HARBOR_ADMIN_SECRET_FILE"] == "/secrets/harbor_admin"
+    assert "HARBOR_ADMIN_SECRET" not in env
+
+
 def test_agentic_wiring_is_the_shipped_wiring():
     """One shared copy: the flags the GPU e2e exercises are the flags the recipes ship."""
     args = launch_common.agentic_train_args(tito_model="qwen3", session_server_workers=4)

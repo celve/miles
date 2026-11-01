@@ -700,6 +700,7 @@ class StubAgentServer:
 
     def __init__(self):
         self.requests: list[tuple[str, dict]] = []
+        self.headers: list[dict] = []
         self.status = 200
         self.reply: dict = {}
         self.delay_s = 0.0
@@ -708,6 +709,7 @@ class StubAgentServer:
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
                 stub.requests.append((self.path, json.loads(self.rfile.read(int(self.headers["content-length"])))))
+                stub.headers.append({k.lower(): v for k, v in self.headers.items()})
                 time.sleep(stub.delay_s)
                 body = json.dumps(stub.reply).encode()
                 self.send_response(stub.status)
@@ -819,7 +821,8 @@ def test_a_trial_that_raised_on_the_agent_server_scores_zero(tasks_dir, fake_har
     assert out["reward"] == 0.0 and out["exit_status"] == "AgentError"
 
 
-@pytest.mark.parametrize("exit_status", ["TaskNotFound", "InvalidInstanceId", "ImportError"])
+# what celve/harbor's agent server answers: a missing task dir, an unsafe id, a class or kwarg the config names
+@pytest.mark.parametrize("exit_status", ["TaskNotFound", "InvalidInstanceId", "TrialConfigRefused: ValueError"])
 def test_an_agent_server_setup_error_stops_the_run(tasks_dir, fake_harbor, agent_server, exit_status):
     agent_server.reply = {"reward": 0.0, "exit_status": exit_status}
 
@@ -842,6 +845,17 @@ def test_abort_flushes_the_agent_server_for_each_session_server(fake_harbor, age
     run_async(haf.abort(args))
 
     assert agent_server.requests == [("/flush", {"session_server_instance_id": "inst-1"})]
+
+
+def test_abort_sends_the_admin_secret_read_from_its_file(fake_harbor, agent_server, monkeypatch, tmp_path):
+    monkeypatch.syspath_prepend(str(EXAMPLE_DIR.parents[1] / "swe-agent-harbor-docker"))
+    (secret := tmp_path / "harbor_admin").write_text("s3cret\n")
+    monkeypatch.setenv("HARBOR_ADMIN_SECRET", "")  # abort fills it in; this restores it unset afterwards
+    monkeypatch.setenv("HARBOR_ADMIN_SECRET_FILE", str(secret))
+
+    run_async(haf.abort(SimpleNamespace(session_server_instances=[SimpleNamespace(instance_id="inst-1")])))
+
+    assert agent_server.headers[0]["authorization"] == "Bearer s3cret"
 
 
 def test_abort_is_a_no_op_without_an_agent_server(fake_harbor):
