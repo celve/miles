@@ -44,6 +44,7 @@ from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
 
 from miles.dashboard.hooks import push_agent_reports
 from miles.rollout.agentic.agent_function import AGENT_FUNCTION_MODES, InfraAbort, call_agent_function
+from miles.rollout.agentic.credentials import provider_env_names
 from miles.rollout.agentic.remote import AgentWorkerEndpoint, forwarded_env
 from miles.rollout.base_types import GenerateFnInput, GenerateFnOutput
 from miles.rollout.generate_utils.openai_endpoint_utils import OpenAIEndpointTracer
@@ -54,8 +55,8 @@ from miles.utils.types import Sample
 
 logger = logging.getLogger(__name__)
 
-# what Harbor's agent function and the CUA recipe read; key files go by path, never a key by value
-_DEFAULT_WORKER_ENV = ("HARBOR_*", "AGENT_*", "E2B_API_URL", "E2B_SANDBOX_URL", "E2B_API_KEY_FILE", "LITE_*")
+# what Harbor's agent function, the CUA recipe and the sandbox providers read; secrets never go by value
+_DEFAULT_WORKER_ENV = ("HARBOR_*", "AGENT_*", "LITE_*", *provider_env_names())
 
 
 async def generate(input: GenerateFnInput) -> GenerateFnOutput:

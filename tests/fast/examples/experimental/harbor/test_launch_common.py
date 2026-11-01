@@ -136,12 +136,17 @@ def test_session_images_select_the_tree_server():
 def test_with_an_agent_worker_no_local_provider_key_is_needed(monkeypatch):
     for var in ("E2B_API_KEY", "E2B_API_KEY_FILE"):
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("E2B_API_URL", "https://sandbox-service.example")
+    monkeypatch.setenv("E2B_SANDBOX_URL", "http://sandbox-service")
 
     env = launch_common.harbor_env_vars(
         _args(e2b_api_key_file="/nonexistent/api_key", agent_worker_url="http://w:11100")
     )
 
-    assert not any(var.startswith("E2B_") for var in env)
+    # the endpoint still selects where the worker's sandboxes come from; the key stays the worker's
+    assert env["E2B_API_URL"] == "https://sandbox-service.example"
+    assert env["E2B_SANDBOX_URL"] == "http://sandbox-service"
+    assert "E2B_API_KEY_FILE" not in env and "E2B_API_KEY" not in env
 
 
 def test_an_agent_worker_url_selects_the_worker_mode():

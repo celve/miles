@@ -99,13 +99,14 @@ def harbor_env_vars(args) -> dict[str, str]:
     }
     if args.harbor_env_kwargs:
         env["HARBOR_ENV_KWARGS"] = args.harbor_env_kwargs
-    if worker_url := getattr(args, "agent_worker_url", ""):
-        # the agent worker creates the sandboxes, so the provider's key and SDK are needed there, not here
-        print(
-            f"harbor: trials run on the agent worker at {worker_url}; skipping local provider provisioning", flush=True
+    if spec := PROVIDER_CREDENTIALS.get(env_type):
+        provision_provider(
+            env,
+            spec,
+            arg_path=getattr(args, spec["arg_attr"], "") or "",
+            # an agent worker creates the sandboxes: the key and SDK are its, the endpoint still comes from here
+            remote=bool(getattr(args, "agent_worker_url", "")),
         )
-    elif spec := PROVIDER_CREDENTIALS.get(env_type):
-        provision_provider(env, spec, arg_path=getattr(args, spec["arg_attr"], "") or "")
     else:
         # Any other Harbor backend still passes straight through; there is just
         # no credential wiring known here, so the worker environment must carry

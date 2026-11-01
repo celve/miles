@@ -184,6 +184,14 @@ def test_secrets_are_not_forwarded_by_value(monkeypatch):
     assert "E2B_API_KEY" not in env
 
 
+def test_the_default_forwarded_names_carry_every_providers_endpoint_but_no_key():
+    from miles.rollout.generate_hub.agentic_tool_call import _DEFAULT_WORKER_ENV
+
+    for name in ("E2B_API_URL", "E2B_SANDBOX_URL", "E2B_DOMAIN", "E2B_API_KEY_FILE", "MODAL_PROFILE"):
+        assert name in _DEFAULT_WORKER_ENV
+    assert "E2B_API_KEY" not in _DEFAULT_WORKER_ENV
+
+
 def test_a_call_whose_caller_vanished_is_cancelled(serve, tmp_path, monkeypatch):
     monkeypatch.setattr("miles.rollout.agentic.worker._REAP_INTERVAL_S", 0.2)
     endpoint = serve(WorkerConfig(orphan_timeout_s=1.0))
