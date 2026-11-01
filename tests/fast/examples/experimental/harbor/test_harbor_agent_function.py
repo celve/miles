@@ -856,11 +856,27 @@ def test_a_trial_that_raised_on_the_agent_server_scores_zero(tasks_dir, fake_har
 
 # what celve/harbor's agent server answers: a missing task dir, an unsafe id, a class or kwarg the config names
 @pytest.mark.parametrize("exit_status", ["TaskNotFound", "InvalidInstanceId", "TrialConfigRefused: ValueError"])
-def test_an_agent_server_setup_error_stops_the_run(tasks_dir, fake_harbor, agent_server, exit_status):
+def test_an_agent_server_setup_error_discards_the_sample(tasks_dir, fake_harbor, agent_server, exit_status):
+    """Discarded, not scored: Miles's consecutive-abort guard then stops a run every sample of which is refused."""
     agent_server.reply = {"reward": 0.0, "exit_status": exit_status}
 
-    with pytest.raises(haf.AgentServerRefused, match=exit_status):
+    with pytest.raises(InfraAbort, match=exit_status) as raised:
         _remote_run()
+
+    assert raised.value.exit_status == "AgentServerRefused"
+
+
+def test_an_unreadable_trial_result_discards_the_sample(tasks_dir, fake_harbor, agent_server, monkeypatch):
+    def unreadable(data):
+        raise ValueError("unknown field")
+
+    agent_server.answer_with(_verdict())
+    monkeypatch.setattr(FakeTrialResult, "model_validate", staticmethod(unreadable))
+
+    with pytest.raises(InfraAbort) as raised:
+        _remote_run()
+
+    assert raised.value.exit_status == "AgentServerResultUnreadable"
 
 
 def test_an_agent_server_trial_past_the_cap_scores_zero(tasks_dir, fake_harbor, agent_server, monkeypatch):

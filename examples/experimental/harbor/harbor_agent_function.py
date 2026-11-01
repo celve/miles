@@ -75,8 +75,10 @@ failed is discarded with ``InfraAbort``: one that failed before its agent
 started (``SandboxUnavailable``, ``AgentSetupFailed``), one whose in-process
 agent lost the model service (``ServerUnreachable``), or a computer-1 trial whose
 own in-sandbox command failed mid-episode (``SandboxLost``), plus, with an agent server, a
-trial the server could not run or answer for (``AgentServerUnreachable``, ``AgentServerLost``).
-Every other episode that ends
+trial the server could not run or answer for (``AgentServerUnreachable``, ``AgentServerLost``), could
+not set up (``AgentServerRefused``: its task dir, Harbor, or a class the config names), or answered with a
+``TrialResult`` this Harbor cannot read (``AgentServerResultUnreadable``). Those two fail every sample alike;
+Miles's ``--max-consecutive-aborted-groups`` guard then stops the rollout. Every other episode that ends
 without a verdict scores 0 with a named ``exit_status`` (``TimeLimitExceeded``,
 ``SequenceLengthLimitExceeded``, ``AgentError``), matching the agent-server
 path. Configuration errors (missing task dir, bad env vars) raise instead:
@@ -580,14 +582,6 @@ def _agent_started(result) -> bool:
 _AGENT_SERVER_LOST_STATUSES = {"Error: NoResult", "Flushed"}
 
 
-class AgentServerRefused(Exception):
-    """The agent server could not set the trial up (its task dir, Harbor, or a class or kwarg the config names).
-
-    These fail every sample alike, so the run stops. In-process, the same Trial.create failure scores 0 instead:
-    there the worker's environment is the one the bindings were checked against, and on the server it need not be.
-    """
-
-
 def _agent_server_url() -> str | None:
     return os.getenv("AGENT_SERVER_URL", "").strip().rstrip("/") or None
 
@@ -628,14 +622,18 @@ async def _run_on_agent_server(url: str, config, metadata: dict[str, Any], sessi
         try:
             return TrialResult.model_validate(payload["trial_result"]), payload.get("trial_dir")
         except ValueError as exc:
-            raise AgentServerRefused(f"agent server {url} returned a TrialResult this Harbor cannot read") from exc
+            raise InfraAbort(
+                "AgentServerResultUnreadable",
+                f"agent server {url} returned a TrialResult this Harbor cannot read: {exc}",
+            ) from exc
     exit_status = str(payload.get("exit_status", ""))
     if exit_status in _AGENT_SERVER_LOST_STATUSES:
         raise InfraAbort("AgentServerLost", f"agent server {url} for {instance_id}: {exit_status}")
     if exit_status.startswith("Error:"):
         # Trial.create or Trial.run raised on the server, as the in-process path's except clause catches.
         raise RuntimeError(f"agent server trial for {instance_id} failed: {exit_status}")
-    raise AgentServerRefused(f"agent server {url} refused {instance_id}: {exit_status!r}")
+    # Stricter than in-process, where Trial.create failing scores 0: the server's environment can differ from this one.
+    raise InfraAbort("AgentServerRefused", f"agent server {url} refused {instance_id}: {exit_status!r}")
 
 
 async def _run_in_process(config):
@@ -679,7 +677,7 @@ async def run(
         # The policy may be what is stalling, so this is a negative sample.
         logger.error(f"Harbor trial for {instance_id} exceeded {trial_timeout_s}s; scoring 0")
         return _failed("TimeLimitExceeded")
-    except (InfraAbort, AgentServerRefused):
+    except InfraAbort:
         raise
     except Exception as e:
         logger.error(f"Harbor trial for {instance_id} failed: {e}", exc_info=True)
