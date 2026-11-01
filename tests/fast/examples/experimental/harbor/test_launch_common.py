@@ -144,3 +144,14 @@ def test_session_images_select_the_tree_server():
     assert "--use-session-server --session-server-port" in launch_common.agentic_train_args(
         tito_model="qwen3", session_server_workers=4
     )
+
+
+def test_with_an_agent_server_no_local_provider_key_is_needed(monkeypatch):
+    for var in ("E2B_API_KEY", "E2B_API_KEY_FILE"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("AGENT_SERVER_URL", "http://100.87.162.43:11000")
+
+    env = launch_common.harbor_env_vars(_args(e2b_api_key_file="/nonexistent/api_key"))
+
+    assert env["AGENT_SERVER_URL"] == "http://100.87.162.43:11000"
+    assert not any(var.startswith("E2B_") for var in env)
