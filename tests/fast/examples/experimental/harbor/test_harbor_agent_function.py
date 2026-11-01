@@ -102,7 +102,7 @@ def fake_harbor(monkeypatch):
     FakeTrial.result = None
     FakeTrial.run_delay_s = 0.0
     FakeTrialResult.by_ref = {}
-    monkeypatch.setattr(haf, "_agent_server_client", None)
+    monkeypatch.setattr(haf, "_agent_server_client", None, raising=False)
     monkeypatch.delenv("AGENT_SERVER_URL", raising=False)
     yield FakeTrial
 
