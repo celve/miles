@@ -21,7 +21,7 @@ import httpx
 
 from miles.rollout.agentic.credentials import PROVIDER_CREDENTIALS, resolve_provider_api_key
 from miles.rollout.agentic.errors import InfraAbort
-from miles.rollout.agentic.remote import AgentWorkerEndpoint, call_on_worker
+from miles.rollout.agentic.remote import AgentWorkerEndpoint, aborts_so_far, call_on_worker
 
 logger = logging.getLogger(__name__)
 
@@ -75,14 +75,17 @@ async def call_in_sandbox(
 ) -> Any:
     """Run ``fn(**kwargs)`` on a worker in a sandbox created for this call, as ``worker`` mode would."""
     label = str((kwargs.get("metadata") or {}).get("instance_id") or fn.__name__)
-    async with open_worker(config, label, boot_env(config)) as (endpoint, sandbox):
+    # a rollout abort while the sandbox boots finds no submitted call to cancel, so this call checks for one itself
+    aborts = aborts_so_far()
+    async with open_worker(config, label, boot_env(config), aborts=aborts) as (endpoint, sandbox):
+        _raise_if_aborted(aborts, label)
         value = await call_on_worker(endpoint, fn, kwargs, env=env, on_child_reports=on_child_reports)
         return await _copy_records(config, sandbox, value)
 
 
 @asynccontextmanager
 async def open_worker(
-    config: SandboxWorkerConfig, label: str, env: dict[str, str]
+    config: SandboxWorkerConfig, label: str, env: dict[str, str], aborts: int | None = None
 ) -> AsyncIterator[tuple[AgentWorkerEndpoint, Any]]:
     from e2b import AsyncSandbox  # an optional dependency, needed only in this mode
 
@@ -106,7 +109,7 @@ async def open_worker(
         )
         try:
             await sandbox.files.write(BOOT_CONFIG, json.dumps({"env": env}))
-            await _wait_healthy(endpoint)
+            await _wait_healthy(endpoint, label, aborts)
         except InfraAbort:
             raise
         except Exception as exc:
@@ -123,10 +126,16 @@ async def open_worker(
         await _kill(sandbox, label)
 
 
-async def _wait_healthy(endpoint: AgentWorkerEndpoint) -> None:
+def _raise_if_aborted(aborts: int | None, label: str) -> None:
+    if aborts is not None and aborts_so_far() != aborts:
+        raise InfraAbort("WorkerCancelled", f"a rollout abort landed while the sandbox worker for {label} booted")
+
+
+async def _wait_healthy(endpoint: AgentWorkerEndpoint, label: str, aborts: int | None) -> None:
     deadline = time.monotonic() + _HEALTH_DEADLINE_S
     async with httpx.AsyncClient(base_url=endpoint.url, headers=endpoint.headers, timeout=10) as client:
         while True:
+            _raise_if_aborted(aborts, label)
             try:
                 if (await client.get("/health")).status_code == 200:
                     return

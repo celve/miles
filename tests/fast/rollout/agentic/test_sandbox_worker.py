@@ -88,11 +88,13 @@ class _HeaderRecorder:
 
     def __init__(self):
         self.headers: list[dict] = []
+        self.requests: list[tuple[str, str]] = []
         app = create_app()
 
         @web.middleware
         async def record(request, handler):
             self.headers.append({k: v for k, v in request.headers.items() if k.startswith("E2b-")})
+            self.requests.append((request.method, request.path))
             return await handler(request)
 
         app.middlewares.append(record)
@@ -246,6 +248,51 @@ def test_a_cancelled_agents_cleanup_finishes_before_the_kill(service, tmp_path, 
     asyncio.run(cancel_once_running())
 
     assert seen_at_kill == [True]
+
+
+@pytest.mark.parametrize("phase", ["create", "health"])
+def test_a_rollout_abort_while_the_sandbox_boots_stops_the_call_before_it_starts(service, monkeypatch, phase):
+    """The abort hook runs once and the rollout then drains its tasks, so a call still booting must not start after."""
+    from miles.rollout.agentic import remote
+
+    gate = asyncio.Event()
+    real_create, real_wait = FakeAsyncSandbox.create, sandbox_worker._wait_healthy
+
+    async def create_held(template, **kwargs):
+        if phase == "create":
+            await gate.wait()
+        return await real_create(template, **kwargs)
+
+    async def wait_held(endpoint, label, aborts):
+        if phase == "health":
+            await gate.wait()
+        return await real_wait(endpoint, label, aborts)
+
+    monkeypatch.setattr(FakeAsyncSandbox, "create", create_held)
+    monkeypatch.setattr(sandbox_worker, "_wait_healthy", wait_held)
+
+    async def abort_while_booting():
+        task = asyncio.create_task(call_agent_function(stubs.report_pid, mode="sandbox", sandbox=_config()))
+        await asyncio.sleep(0.3)
+        assert await remote.cancel_inflight_calls() == 0
+        gate.set()
+        with pytest.raises(InfraAbort) as raised:
+            await task
+        return raised.value
+
+    abort = asyncio.run(abort_while_booting())
+
+    assert abort.exit_status == "WorkerCancelled"
+    assert ("POST", "/calls") not in service.requests
+    assert FakeAsyncSandbox.killed == ["sbx-0"]
+
+
+def test_a_call_that_starts_after_an_abort_runs(service):
+    from miles.rollout.agentic import remote
+
+    asyncio.run(remote.cancel_inflight_calls())
+
+    assert _in_sandbox(stubs.report_pid)["pid"]
 
 
 def test_the_trial_records_are_copied_out_before_the_kill(service, tmp_path):
