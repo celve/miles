@@ -4,6 +4,7 @@ against the metric series recorded in the companion JSON.
 The run is deterministic: on the recording image the series matches bit for bit, and so does radixark/miles_diffusion
 at 221f965f on that image. The tolerances only absorb engine, torch and PaddleOCR drift between images; the
 first step's log_prob_mean_abs_diff is the engine/trainer log-prob agreement that guards the port itself.
+MILES_DIFFUSION_PARITY_EXACT=1 drops every tolerance to 0, the parity check on the recording image.
 """
 
 import json
@@ -26,11 +27,16 @@ TOLERANCES = {
     "rollout/reward/raw_mean": 0.05,
     "rollout/reward/raw_median": 0.1,
     "rollout/reward/raw_std": 0.05,
+    "rollout/reward/norm_mean": 1e-6,
+    "rollout/reward/norm_median": 0.1,
+    "rollout/reward/norm_std": 0.05,
     "train/log_prob_old_idx_0": 1e-3,
     "train/log_prob_new_idx_0": 1e-3,
     "train/log_prob_mean_abs_diff": 1e-3,
     "train/grad_norm": 1e-3,
+    "train/loss": 1e-4,
 }
+EXACT = os.environ.get("MILES_DIFFUSION_PARITY_EXACT") == "1"
 
 
 def _series(path: Path) -> dict[str, list[float]]:
@@ -63,6 +69,7 @@ def check(metrics_path: Path) -> None:
     got, want = _series(metrics_path), json.loads(STANDARD.read_text())["metrics"]
     for key, tolerance in TOLERANCES.items():
         assert len(got.get(key, [])) == len(want[key]), f"{key}: {got.get(key)} vs {want[key]}"
+        tolerance = 0.0 if EXACT else tolerance
         for step, (g, w) in enumerate(zip(got[key], want[key], strict=True)):
             assert math.isfinite(g) and abs(g - w) <= tolerance, f"{key}[{step}]: {g} vs {w} (tolerance {tolerance})"
     assert got["train/log_prob_mean_abs_diff"][0] < 2e-4, "the trainer does not re-score the engine's own transitions"
