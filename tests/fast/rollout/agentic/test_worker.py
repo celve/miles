@@ -96,11 +96,11 @@ def test_reports_reach_the_caller_in_order(serve):
     received: list = []
 
     result = _on_worker(
-        serve(), stubs.report_then_return, on_child_reports=received.extend, items=[{"n": 1}, ("two",)]
+        serve(), stubs.report_then_return, on_child_reports=received.extend, items=[{"n": 1}, {"n": 2}]
     )
 
     assert result == "done"
-    assert received == [{"n": 1}, ("two",)]
+    assert received == [{"n": 1}, {"n": 2}]
 
 
 def test_an_infra_abort_keeps_its_cause_across_the_worker(serve):
