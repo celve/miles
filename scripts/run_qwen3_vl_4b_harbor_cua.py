@@ -168,6 +168,14 @@ def prepare(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
         f"--tasks-dir {args.harbor_tasks_dir} --data-dir {args.data_dir} "
         f"--train-per-family {args.train_per_family} --eval-per-family {args.eval_per_family}"
     )
+    if agent_server_url := (harbor_env or {}).get("AGENT_SERVER_URL"):
+        # warming creates sandboxes, which needs the provider key the agent server holds and this host need not
+        print(
+            f"harbor: trials run on the agent server at {agent_server_url}; warm templates from its host with "
+            "`python -m examples.experimental.harbor_cua.warm_templates`",
+            flush=True,
+        )
+        return
     # Serial, and before any rollout: Harbor has no retry around a template build, so
     # concurrent trials on an unbuilt template lose a whole GRPO group to a 409.
     # Quoted: HARBOR_ENV_KWARGS is JSON and a provider key path can contain spaces, so
@@ -409,7 +417,9 @@ def _require_vlm_cache_clearing(args: ScriptArgs, harbor_env: dict[str, str]) ->
     cache_mb = int(worker_env.get("SGLANG_VLM_CACHE_SIZE_MB", "0"))
     if cache_mb <= 0:
         return
-    mm_schedule = _worker_sglang_mm_schedule(_pythonpath_with_sources(args.megatron_path, worker_env.get("PYTHONPATH")))
+    mm_schedule = _worker_sglang_mm_schedule(
+        _pythonpath_with_sources(args.megatron_path, worker_env.get("PYTHONPATH"))
+    )
     if mm_schedule is not None and mm_schedule.exists() and "def clear_mm_embedding_cache(" in mm_schedule.read_text():
         return
     raise typer.BadParameter(

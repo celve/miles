@@ -19,6 +19,7 @@ import pytest
 harbor = pytest.importorskip("harbor")
 
 import harbor_agent_function as haf  # noqa: E402
+import swe_agent_function  # noqa: E402
 from examples.experimental.harbor_cua.qwen_computer import Qwen3VLComputer1  # noqa: E402
 from harbor.agents.computer_1.computer_1 import Computer1Chat, EpisodeLoggingPaths  # noqa: E402
 from harbor.agents.factory import AgentFactory  # noqa: E402
@@ -248,7 +249,7 @@ def agent_server(monkeypatch):
     server = HTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     monkeypatch.setenv("AGENT_SERVER_URL", f"http://127.0.0.1:{server.server_port}")
-    monkeypatch.setattr(haf, "_agent_server_client", None, raising=False)
+    monkeypatch.setattr(swe_agent_function, "_agent_server_client", None)
     yield reply
     server.shutdown()
     server.server_close()

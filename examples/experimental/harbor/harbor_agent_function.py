@@ -97,6 +97,8 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
+from swe_agent_function import _get_agent_server_client
+from swe_agent_function import abort as _flush_agent_server
 
 from miles.rollout.agentic.agent_function import InfraAbort
 from miles.rollout.agentic.credentials import PROVIDER_CREDENTIALS, resolve_provider_api_key
@@ -579,8 +581,6 @@ def _agent_started(result) -> bool:
 # The server answers these when it never ran the trial: a lost worker, or a /flush.
 _AGENT_SERVER_LOST_STATUSES = {"Error: NoResult", "Flushed"}
 
-_agent_server_client: httpx.AsyncClient | None = None
-
 
 class AgentServerRefused(Exception):
     """The agent server could not set the trial up (its task dir, Harbor, or a class or kwarg the config names).
@@ -592,14 +592,6 @@ class AgentServerRefused(Exception):
 
 def _agent_server_url() -> str | None:
     return os.getenv("AGENT_SERVER_URL", "").strip().rstrip("/") or None
-
-
-def _get_agent_server_client() -> httpx.AsyncClient:
-    global _agent_server_client
-    if _agent_server_client is None:
-        # each in-flight trial holds one connection for its whole run; AGENT_TRIAL_TIMEOUT bounds it
-        _agent_server_client = httpx.AsyncClient(timeout=None, limits=httpx.Limits(max_connections=None))
-    return _agent_server_client
 
 
 def _agent_server_request(config, metadata: dict[str, Any], session_url: str) -> dict[str, Any]:
@@ -708,7 +700,4 @@ async def abort(args) -> None:
         return
     if not os.getenv("HARBOR_ADMIN_SECRET") and (secret_file := os.getenv("HARBOR_ADMIN_SECRET_FILE")):
         os.environ["HARBOR_ADMIN_SECRET"] = Path(secret_file).expanduser().read_text().strip()
-    # the agent-server example's module, which the reward hook (generate.py) already puts on the path
-    from swe_agent_function import abort as flush_agent_server
-
-    await flush_agent_server(args)
+    await _flush_agent_server(args)

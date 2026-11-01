@@ -18,9 +18,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 
 import harbor_agent_function as haf
+import swe_agent_function
 import pytest
 
-from . import EXAMPLE_DIR
 
 from miles.rollout.agentic.agent_function import InfraAbort
 
@@ -102,7 +102,7 @@ def fake_harbor(monkeypatch):
     FakeTrial.result = None
     FakeTrial.run_delay_s = 0.0
     FakeTrialResult.by_ref = {}
-    monkeypatch.setattr(haf, "_agent_server_client", None, raising=False)
+    monkeypatch.setattr(swe_agent_function, "_agent_server_client", None)
     monkeypatch.delenv("AGENT_SERVER_URL", raising=False)
     yield FakeTrial
 
@@ -775,6 +775,10 @@ def test_agent_server_runs_the_built_trial_instead_of_this_process(tasks_dir, fa
     assert body["session_server_instance_id"] == "inst-1"
 
 
+def test_the_remote_client_is_the_agent_server_examples_keepalive_client():
+    assert haf._get_agent_server_client is swe_agent_function._get_agent_server_client
+
+
 def test_agent_server_results_keep_the_in_process_discards(tasks_dir, fake_harbor, agent_server):
     agent_server.answer_with(_failed_trial("EnvironmentStartTimeoutError", agent_setup=True))
 
@@ -839,7 +843,6 @@ def test_an_agent_server_trial_past_the_cap_scores_zero(tasks_dir, fake_harbor, 
 
 
 def test_abort_flushes_the_agent_server_for_each_session_server(fake_harbor, agent_server, monkeypatch):
-    monkeypatch.syspath_prepend(str(EXAMPLE_DIR.parents[1] / "swe-agent-harbor-docker"))
     args = SimpleNamespace(session_server_instances=[SimpleNamespace(instance_id="inst-1")])
 
     run_async(haf.abort(args))
@@ -848,7 +851,6 @@ def test_abort_flushes_the_agent_server_for_each_session_server(fake_harbor, age
 
 
 def test_abort_sends_the_admin_secret_read_from_its_file(fake_harbor, agent_server, monkeypatch, tmp_path):
-    monkeypatch.syspath_prepend(str(EXAMPLE_DIR.parents[1] / "swe-agent-harbor-docker"))
     (secret := tmp_path / "harbor_admin").write_text("s3cret\n")
     monkeypatch.setenv("HARBOR_ADMIN_SECRET", "")  # abort fills it in; this restores it unset afterwards
     monkeypatch.setenv("HARBOR_ADMIN_SECRET_FILE", str(secret))
