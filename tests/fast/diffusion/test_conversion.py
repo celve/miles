@@ -6,6 +6,8 @@ import torch
 from miles.diffusion.conversion import build_train_pairs, compute_grpo_advantages, convert_samples_to_train_data
 from miles.diffusion.types import DenoisingEnv, DiffusionRollout, DiTTrajectory
 from miles.ray.rollout.train_data_conversion import split_train_data_by_dp
+from miles.utils.args.custom_function import CustomFunctionConfig
+from miles.utils.args.custom_view import ImmutableNamespace
 from miles.utils.types import Sample
 
 
@@ -13,6 +15,23 @@ class _Args:
     n_samples_per_prompt = 2
     grpo_std_normalization = True
     diffusion_globalize_reward_std = True
+    rewards_normalization = True
+    reward_key = None
+    custom_reward_post_process_path = None
+
+
+def _fn_args(**overrides):
+    fields = {k: v for k, v in vars(_Args).items() if not k.startswith("_")}
+    return ImmutableNamespace(**(fields | overrides))
+
+
+POST_PROCESS_CALLS = []
+
+
+def double_raw_rewards(args, samples):
+    POST_PROCESS_CALLS.append(len(samples))
+    raw = [sample.reward for sample in samples]
+    return raw, [2 * r for r in raw]
 
 
 def _sample(index, *, reward, steps, latent_step_indices=None, num_latents=4):
@@ -76,3 +95,36 @@ def test_the_split_rejects_diffusion_rows_with_a_foreign_schema():
             {"diffusion_train_pairs": [[]], "sample_indices": [0], "tokens": [[1]]},
             train_parallel_config=SimpleNamespace(dp_size=1),
         )
+
+
+def _rewarded(rewards):
+    return [_sample(i, reward=r, steps=[0]) for i, r in enumerate(rewards)]
+
+
+def _advantages(data):
+    return [row[0]["advantage"] for row in data["diffusion_train_pairs"]]
+
+
+def test_reward_key_selects_the_raw_reward():
+    samples = _rewarded([{"ocr": 1.0, "aux": 9.0}, {"ocr": 0.0, "aux": 9.0}])
+
+    data = convert_samples_to_train_data(_fn_args(reward_key="ocr", grpo_std_normalization=False), samples)
+
+    assert data["raw_reward"] == [1.0, 0.0]
+    assert _advantages(data) == [0.5, -0.5]
+
+
+def test_the_post_process_hook_replaces_normalization_once_per_conversion():
+    POST_PROCESS_CALLS.clear()
+    hook = CustomFunctionConfig(path=f"{__name__}.double_raw_rewards")
+
+    data = convert_samples_to_train_data(_fn_args(custom_reward_post_process_path=hook), _rewarded([1.0, 0.25]))
+
+    assert POST_PROCESS_CALLS == [2]
+    assert data["raw_reward"] == [1.0, 0.25] and _advantages(data) == [2.0, 0.5]
+
+
+def test_disabled_normalization_trains_on_the_raw_rewards():
+    data = convert_samples_to_train_data(_fn_args(rewards_normalization=False), _rewarded([1.0, 0.25]))
+
+    assert _advantages(data) == [1.0, 0.25]
