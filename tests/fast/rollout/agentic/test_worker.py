@@ -163,7 +163,7 @@ def test_a_rollout_abort_cancels_the_calls_running_on_workers(serve, tmp_path):
             await asyncio.sleep(0.1)
         await call_agent_abort_hook(SimpleNamespace(custom_agent_function_path=None))
         with pytest.raises(InfraAbort) as raised:
-            await task
+            await asyncio.wait_for(task, timeout=60)
         return raised.value.exit_status
 
     assert asyncio.run(abort_while_running()) == "WorkerCancelled"
