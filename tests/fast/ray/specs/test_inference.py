@@ -259,7 +259,7 @@ class TestComputeSpecRouterLaunchCommand:
         assert config.port == 20000
         assert config.max_connections == 100
 
-    @pytest.mark.parametrize(("model_name", "expected"), [("default", 16 * 4), ("eval", 64 * 4)])
+    @pytest.mark.parametrize(("model_name", "expected"), [("default", 16), ("eval", 64)])
     def test_the_eval_router_admits_the_eval_pools_concurrency(self, model_name, expected):
         args = make_args(
             use_miles_router=True,

@@ -40,9 +40,17 @@ class TestSessionServer:
         for name in ("no_proxy", "NO_PROXY"):
             monkeypatch.setenv(name, no_proxy)
 
-        server = SessionServer(make_session_server_config(backend_url="http://backend.invalid:8000"))
+        server = SessionServer(
+            make_session_server_config(
+                backend_url="http://backend.invalid:8000", eval_backend_url="http://backend.invalid:8001"
+            )
+        )
 
-        assert server.proxy == (URL(expected) if expected else None)
+        proxies = {url: proxy for url, (proxy, _auth) in server._env_proxies.items()}
+        assert proxies == {
+            "http://backend.invalid:8000": URL(expected) if expected else None,
+            "http://backend.invalid:8001": URL(expected) if expected else None,
+        }
 
 
 @pytest.fixture

@@ -144,7 +144,7 @@ def run_session_server(config: SessionServerConfig):
         config.host,
         config.port,
         config.backend_url,
-        server.eval_backend_url,
+        config.eval_backend_url or config.backend_url,
     )
     # Keep server-side idle closure well after the HTTP client's default 5s expiry.
     uvicorn.run(
