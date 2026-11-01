@@ -510,19 +510,20 @@ def test_ft_discard_stays_invalid_with_finite_gradient_norm(
 
 
 @pytest.mark.parametrize(
-    ("use_dynamic_batch_size", "iterator_kwargs", "expected_fetched", "expected_scores"),
+    ("use_dynamic_batch_size", "iterator_kwargs", "num_microbatches", "expected_fetched", "expected_scores"),
     [
         (
             True,
             {"micro_batch_indices": [[2, 0], [1], [5, 3], [4]]},
+            [2, 2],
             [[5, 3], [4]],
             [None, None, None, 3, 4, 5],
         ),
-        (False, {"micro_batch_size": 2}, [[4, 5]], [None, None, None, None, 4, 5]),
+        (False, {"micro_batch_size": 2}, [2, 1], [[4, 5]], [None, None, None, None, 4, 5]),
     ],
 )
 def test_forward_only_from_a_later_step_scores_only_that_steps_samples(
-    monkeypatch, use_dynamic_batch_size, iterator_kwargs, expected_fetched, expected_scores
+    monkeypatch, use_dynamic_batch_size, iterator_kwargs, num_microbatches, expected_fetched, expected_scores
 ):
     from miles.backends.megatron_utils import model as model_module
 
@@ -572,7 +573,7 @@ def test_forward_only_from_a_later_step_scores_only_that_steps_samples(
     monkeypatch.setattr(model_module, "get_forward_backward_func", lambda: forward_backward)
     monkeypatch.setattr(model_module, "mpu", FakeMpu(is_last_pipeline_stage=True))
 
-    out = model_module.forward_only(score, args, [Mock()], [iterator], [2, 1], rollout_id=0, first_step=1)
+    out = model_module.forward_only(score, args, [Mock()], [iterator], num_microbatches, rollout_id=0, first_step=1)
 
     assert fetched == expected_fetched
     assert [None if value is None else int(value) for value in out["log_probs"]] == expected_scores
