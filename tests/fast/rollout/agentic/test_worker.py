@@ -209,16 +209,77 @@ def test_the_rollout_abort_entrypoint_cancels_a_trial_waiting_on_its_environment
     assert _wait_for(cleaned_up)
 
 
+def test_a_cancel_that_overtakes_its_submit_keeps_the_call_from_starting(serve, tmp_path):
+    """A rollout abort can DELETE a call whose POST has not reached the worker yet."""
+    endpoint = serve()
+    pid_file, cleaned_up = tmp_path / "pid", tmp_path / "cleaned_up"
+
+    httpx.delete(f"{endpoint.url}/calls/late").raise_for_status()
+    httpx.post(
+        f"{endpoint.url}/calls",
+        json={
+            "call_id": "late",
+            "fn": remote.function_path(stubs.wait_until_cancelled),
+            "kwargs": {"pid_file": str(pid_file), "cleaned_up": str(cleaned_up)},
+            "env": {},
+            "scope": "late-submit-test",
+        },
+    ).raise_for_status()
+    state = httpx.get(f"{endpoint.url}/calls/late", params={"wait": 5}).json()
+
+    assert state["state"] == "done" and state["outcome"] == {"kind": "cancelled"}
+    time.sleep(2)
+    assert not pid_file.exists()
+    assert httpx.get(f"{endpoint.url}/health").json()["running"] == 0
+
+
+def test_an_abort_during_the_submit_keeps_the_trial_from_starting(serve, tmp_path):
+    app = create_app()
+
+    @web.middleware
+    async def slow_submit(request, handler):
+        if request.method == "POST":
+            await asyncio.sleep(2)
+        return await handler(request)
+
+    app.middlewares.append(slow_submit)
+    endpoint = serve(app=app)
+    pid_file, cleaned_up = tmp_path / "pid", tmp_path / "cleaned_up"
+
+    async def abort_during_submit():
+        task = asyncio.create_task(
+            call_agent_function(
+                stubs.wait_until_cancelled,
+                mode="worker",
+                worker=endpoint,
+                pid_file=str(pid_file),
+                cleaned_up=str(cleaned_up),
+            )
+        )
+        await asyncio.sleep(0.5)
+        assert await remote.cancel_inflight_calls() == 1
+        with pytest.raises(InfraAbort) as raised:
+            await asyncio.wait_for(task, timeout=60)
+        return raised.value.exit_status
+
+    assert asyncio.run(abort_during_submit()) == "WorkerCancelled"
+    time.sleep(2)
+    assert not pid_file.exists()
+
+
 def test_secrets_are_not_forwarded_by_value(monkeypatch):
     monkeypatch.setenv("HARBOR_ADMIN_SECRET", "s3cret")
     monkeypatch.setenv("HARBOR_ADMIN_SECRET_FILE", "/secrets/harbor_admin")
     monkeypatch.setenv("E2B_API_KEY", "e2b_value")
     monkeypatch.setenv("HARBOR_TASKS_DIR", "/tasks")
+    monkeypatch.setenv("AGENT_MAX_OUTPUT_TOKENS", "2048")
 
-    env = remote.forwarded_env(["HARBOR_*", "E2B_*"])
+    env = remote.forwarded_env(["HARBOR_*", "E2B_*", "AGENT_*"])
 
     assert env["HARBOR_ADMIN_SECRET_FILE"] == "/secrets/harbor_admin"
     assert env["HARBOR_TASKS_DIR"] == "/tasks"
+    # a token budget is a setting, not a credential
+    assert env["AGENT_MAX_OUTPUT_TOKENS"] == "2048"
     assert "HARBOR_ADMIN_SECRET" not in env
     assert "E2B_API_KEY" not in env
 

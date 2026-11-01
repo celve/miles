@@ -123,10 +123,15 @@ def create_app(config: WorkerConfig | None = None) -> web.Application:
         )
 
     async def cancel(request: web.Request) -> web.Response:
-        call = calls.get(request.match_info["call_id"])
-        if call is not None and call.task is not None and not call.task.done():
+        call_id = request.match_info["call_id"]
+        call = calls.get(call_id)
+        if call is None:
+            # a cancel can overtake its own submit; the tombstone makes that submit start nothing
+            calls[call_id] = tombstone = _Call()
+            tombstone.finish({"kind": "cancelled"})
+        elif call.task is not None and not call.task.done():
             call.task.cancel()
-        return web.json_response({"cancelled": call is not None})
+        return web.json_response({"cancelled": True})
 
     async def health(request: web.Request) -> web.Response:
         return web.json_response({"status": "ok", "running": sum(c.outcome is None for c in calls.values())})

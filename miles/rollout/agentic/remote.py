@@ -35,7 +35,7 @@ _POLL_WAIT_S = 20.0
 _REQUEST_ATTEMPTS = 3
 _CANCEL_TIMEOUT_S = 10.0
 # never forwarded by value, whatever --custom-agent-function-worker-env says; a *_FILE path to one is fine
-_SECRET_PATTERNS = ("*SECRET*", "*TOKEN*", "*PASSWORD*", "*API_KEY")
+_SECRET_PATTERNS = ("*SECRET", "*SECRET_KEY", "*TOKEN", "*PASSWORD", "*API_KEY")
 
 # this process's calls on workers, by call_id, so a rollout abort can cancel them all
 _inflight: dict[str, "AgentWorkerEndpoint"] = {}
