@@ -327,7 +327,7 @@ class InferenceEngineSpec(BaseCommandSpec):
 
     def env_var(self, ctx: WorkerLaunchContext) -> dict[str, str]:
         env_vars = compute_inference_engine_env_vars(ctx.args)
-        if ctx.args.model_kind == "diffusion":
+        if self.server_group_config.engine_kind == "diffusion":
             env_vars |= compute_diffusion_engine_env_vars(ctx.args)
         return env_vars
 
@@ -342,7 +342,7 @@ class InferenceEngineSpec(BaseCommandSpec):
         random_seed = (
             args.seed + group_scaling.engine_offset + ctx.cell_index * num_workers_per_cell + ctx.worker_in_cell_index
         )
-        if args.model_kind == "diffusion":
+        if server_group_config.engine_kind == "diffusion":
             return compute_diffusion_engine_launch_cmd(
                 args=args,
                 interpreter_prefix=interpreter_prefix,
@@ -441,7 +441,7 @@ def _compute_spec_inference_engine(
             # sglang.multimodal_gen serves no launch gate, so its cells skip activating one.
             *(
                 [PortInfo(name=GATE_PORT_NAME, static_port=13000, mode="master", allow_dynamic=True)]
-                if args.model_kind != "diffusion"
+                if server_group_config.engine_kind != "diffusion"
                 else []
             ),
         ],
@@ -454,6 +454,7 @@ def _compute_spec_inference_engine(
                 sglang_api_key=args.sglang.get_value("api_key", group=server_group_config),
                 needs_offload=server_group_config.needs_offload,
                 update_weights=model_cfg.update_weights,
+                engine_kind=server_group_config.engine_kind,
             ),
         ),
     )

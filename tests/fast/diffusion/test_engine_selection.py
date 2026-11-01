@@ -6,8 +6,11 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from miles.backends.sglang_utils.sglang_api_client import SGLangApiClient
 from miles.diffusion import engine_main
+from miles.diffusion.api_client import DiffusionApiClient
 from miles.diffusion.engine import compute_diffusion_engine_launch_cmd
+from miles.ray.rollout.server_cell import ServerCell
 
 
 def _args(**overrides):
@@ -52,14 +55,16 @@ def test_the_server_groups_overrides_and_model_path_win():
     assert server_args["dit_precision"] == "bf16"
 
 
-def _engine_spec_for(tmp_path, model_kind):
+def _engine_spec_for(tmp_path, model_kind, **group):
     from tests.fast.ray.rollout.conftest import make_args, make_sglang_config_yaml
 
     from miles.ray.specs.inference import InferenceEngineSpec
 
     config_path = tmp_path / "sglang.yaml"
     config_path.write_text(
-        make_sglang_config_yaml(server_groups=[{"worker_type": "regular", "num_gpus": 2, "num_gpus_per_engine": 1}])
+        make_sglang_config_yaml(
+            server_groups=[{"worker_type": "regular", "num_gpus": 2, "num_gpus_per_engine": 1, **group}]
+        )
     )
     (spec,) = InferenceEngineSpec.create(
         make_args(sglang_config=str(config_path), rollout_num_gpus=2, model_kind=model_kind)
@@ -70,6 +75,37 @@ def _engine_spec_for(tmp_path, model_kind):
 def test_only_diffusion_engines_drop_the_launch_gate(tmp_path):
     assert "gate" in {port.name for port in _engine_spec_for(tmp_path, "text").port_infos}
     assert "gate" not in {port.name for port in _engine_spec_for(tmp_path, "diffusion").port_infos}
+
+
+def test_each_group_takes_its_engine_kind_from_its_own_config(tmp_path):
+    text_group = _engine_spec_for(tmp_path, "diffusion", engine_kind="text")
+    diffusion_group = _engine_spec_for(tmp_path, "text", engine_kind="diffusion")
+
+    assert "gate" in {port.name for port in text_group.port_infos}
+    assert text_group.partial_static_meta.values["engine_kind"] == "text"
+    assert "gate" not in {port.name for port in diffusion_group.port_infos}
+    assert diffusion_group.partial_static_meta.values["engine_kind"] == "diffusion"
+
+
+def test_a_cell_picks_its_client_from_its_engine_kind():
+    def client_class(engine_kind):
+        cell = SimpleNamespace(meta=SimpleNamespace(engine_kind=engine_kind), args=SimpleNamespace(model_kind="text"))
+        return ServerCell._api_client_class.fget(cell)
+
+    assert client_class("diffusion") is DiffusionApiClient
+    assert client_class("text") is SGLangApiClient
+
+
+def test_a_text_run_rejects_a_diffusion_group(tmp_path):
+    from tests.fast.fixtures.args_fixtures import parse_fsdp_test_config
+    from tests.fast.ray.rollout.conftest import make_sglang_config_yaml
+
+    config_path = tmp_path / "sglang.yaml"
+    config_path.write_text(
+        make_sglang_config_yaml(server_groups=[{"worker_type": "regular", "num_gpus": 1, "engine_kind": "diffusion"}])
+    )
+    with pytest.raises(ValueError, match="engine_kind diffusion"):
+        parse_fsdp_test_config("--rollout-num-gpus", "1", "--sglang-config", str(config_path))
 
 
 @dataclasses.dataclass

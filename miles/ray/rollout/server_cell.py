@@ -3,7 +3,7 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from sglang.srt.constants import GPU_MEMORY_TYPE_WEIGHTS
 
@@ -55,6 +55,7 @@ class ServerCellMetadata(FrozenStrictBaseModel):
     needs_offload: bool
     update_weights: bool
     workers_hash: str
+    engine_kind: Literal["text", "diffusion"] = "text"
 
 
 @dataclass
@@ -174,7 +175,7 @@ class ServerCell:
 
     @property
     def _api_client_class(self) -> type[SGLangApiClient]:
-        return DiffusionApiClient if self.args.model_kind == "diffusion" else SGLangApiClient
+        return DiffusionApiClient if self.meta.engine_kind == "diffusion" else SGLangApiClient
 
     async def init(self) -> None:
         assert isinstance(self._state, StateUninitialized), f"{self._state=}"
