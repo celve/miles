@@ -62,6 +62,7 @@ def compute_multimodal_train_inputs(
     tokens: Sequence[torch.Tensor],
     *,
     device: torch.device,
+    dtype: torch.dtype | None = None,
 ) -> list[dict[str, torch.Tensor] | None]:
     """Rebuild each sample's processor tensors on the trainer from its media references and expanded tokens.
 
@@ -70,6 +71,7 @@ def compute_multimodal_train_inputs(
         multimodal_inputs: Each sample's media references, or None for a text-only sample.
         tokens: Each sample's tokens, with the media placeholders SGLang expanded.
         device: This rank's device; the tensors land here, and it stands in for the engine's GPU.
+        dtype: The training dtype the floating tensors are cast to, or None to keep the processor's.
 
     Returns:
         Each sample's ``multimodal_train_inputs``, or None for a text-only sample.
@@ -77,7 +79,9 @@ def compute_multimodal_train_inputs(
     trainer_processor = _trainer_processor(rollout_engine_args, device)
     return [
         (
-            _sample_train_inputs(trainer_processor, sample_multimodal_inputs, sample_tokens, device=device)
+            _sample_train_inputs(
+                trainer_processor, sample_multimodal_inputs, sample_tokens, device=device, dtype=dtype
+            )
             if sample_multimodal_inputs
             else None
         )
@@ -164,6 +168,7 @@ def _sample_train_inputs(
     tokens: torch.Tensor,
     *,
     device: torch.device,
+    dtype: torch.dtype | None,
 ):
     input_ids = tokens.tolist()
     # No video device, as the engine's wrapper: the core takes it from the image device or the mm_process_config.
@@ -179,4 +184,14 @@ def _sample_train_inputs(
     )
     # mm_modalities and mm_spans tell SGLang where each media's tower output goes; the model does not take them.
     train_inputs = extract_multimodal_train_inputs(batch_feature)
-    return {key: value.to(device) for key, value in train_inputs.items() if key not in ("mm_modalities", "mm_spans")}
+    return {
+        key: _to_train_tensor(value, device=device, dtype=dtype)
+        for key, value in train_inputs.items()
+        if key not in ("mm_modalities", "mm_spans")
+    }
+
+
+def _to_train_tensor(value: torch.Tensor, *, device: torch.device, dtype: torch.dtype | None) -> torch.Tensor:
+    if dtype is not None and value.is_floating_point():
+        return value.to(device=device, dtype=dtype)
+    return value.to(device)
