@@ -9,6 +9,8 @@ from typing import Any
 import torch
 
 from miles.diffusion.metrics import log_metrics
+from miles.utils.args.custom_view import compute_custom_function_config
+from miles.utils.function_registry import load_function
 from miles.utils.types import Sample
 
 logger = logging.getLogger(__name__)
@@ -16,15 +18,26 @@ logger = logging.getLogger(__name__)
 
 def convert_samples_to_train_data(args, samples: list[Sample]) -> dict[str, Any]:
     """One row per image, each holding that image's train pairs, so the DP split keeps an image on one rank."""
-    advantages = compute_grpo_advantages(args, raw_rewards=[sample.reward for sample in samples])
+    raw_rewards, advantages = post_process_rewards(args, samples)
     return {
         "diffusion_train_pairs": [
             build_train_pairs(sample, advantage=advantage)
             for sample, advantage in zip(samples, advantages, strict=True)
         ],
         "sample_indices": [sample.index for sample in samples],
-        "raw_reward": [sample.reward for sample in samples],
+        "raw_reward": raw_rewards,
     }
+
+
+def post_process_rewards(args, samples: list[Sample]) -> tuple[list[float], list[float]]:
+    """`(raw, normalized)` rewards behind the text runs' boundary: `--custom-reward-post-process-path` replaces both,
+    `--reward-key` picks the raw value, and `--disable-rewards-normalization` skips Flow-GRPO's normalization."""
+    if (path := args.custom_reward_post_process_path) is not None:
+        return load_function(path)(compute_custom_function_config(args, path), samples)
+    raw_rewards = [sample.get_reward_value(args) for sample in samples]
+    if not args.rewards_normalization:
+        return raw_rewards, raw_rewards
+    return raw_rewards, compute_grpo_advantages(args, raw_rewards=raw_rewards)
 
 
 DIFFUSION_TRAIN_DATA_KEYS = frozenset({"diffusion_train_pairs", "sample_indices", "raw_reward"})
@@ -86,8 +99,10 @@ def _latent_positions(traj) -> dict[int, int]:
 
 
 def log_rollout_data(rollout_id: int, args, samples: list[Sample], rollout_extra_metrics, rollout_time: float) -> bool:
-    raw = torch.tensor([sample.reward for sample in samples], dtype=torch.float)
-    advantages = torch.tensor(compute_grpo_advantages(args, raw_rewards=raw.tolist()), dtype=torch.float)
+    # The executor logs before it converts, so this recomputes the converter's rewards through the same function.
+    raw_rewards, advantages = post_process_rewards(args, samples)
+    raw = torch.tensor(raw_rewards, dtype=torch.float)
+    advantages = torch.tensor(advantages, dtype=torch.float)
     grouped = raw.view(-1, args.n_samples_per_prompt)
     metrics = {
         **(rollout_extra_metrics or {}),
