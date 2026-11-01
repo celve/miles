@@ -9,6 +9,7 @@ from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 from torch.distributed.tensor import DTensor
 
 from miles.backends.fsdp_utils import checkpoint
+from miles.backends.fsdp_utils.actor import build_optimizer
 from miles.backends.fsdp_utils.lr_scheduler import get_lr_scheduler
 from miles.backends.fsdp_utils.parallel import create_fsdp_parallel_state
 from miles.backends.training_utils.parallel import get_parallel_state, set_parallel_state
@@ -66,13 +67,7 @@ class DiffusionFSDPTrainRayActor(TorchNativeTrainRayActor):
         self.forward_dtype = DTYPES[args.diffusion_forward_dtype]
         self.pipeline_config = get_train_pipeline_config(args.diffusion_model_family)
         self.model = load_fsdp_dit(args, config=self.pipeline_config, mesh=get_parallel_state().get_mesh("fsdp"))
-        self.optimizer = torch.optim.AdamW(
-            (p for p in self.model.parameters() if p.requires_grad),
-            lr=args.backend.lr,
-            betas=(args.backend.adam_beta1, args.backend.adam_beta2),
-            eps=args.backend.adam_eps,
-            weight_decay=args.backend.weight_decay,
-        )
+        self.optimizer = build_optimizer(args, (p for p in self.model.parameters() if p.requires_grad))
         # fp16 policy gradients underflow unscaled; the sharded scaler agrees on found_inf across ranks.
         self.scaler = ShardedGradScaler(enabled=self.forward_dtype == torch.float16)
         self.lr_scheduler = get_lr_scheduler(args, self.optimizer)

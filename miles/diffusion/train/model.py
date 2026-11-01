@@ -2,7 +2,6 @@
 receive their FSDP2 shards by broadcast; LoRA (PEFT) wraps the model before sharding."""
 
 import importlib
-import logging
 import warnings
 from contextlib import contextmanager
 from itertools import chain
@@ -10,12 +9,9 @@ from itertools import chain
 import torch
 import torch.distributed as dist
 from diffusers import DiffusionPipeline
-from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
-from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
 
+from miles.backends.fsdp_utils.actor import apply_fsdp2, fsdp2_load_full_state_dict
 from miles.diffusion.train.pipeline_config import TrainPipelineConfig
-
-logger = logging.getLogger(__name__)
 
 DTYPES = {"fp32": torch.float32, "bf16": torch.bfloat16, "fp16": torch.float16}
 
@@ -38,8 +34,17 @@ def load_fsdp_dit(
 
     _sync_dtypes_from_rank0(model)
     full_state = model.state_dict() if is_source else {}
-    model = _apply_fsdp2(model, mesh=mesh, param_dtype=DTYPES[args.diffusion_forward_dtype])
-    _broadcast_full_state(model, full_state)
+    model = apply_fsdp2(
+        model,
+        mesh=mesh,
+        args=args,
+        param_dtype=DTYPES[args.diffusion_forward_dtype],
+        reduce_dtype=torch.float32,
+        block_classes=model.get_base_model()._no_split_modules,
+        # Inputs keep their dtype: autocast owns compute, so gradient-checkpoint recompute stays consistent.
+        cast_forward_inputs=False,
+    )
+    model = fsdp2_load_full_state_dict(model, full_state, cpu_offload=False)
     del full_state
     # FSDP fixes each group's gradient dtype at lazy init from the params requiring grad; run it now,
     # before a first forward with the adapter disabled would see none.
@@ -109,27 +114,3 @@ def _sync_dtypes_from_rank0(model: torch.nn.Module) -> None:
     if dist.get_rank() != 0:
         for tensor, dtype in zip(tensors, objects[0], strict=True):
             tensor.data = tensor.data.to(dtype)
-
-
-def _apply_fsdp2(model: torch.nn.Module, *, mesh, param_dtype: torch.dtype) -> torch.nn.Module:
-    block_classes = set(model.get_base_model()._no_split_modules)
-    blocks = [module for module in model.modules() if type(module).__name__ in block_classes]
-    # Inputs keep their dtype: autocast owns compute, so gradient-checkpoint recompute stays consistent.
-    mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=torch.float32, cast_forward_inputs=False)
-    logger.info(f"FSDP: wrapping {len(blocks)} blocks of {sorted(block_classes)}, param_dtype={param_dtype}")
-    for block in blocks:
-        fully_shard(block, mesh=mesh, mp_policy=mp_policy)
-    fully_shard(model, mesh=mesh, mp_policy=mp_policy)
-    return model
-
-
-def _broadcast_full_state(model: torch.nn.Module, full_state: dict) -> None:
-    device = torch.cuda.current_device()
-    if dist.get_rank() == 0:
-        model.to(device=device, non_blocking=True)
-    else:
-        model.to_empty(device=device)
-    set_model_state_dict(model, full_state, options=StateDictOptions(full_state_dict=True, broadcast_from_rank0=True))
-    # State dict loading skips non-persistent buffers.
-    for buffer in model.buffers():
-        dist.broadcast(buffer, src=0)
