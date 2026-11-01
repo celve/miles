@@ -207,6 +207,7 @@ class InferenceController:
     async def flush_cache(self) -> None:
         await asyncio.gather(*[srv.flush_cache() for srv in self._training_servers()])
 
+    @requires_lock
     def _training_servers(self) -> list[RolloutServer]:
         """Every server but the dedicated eval pool, whose snapshot evals must run on through training's pauses."""
         return [srv for model_id, srv in self.servers.items() if self._eval_fleet is None or model_id != "eval"]
