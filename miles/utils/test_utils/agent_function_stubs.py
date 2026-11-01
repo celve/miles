@@ -41,6 +41,10 @@ async def report_then_return(*, items: list, **kwargs) -> str:
     return "done"
 
 
+async def return_value(*, value, **kwargs):
+    return value
+
+
 async def report_limits_scope(**kwargs) -> str:
     return current_scope()
 
