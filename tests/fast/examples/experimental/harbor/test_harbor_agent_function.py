@@ -730,6 +730,7 @@ class StubAgentServer:
 
     def close(self):
         self._server.shutdown()
+        self._server.server_close()
 
 
 @pytest.fixture
