@@ -950,11 +950,23 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 type=int,
                 default=None,
                 help=(
-                    "Maximum allowed gap between a group's oldest generated-token weight version and the current "
-                    "engine weight version. Prompt KV weight staleness is not considered. "
-                    "Groups exceeding this threshold are recycled back to "
-                    "the data buffer instead of being sent to training. Only effective in fully "
+                    "Maximum allowed gap between a group's generated-token weight version (see "
+                    "--weight-staleness-measure) and the current engine weight version. Prompt KV weight "
+                    "staleness is not considered. Groups exceeding this threshold are handed to "
+                    "--async-unused-samples-handler instead of being sent to training, and the producer stops "
+                    "starting groups that could only be consumed past it. Only effective in fully "
                     "async mode. None (default) disables staleness filtering."
+                ),
+            )
+            parser.add_argument(
+                "--weight-staleness-measure",
+                type=str,
+                choices=["oldest", "token_mean", "newest"],
+                default="oldest",
+                help=(
+                    "Which lag of a group --max-weight-staleness bounds: its oldest generated token (default), "
+                    "the mean over its generated tokens, or its newest generated token. Under oldest, the first "
+                    "turn of a multi-turn episode decides for every later turn."
                 ),
             )
             parser.add_argument(

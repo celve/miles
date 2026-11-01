@@ -4,6 +4,7 @@ import logging
 import os
 import random
 import re
+from argparse import Namespace
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -275,6 +276,11 @@ class Dataset:
 
     def __len__(self):
         return len(self.samples)
+
+
+def get_steps_per_rollout(args: Namespace) -> int:
+    """Optimizer steps per rollout round; one when the global batch counts the samples of multi-sample rollouts."""
+    return max(args.rollout_batch_size * args.n_samples_per_prompt // args.global_batch_size, 1)
 
 
 def get_minimum_num_micro_batch_size(total_lengths, max_tokens_per_gpu):

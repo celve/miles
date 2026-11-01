@@ -91,6 +91,7 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         self._curr_kv_cache_namespace: str | None = None
         self._producer_resumed = asyncio.Event()
         self._producer_resumed.set()
+        self._drain_started = asyncio.Event()
         default_buffer_cls = (
             DefaultMultiDataBuffer if resolve_megatron_config(self.args).is_multi_policy else DefaultDataBuffer
         )
@@ -175,14 +176,29 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         active: set[asyncio.Task] = set()
         while True:
             await self._producer_resumed.wait()
-            while self._scheduler.has_capacity(pending_groups=len(active), group_budget=self._max_in_flight_groups()):
+            self._drain_started.clear()
+            while (admitted := self._output.admits(in_flight_groups=len(active))) and self._scheduler.has_capacity(
+                pending_groups=len(active), group_budget=self._max_in_flight_groups()
+            ):
                 active.add(self._submit_one_group())
-            done, active = await self._scheduler.wait_for_progress(active)
+            if admitted:
+                done, active = await self._scheduler.wait_for_progress(active)
+            else:
+                done, active = await self._wait_for_admission(active)
             for task in done:
                 prompt_group = next(x.prompt_group for x in self._running_tasks if x.task is task)
                 entry = self._collect_group_result(task, prompt_group)
                 await self._output.put(entry)
                 self._running_tasks = [x for x in self._running_tasks if x.task is not task]
+
+    async def _wait_for_admission(self, active: set[asyncio.Task]) -> tuple[set[asyncio.Task], set[asyncio.Task]]:
+        # Only a drain or a group the buffer rejects can reopen admission; sample completions cannot.
+        drain_started = asyncio.ensure_future(self._drain_started.wait())
+        try:
+            done, pending = await asyncio.wait(active | {drain_started}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            drain_started.cancel()
+        return done - {drain_started}, pending - {drain_started}
 
     def _collect_group_result(self, task: asyncio.Task, prompt_group: list[Sample]) -> DataBufferInput:
         if not task.cancelled():
@@ -211,6 +227,7 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
 
         assert not self._worker.done(), "the fully-async rollout worker has ended"
         self._worker_error_cancel_targets.add(asyncio.current_task())
+        self._drain_started.set()
         entries = await self._output.get(
             current_version=input.weight_version,
             num_groups=args.rollout_batch_size,
