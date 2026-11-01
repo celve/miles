@@ -14,7 +14,6 @@ def _make_args(**overrides) -> Namespace:
         miles_router_timeout=None,
         rollout_health_check_interval=10.0,
         miles_router_health_check_failure_threshold=3,
-        sglang_server_concurrency=64,
     )
     defaults.update(overrides)
     return Namespace(**defaults)
@@ -24,14 +23,20 @@ class TestComputeMilesRouterConfig:
     def test_explicit_max_connections_wins(self):
         """--miles-router-max-connections overrides the derived value."""
         config = compute_miles_router_config(
-            _make_args(miles_router_max_connections=42), host="10.0.0.1", port=1234, num_engines=4
+            _make_args(miles_router_max_connections=42),
+            host="10.0.0.1",
+            port=1234,
+            num_engines=4,
+            server_concurrency=64,
         )
         assert config.max_connections == 42
 
     def test_max_connections_derived_from_engine_capacity(self):
         """Without an override, capacity is concurrency * the engines this router fronts,
         which is not the rollout fleet's size when the router fronts the eval fleet."""
-        config = compute_miles_router_config(_make_args(), host="10.0.0.1", port=1234, num_engines=4)
+        config = compute_miles_router_config(
+            _make_args(), host="10.0.0.1", port=1234, num_engines=4, server_concurrency=64
+        )
         assert config.max_connections == 64 * 4
 
     def test_remaining_fields_are_copied_from_args(self):
@@ -41,6 +46,7 @@ class TestComputeMilesRouterConfig:
             num_engines=4,
             host="10.0.0.1",
             port=1234,
+            server_concurrency=64,
         )
         assert config.host == "10.0.0.1"
         assert config.port == 1234
@@ -55,6 +61,7 @@ class TestComputeMilesRouterConfig:
             host="10.0.0.1",
             port=1234,
             num_engines=4,
+            server_concurrency=64,
         )
         assert config.health_check_failure_threshold == 7
 

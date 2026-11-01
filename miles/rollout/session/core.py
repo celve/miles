@@ -52,6 +52,7 @@ class ProxyRequest:
 
     method: str
     query: str = ""
+    evaluation: bool = False
 
 
 def _render_json(payload) -> bytes:
@@ -368,7 +369,10 @@ class SessionCore:
         # --- Phase 2: proxy to backend (NO lock held) ---
         headers = {**headers, "X-SMG-Routing-Key": session_id}
         result = await self.backend.do_proxy(
-            ProxyRequest(method=method, query=query), "v1/chat/completions", body=proxy_body, headers=headers
+            ProxyRequest(method=method, query=query, evaluation=session.evaluation),
+            "v1/chat/completions",
+            body=proxy_body,
+            headers=headers,
         )
 
         # Non-200 (e.g. 400 context too long) passes through unrecorded so the
@@ -428,7 +432,9 @@ class SessionCore:
         self, session_id: str, path: str, *, method: str, query: str, headers: dict, body: bytes
     ) -> Response:
         headers = {**headers, "X-SMG-Routing-Key": session_id}
+        session = self.registry.sessions.get(session_id)
+        evaluation = session is not None and session.evaluation
         result = await self.backend.do_proxy(
-            ProxyRequest(method=method, query=query), path, body=body, headers=headers
+            ProxyRequest(method=method, query=query, evaluation=evaluation), path, body=body, headers=headers
         )
         return proxy_result_to_response(result)

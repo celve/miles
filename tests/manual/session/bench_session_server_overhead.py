@@ -410,6 +410,7 @@ def _build_server_config(
         lora_train_only=False,
         timeout=600.0,
         backend_url=backend_url,
+        eval_backend_url=None,
         host=ip,
         port=port,
         instance_id=f"bench-i{instance_idx}",

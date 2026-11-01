@@ -53,7 +53,14 @@ class RolloutExecutorEvalFleet:
             inference_controller_worker_name()
         )
         self._state = GenerateState(
-            retarget_args(args, info.router.host, info.router.port, info.num_gpus, info.num_gpus_per_engine)
+            retarget_args(
+                args,
+                info.router.host,
+                info.router.port,
+                info.num_gpus,
+                info.num_gpus_per_engine,
+                server_concurrency=args.eval_server_concurrency,
+            )
         )
 
     async def pin(self, checkpoint_dir: str, weight_version: str) -> GenerateState:

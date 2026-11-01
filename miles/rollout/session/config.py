@@ -9,6 +9,8 @@ class SessionServerConfig(FrozenStrictBaseModel):
     port: int
     instance_id: str | None
     backend_url: str
+    # the eval pool's router, for sessions created with evaluation=True; None means backend_url serves eval too
+    eval_backend_url: str | None
     timeout: float | None
     hf_checkpoint: str | None
     chat_template_path: str | None
@@ -40,13 +42,14 @@ class SessionServerConfig(FrozenStrictBaseModel):
 
 
 def compute_session_server_config(
-    args, *, host: str, port: int, instance_id: str | None, backend_url: str
+    args, *, host: str, port: int, instance_id: str | None, backend_url: str, eval_backend_url: str | None
 ) -> SessionServerConfig:
     return SessionServerConfig(
         host=host,
         port=port,
         instance_id=instance_id,
         backend_url=backend_url,
+        eval_backend_url=eval_backend_url,
         timeout=args.miles_router_timeout,
         hf_checkpoint=args.hf_checkpoint,
         chat_template_path=args.chat_template_path,

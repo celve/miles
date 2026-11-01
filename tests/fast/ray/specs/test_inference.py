@@ -259,6 +259,27 @@ class TestComputeSpecRouterLaunchCommand:
         assert config.port == 20000
         assert config.max_connections == 100
 
+    @pytest.mark.parametrize(("model_name", "expected"), [("default", 16), ("eval", 64)])
+    def test_the_eval_router_admits_the_eval_pools_concurrency(self, model_name, expected):
+        args = make_args(
+            use_miles_router=True,
+            sglang_router_ip=None,
+            sglang_router_port=None,
+            miles_router_max_connections=None,
+            miles_router_timeout=None,
+            miles_router_health_check_failure_threshold=3,
+            rollout_health_check_interval=10.0,
+            sglang_server_concurrency=16,
+            eval_num_gpus=4,
+            eval_server_concurrency=64,
+        )
+        model_cfg = _make_model_cfg("regular").model_copy(update={"name": model_name})
+        spec = _compute_spec_router(args, model_idx=0, model_cfg=model_cfg)
+
+        config = parse_config_argv(MilesRouterConfig, shlex.split(spec.launch_command(_make_router_ctx()))[3:])
+
+        assert config.max_connections == expected
+
 
 class TestComputeSpecSessionServer:
     def test_launch_command_wires_the_router_backend_and_roundtrips(self):
@@ -453,6 +474,21 @@ class TestSessionServerRouterPoolLookup:
         with pytest.raises(KeyError):
             spec_session_server(args).launch_command(ctx)
 
+    def test_a_dedicated_eval_pool_is_the_evaluation_backend(self):
+        args = _make_session_server_args(
+            sglang_router_ip=None, sglang_router_port=None, rollout_num_gpus=4, eval_num_gpus=1
+        )
+        ctx = self._make_ctx(
+            {
+                compute_router_pool_id(0): [dict(primary=HostAndPort(host="10.0.0.2", port=3210))],
+                compute_router_pool_id(1): [dict(primary=HostAndPort(host="10.0.0.3", port=3211))],
+            }
+        )
+
+        config = parse_config_argv(SessionServerConfig, shlex.split(spec_session_server(args).launch_command(ctx))[3:])
+
+        assert (config.backend_url, config.eval_backend_url) == ("http://10.0.0.2:3210", "http://10.0.0.3:3211")
+
     def test_another_models_router_pool_is_not_mistaken_for_the_first(self):
         """With several router pools present the session server must still target model 0's router."""
         args = self._make_args()
@@ -466,6 +502,7 @@ class TestSessionServerRouterPoolLookup:
         config = parse_config_argv(SessionServerConfig, shlex.split(spec_session_server(args).launch_command(ctx))[3:])
 
         assert config.backend_url == "http://10.0.0.2:3210"
+        assert config.eval_backend_url is None
 
 
 class TestInferenceEngineEnvVars:

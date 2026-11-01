@@ -214,6 +214,7 @@ class TestSetEvalFleetInfo:
             rollout_top_p=1.0,
             save_debug_rollout_data=None,
             sglang_server_concurrency=2,
+            eval_server_concurrency=None,
             wandb_always_use_train_step=False,
         )
         executor._inference_controller_provider = provider

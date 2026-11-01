@@ -173,7 +173,11 @@ def _compute_spec_router(args, model_idx: int, model_cfg: ModelConfig) -> Comman
         if args.use_miles_router:
             assert not has_pd_disaggregation, "miles router does not support PD disaggregation."
             router_config = compute_miles_router_config(
-                args, host=primary.host, port=primary.port, num_engines=model_cfg.num_server_cells
+                args,
+                host=primary.host,
+                port=primary.port,
+                num_engines=model_cfg.num_server_cells,
+                server_concurrency=_compute_server_concurrency(args, model_cfg),
             )
             launch_argv = [*interpreter_prefix, "-m", "miles.router.router", *config_to_argv(router_config)]
         else:
@@ -210,6 +214,12 @@ def _compute_spec_router(args, model_idx: int, model_cfg: ModelConfig) -> Comman
     )
 
 
+def _compute_server_concurrency(args, model_cfg: ModelConfig) -> int:
+    if args.eval_num_gpus > 0 and model_cfg.name == "eval":
+        return args.eval_server_concurrency
+    return args.sglang_server_concurrency
+
+
 def _compute_router_primary_port_info(args, model_idx: int) -> PortInfo:
     if args.sglang_router_port is None:
         return PortInfo(name="primary", static_port=8000, allow_dynamic=True)
@@ -220,8 +230,14 @@ def spec_session_server(args) -> CommandWorkerSpec:
     config = resolve_sglang_config(args)  # TODO avoid resolve repeatedly
     interpreter_prefix = python_argv_prefix()
 
+    eval_model_idx = _compute_separate_eval_model_idx(args, config)
+
     def _compute_launch_command(ctx: LaunchCommandContext) -> str:
         (router_addrs,) = ctx.pool_addrs[compute_router_pool_id(0)]
+        eval_backend_url = None
+        if eval_model_idx is not None:
+            (eval_router_addrs,) = ctx.pool_addrs[compute_router_pool_id(eval_model_idx)]
+            eval_backend_url = eval_router_addrs["primary"].addr
         config = compute_session_server_config(
             args,
             host=args.session_server_ip or ctx.self_addrs["primary"].host,
@@ -229,6 +245,7 @@ def spec_session_server(args) -> CommandWorkerSpec:
             # TODO: make the indexing it k8s native compatible
             instance_id=compute_session_server_instance_id(args, ctx.cell_index),
             backend_url=router_addrs["primary"].addr,
+            eval_backend_url=eval_backend_url,
         )
         launch_argv = [*interpreter_prefix, "-m", "miles.rollout.session.server", *config_to_argv(config)]
         return shlex.join(launch_argv)
@@ -249,6 +266,14 @@ def spec_session_server(args) -> CommandWorkerSpec:
         ),
         launch_command=_compute_launch_command,
     )
+
+
+def _compute_separate_eval_model_idx(args, config) -> int | None:
+    """The dedicated eval pool's model index, unless it is model 0, whose router the session server already targets."""
+    if args.eval_num_gpus == 0:
+        return None
+    eval_model_idx = next(idx for idx, model_cfg in enumerate(config.models) if model_cfg.name == "eval")
+    return eval_model_idx or None
 
 
 def _compute_session_server_primary_port_info(args) -> PortInfo:
