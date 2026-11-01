@@ -9,7 +9,7 @@ import torch
 from torch.optim.lr_scheduler import LRScheduler
 from typing_extensions import override
 
-from miles.backends.training_utils.data.rollout import get_steps_per_rollout
+from miles.utils.data import get_steps_per_rollout
 
 logger = logging.getLogger(__name__)
 
