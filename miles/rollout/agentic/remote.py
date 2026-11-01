@@ -34,6 +34,11 @@ MAX_POLL_WAIT_S = 25.0
 _POLL_WAIT_S = 20.0
 _REQUEST_ATTEMPTS = 3
 _CANCEL_TIMEOUT_S = 10.0
+# never forwarded by value, whatever --custom-agent-function-worker-env says; a *_FILE path to one is fine
+_SECRET_PATTERNS = ("*SECRET*", "*TOKEN*", "*PASSWORD*", "*API_KEY")
+
+# this process's calls on workers, by call_id, so a rollout abort can cancel them all
+_inflight: dict[str, "AgentWorkerEndpoint"] = {}
 
 
 @dataclass(frozen=True)
@@ -47,8 +52,27 @@ def function_path(fn: Callable) -> str:
 
 
 def forwarded_env(patterns: Sequence[str]) -> dict[str, str]:
-    """This process's env vars whose names match ``patterns`` (``fnmatch``), for the worker's agent process."""
-    return {name: value for name, value in os.environ.items() if any(fnmatch.fnmatchcase(name, p) for p in patterns)}
+    """This process's env vars whose names match ``patterns`` (``fnmatch``), for the worker's agent process.
+
+    Secrets are left out: a worker reads its own credentials, or a key file a forwarded ``*_FILE`` names."""
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if _matches(name, patterns) and (name.endswith("_FILE") or not _matches(name, _SECRET_PATTERNS))
+    }
+
+
+def _matches(name: str, patterns: Sequence[str]) -> bool:
+    return any(fnmatch.fnmatchcase(name, p) for p in patterns)
+
+
+async def cancel_inflight_calls() -> int:
+    """Cancel every call this process has running on a worker (their children get SIGTERM); return how many."""
+    calls = list(_inflight.items())
+    async with asyncio.TaskGroup() as group:
+        for call_id, worker in calls:
+            group.create_task(_cancel_on(worker, call_id))
+    return len(calls)
 
 
 def encode_report(item: Any) -> str:
@@ -78,12 +102,15 @@ async def call_on_worker(
     }
     json.dumps(body)  # a kwarg the protocol cannot carry fails here, before anything runs
     async with _client(worker) as client:
+        _inflight[call_id] = worker
         try:
             await _request(client, "POST", "/calls", json=body)
             return await _poll_until_done(client, call_id, on_child_reports)
         except asyncio.CancelledError:
             await asyncio.shield(_cancel(client, call_id))
             raise
+        finally:
+            _inflight.pop(call_id, None)
 
 
 async def _poll_until_done(
@@ -134,6 +161,11 @@ async def _request(client: httpx.AsyncClient, method: str, path: str, **kwargs: 
             )
         return response.json()
     raise AssertionError("unreachable")
+
+
+async def _cancel_on(worker: "AgentWorkerEndpoint", call_id: str) -> None:
+    async with _client(worker) as client:
+        await _cancel(client, call_id)
 
 
 async def _cancel(client: httpx.AsyncClient, call_id: str) -> None:

@@ -8,6 +8,7 @@ import textwrap
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -18,6 +19,7 @@ from miles.rollout.agentic.agent_function import InfraAbort, call_agent_function
 from miles.rollout.agentic.remote import AgentWorkerEndpoint
 from miles.rollout.agentic.rollout_limits import current_scope
 from miles.rollout.agentic.worker import WorkerConfig, create_app
+from miles.utils.misc import call_agent_abort_hook
 from miles.utils.test_utils import agent_function_stubs as stubs
 
 
@@ -140,6 +142,46 @@ def test_cancelling_the_caller_runs_the_agent_cleanup_on_the_worker(serve, tmp_p
     asyncio.run(cancel_once_running())
 
     assert _wait_for(cleaned_up)
+
+
+def test_a_rollout_abort_cancels_the_calls_running_on_workers(serve, tmp_path):
+    """Both rollout aborts and the hot-restart takeover go through call_agent_abort_hook."""
+    endpoint = serve()
+    pid_file, cleaned_up = tmp_path / "pid", tmp_path / "cleaned_up"
+
+    async def abort_while_running():
+        task = asyncio.create_task(
+            call_agent_function(
+                stubs.wait_until_cancelled,
+                mode="worker",
+                worker=endpoint,
+                pid_file=str(pid_file),
+                cleaned_up=str(cleaned_up),
+            )
+        )
+        while not pid_file.exists():
+            await asyncio.sleep(0.1)
+        await call_agent_abort_hook(SimpleNamespace(custom_agent_function_path=None))
+        with pytest.raises(InfraAbort) as raised:
+            await task
+        return raised.value.exit_status
+
+    assert asyncio.run(abort_while_running()) == "WorkerCancelled"
+    assert _wait_for(cleaned_up)
+
+
+def test_secrets_are_not_forwarded_by_value(monkeypatch):
+    monkeypatch.setenv("HARBOR_ADMIN_SECRET", "s3cret")
+    monkeypatch.setenv("HARBOR_ADMIN_SECRET_FILE", "/secrets/harbor_admin")
+    monkeypatch.setenv("E2B_API_KEY", "e2b_value")
+    monkeypatch.setenv("HARBOR_TASKS_DIR", "/tasks")
+
+    env = remote.forwarded_env(["HARBOR_*", "E2B_*"])
+
+    assert env["HARBOR_ADMIN_SECRET_FILE"] == "/secrets/harbor_admin"
+    assert env["HARBOR_TASKS_DIR"] == "/tasks"
+    assert "HARBOR_ADMIN_SECRET" not in env
+    assert "E2B_API_KEY" not in env
 
 
 def test_a_call_whose_caller_vanished_is_cancelled(serve, tmp_path, monkeypatch):
