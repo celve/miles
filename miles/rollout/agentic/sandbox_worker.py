@@ -29,6 +29,8 @@ BOOT_CONFIG = "/tmp/agent_worker_boot.json"
 WORKER_PORT = 11100
 _HEALTH_DEADLINE_S = 120.0
 _KILL_ATTEMPTS = 3
+# matches a worker's subproc agent processes (agent_function._CHILD_BOOTSTRAP), but not this probe's own command line
+_AGENT_PROCESS_PROBE = "grep -qsa '[_]child_main' /proc/[0-9]*/cmdline"
 # Harbor's convention: an agent's result names its trial dir here, which goes with the sandbox
 RECORDS_KEY = "trial_dir"
 
@@ -117,6 +119,7 @@ async def open_worker(
         yield endpoint, sandbox
     finally:
         # a cancelled call is cancelled once, so this still runs to the end
+        await _wait_for_agent_exit(sandbox, label)
         await _kill(sandbox, label)
 
 
@@ -136,6 +139,23 @@ async def _wait_healthy(endpoint: AgentWorkerEndpoint) -> None:
                     f"{_HEALTH_DEADLINE_S:.0f}s",
                 )
             await asyncio.sleep(0.2)
+
+
+async def _wait_for_agent_exit(sandbox: Any, label: str) -> None:
+    """Wait until the worker's agent processes have exited, so a cancelled agent's own cleanup (closing the desktop it
+    created) finishes before the kill: the worker reports a cancelled call done while its child is still cleaning up.
+    """
+    # deferred: agent_function imports this module
+    from miles.rollout.agentic.agent_function import _CANCEL_GRACE_S, _LEFTOVER_CLEANUP_S
+
+    # the worker's subproc SIGKILLs its child by then, so nothing is left to wait for after it
+    deadline_s = int(_CANCEL_GRACE_S + _LEFTOVER_CLEANUP_S) + 10
+    try:
+        await sandbox.commands.run(
+            f"timeout {deadline_s} bash -c 'while {_AGENT_PROCESS_PROBE}; do sleep 0.5; done'", timeout=deadline_s + 30
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"agent processes in sandbox {sandbox.sandbox_id} for {label} not seen to exit: {exc!r}")
 
 
 async def _kill(sandbox: Any, label: str) -> None:

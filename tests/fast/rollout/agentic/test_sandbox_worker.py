@@ -5,7 +5,10 @@ A fake ``e2b`` stands in for the sandbox service; a real worker app plays the sa
 
 import asyncio
 import json
+import os
+import subprocess
 import sys
+import time
 import types
 
 import pytest
@@ -18,6 +21,19 @@ from miles.rollout.agentic.worker import create_app
 from miles.utils.test_utils import agent_function_stubs as stubs
 
 from .test_worker import _Served
+
+
+# bash: the cmdline files of every live descendant of $1
+_DESCENDANTS = r"""
+_descendant_cmdlines() {
+  local todo=("$ROOT") pid child
+  while [ ${#todo[@]} -gt 0 ]; do
+    pid=${todo[0]}; todo=("${todo[@]:1}")
+    for child in $(cat /proc/$pid/task/*/children 2>/dev/null); do echo /proc/$child/cmdline; todo+=("$child"); done
+  done
+}
+export -f _descendant_cmdlines; export ROOT=$0
+"""
 
 
 class FakeAsyncSandbox:
@@ -42,6 +58,16 @@ class FakeAsyncSandbox:
 
         self.files = Files()
 
+        class Commands:
+            async def run(self, cmd, timeout=60, **kwargs):
+                # the probe, scoped to this test's own descendants: the host may hold other tests' agent processes
+                assert sandbox_worker._AGENT_PROCESS_PROBE in cmd
+                cmd = cmd.replace("/proc/[0-9]*/cmdline", "$(_descendant_cmdlines)")
+                proc = await asyncio.create_subprocess_exec("bash", "-c", _DESCENDANTS + cmd, str(os.getpid()))
+                await asyncio.wait_for(proc.wait(), timeout)
+
+        self.commands = Commands()
+
     @classmethod
     async def create(cls, template, **kwargs):
         if cls.create_error is not None:
@@ -52,6 +78,9 @@ class FakeAsyncSandbox:
 
     async def kill(self):
         FakeAsyncSandbox.killed.append(self.sandbox_id)
+        FakeAsyncSandbox.on_kill(self)
+
+    on_kill = staticmethod(lambda sandbox: None)
 
 
 class _HeaderRecorder:
@@ -78,6 +107,7 @@ def service(monkeypatch):
     monkeypatch.setitem(sys.modules, "e2b", e2b)
     FakeAsyncSandbox.created, FakeAsyncSandbox.killed = [], []
     FakeAsyncSandbox.create_error, FakeAsyncSandbox.files_on_disk = None, {}
+    monkeypatch.setattr(FakeAsyncSandbox, "on_kill", staticmethod(lambda sandbox: None))
     monkeypatch.setenv("E2B_SANDBOX_URL", worker.served.url)
     monkeypatch.setenv("E2B_API_KEY", "test-key")
     yield worker
@@ -182,6 +212,42 @@ def test_cancelling_the_caller_kills_the_sandbox(service, tmp_path):
     assert FakeAsyncSandbox.killed == ["sbx-0"]
 
 
+@pytest.mark.parametrize("cancel", ["task", "rollout_abort"])
+def test_a_cancelled_agents_cleanup_finishes_before_the_kill(service, tmp_path, monkeypatch, cancel):
+    """Harbor closes the desktop it created in its cancellation cleanup; killing the sandbox first would leak it."""
+    from miles.rollout.agentic import remote
+
+    pid_file, cleaned_up = tmp_path / "pid", tmp_path / "cleaned_up"
+    seen_at_kill: list[bool] = []
+    monkeypatch.setattr(
+        FakeAsyncSandbox, "on_kill", staticmethod(lambda sandbox: seen_at_kill.append(cleaned_up.exists()))
+    )
+
+    async def cancel_once_running():
+        task = asyncio.create_task(
+            call_agent_function(
+                stubs.clean_up_slowly_when_cancelled,
+                mode="sandbox",
+                sandbox=_config(),
+                pid_file=str(pid_file),
+                cleaned_up=str(cleaned_up),
+                cleanup_s=1.0,
+            )
+        )
+        while not pid_file.exists():
+            await asyncio.sleep(0.1)
+        if cancel == "task":
+            task.cancel()
+        else:
+            assert await remote.cancel_inflight_calls() == 1
+        with pytest.raises((asyncio.CancelledError, InfraAbort)):
+            await task
+
+    asyncio.run(cancel_once_running())
+
+    assert seen_at_kill == [True]
+
+
 def test_the_trial_records_are_copied_out_before_the_kill(service, tmp_path):
     FakeAsyncSandbox.files_on_disk = {
         "/opt/t/x/result.json": b'{"reward": 1}',
@@ -239,3 +305,16 @@ def test_the_launch_args_reach_the_sandbox_config(monkeypatch):
         records_dir="/tmp/records",
         records=("result.json", "config.json", "trial.log", "agent/timings.jsonl"),
     )
+
+
+def test_the_agent_process_probe_matches_a_subproc_child():
+    """The probe the provider runs in the sandbox, against a process whose command line is subproc's child bootstrap."""
+    from miles.rollout.agentic.agent_function import _CHILD_BOOTSTRAP
+
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", _CHILD_BOOTSTRAP])
+    try:
+        time.sleep(0.2)
+        assert subprocess.run(["bash", "-c", sandbox_worker._AGENT_PROCESS_PROBE]).returncode == 0
+    finally:
+        child.kill()
+        child.wait()
