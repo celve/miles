@@ -28,6 +28,7 @@ def make_args(**overrides: Any) -> Namespace:
         rollout_num_gpus_per_engine=1,
         eval_num_gpus=0,
         eval_num_gpus_per_engine=1,
+        eval_server_concurrency=None,
         eval_uses_snapshots=False,
         num_gpus_per_node=8,
         rollout_batch_size=8,

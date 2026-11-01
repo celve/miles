@@ -960,11 +960,23 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 type=int,
                 default=None,
                 help=(
-                    "Maximum allowed gap between a group's oldest generated-token weight version and the current "
-                    "engine weight version. Prompt KV weight staleness is not considered. "
-                    "Groups exceeding this threshold are recycled back to "
-                    "the data buffer instead of being sent to training. Only effective in fully "
+                    "Maximum allowed gap between a group's generated-token weight version (see "
+                    "--weight-staleness-measure) and the current engine weight version. Prompt KV weight "
+                    "staleness is not considered. Groups exceeding this threshold are handed to "
+                    "--async-unused-samples-handler instead of being sent to training, and the producer stops "
+                    "starting groups that could only be consumed past it. Only effective in fully "
                     "async mode. None (default) disables staleness filtering."
+                ),
+            )
+            parser.add_argument(
+                "--weight-staleness-measure",
+                type=str,
+                choices=["oldest", "token_mean", "newest"],
+                default="oldest",
+                help=(
+                    "Which lag of a group --max-weight-staleness bounds: its oldest generated token (default), "
+                    "the mean over its generated tokens, or its newest generated token. Under oldest, the first "
+                    "turn of a multi-turn episode decides for every later turn."
                 ),
             )
             parser.add_argument(
@@ -1631,6 +1643,17 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 type=int,
                 default=1,
                 help="GPUs per eval engine (TP size), independent of --rollout-num-gpus-per-engine.",
+            )
+            parser.add_argument(
+                "--eval-server-concurrency",
+                type=int,
+                default=None,
+                help=(
+                    "Requests in flight per dedicated eval engine (--eval-num-gpus), in place of "
+                    "--sglang-server-concurrency, which it defaults to. Sizes the eval rollout's "
+                    "concurrency and the eval router's connections, so a small eval pool can keep as "
+                    "many episodes going as the training engines do."
+                ),
             )
             parser.add_argument(
                 "--eval-hf-dir",
@@ -3813,7 +3836,15 @@ def miles_validate_args(args):
             f"eval_num_gpus ({args.eval_num_gpus}) must be divisible by "
             f"eval_num_gpus_per_engine ({args.eval_num_gpus_per_engine})."
         )
+        if args.eval_server_concurrency is None:
+            args.eval_server_concurrency = args.sglang_server_concurrency
+        assert (
+            args.eval_server_concurrency > 0
+        ), f"--eval-server-concurrency must be positive, got {args.eval_server_concurrency}."
     else:
+        assert (
+            args.eval_server_concurrency is None
+        ), "--eval-server-concurrency sizes the dedicated eval engines, which need --eval-num-gpus > 0."
         overrides = collect_eval_sglang_overrides(args)
         assert not overrides, (
             f"--eval-sglang-* configures the dedicated eval fleet, which needs --eval-num-gpus > 0. "
@@ -4194,7 +4225,10 @@ def miles_validate_args(args):
             "Snapshot eval requires a snapshot source: set --eval-hf-dir (staging exports) "
             "or --save-hf (reuse periodic HF checkpoints)."
         )
-        assert not args.colocate, "Snapshot eval is not supported with --colocate."
+        assert not (args.colocate and args.eval_hf_dir is not None), (
+            "Snapshot eval under --colocate must reuse --save-hf checkpoints: an --eval-hf-dir export "
+            "loads the trainer onto GPUs the colocated engines still hold. Unset --eval-hf-dir."
+        )
         assert not args.debug_rollout_only, "Snapshot eval is not supported with debug_rollout_only."
         assert (
             args.load_debug_rollout_data is None

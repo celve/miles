@@ -94,6 +94,7 @@ def _serve_session(backend_url: str) -> Iterator[str]:
         port=port,
         instance_id="session-addition-r3-e2e",
         backend_url=backend_url,
+        eval_backend_url=None,
     )
     server = UvicornThreadServer(SessionServer(config).app, host="127.0.0.1", port=port)
     server.start()

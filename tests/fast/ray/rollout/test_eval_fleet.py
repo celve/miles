@@ -11,6 +11,7 @@ import pytest
 from tests.fast.ray.rollout.conftest import make_args as _make_args
 
 import miles.ray.rollout.eval_fleet as eval_fleet_mod
+import miles.rollout.inference_rollout.inference_rollout_common as inference_rollout_common
 from miles.backends.sglang_utils.sglang_api_client import SGLangApiClient
 from miles.ray.rollout.eval_fleet import (
     EvalFleetInfo,
@@ -389,6 +390,21 @@ class TestRolloutExecutorEvalFleet:
 
         assert controller.calls == [dict(weight_version="5")]
         assert len(fleet_states) == 1
+
+    async def test_the_fleet_admits_its_own_concurrency_not_the_training_engines(self, monkeypatch):
+        monkeypatch.setattr(inference_rollout_common, "load_tokenizer", lambda *args, **kwargs: object())
+        monkeypatch.setattr(inference_rollout_common, "load_processor", lambda *args, **kwargs: object())
+        session = RolloutExecutorEvalFleet(
+            make_args(sglang_server_concurrency=16, eval_server_concurrency=64),
+            info=EvalFleetInfo(router=HostAndPort(host="10.0.0.2", port=31000), num_gpus=1, num_gpus_per_engine=1),
+            inference_controller_provider=FakeControllerProvider([FakeInferenceController([])]),
+        )
+        semaphore = session._state.generate_fn_semaphore
+
+        for _ in range(64):
+            await asyncio.wait_for(semaphore.acquire(), timeout=1)
+
+        assert semaphore.locked()
 
     def test_builds_its_state_against_the_fleet_router(self, fleet_states):
         """The executor generates against the eval router and the fleet's gpu sizing, not the rollout ones."""

@@ -11,12 +11,12 @@ from miles.backends.torchtitan_utils.hf_weight_iterator import TitanHfWeightIter
 from miles.backends.torchtitan_utils.parallel import create_titan_parallel_state, parallel_dims_from_config
 from miles.backends.torchtitan_utils.routing_replay import install as install_routing_replay
 from miles.backends.torchtitan_utils.trainer import TitanTrainer
-from miles.backends.training_utils.data.rollout import get_steps_per_rollout
 from miles.backends.training_utils.parallel import get_parallel_state, set_parallel_state
 from miles.backends.training_utils.replay.routing_replay import enable as enable_routing_replay
 from miles.backends.training_utils.torch_native.actor import TorchNativeTrainRayActor
 from miles.platforms import current_platform
 from miles.utils.context_utils import with_defer
+from miles.utils.data import get_steps_per_rollout
 from miles.utils.ft_utils.indep_dp import IndepDPInfo
 from miles.utils.memory_utils import clear_memory
 from miles.utils.profile_utils import TrainProfiler
