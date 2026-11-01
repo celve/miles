@@ -209,7 +209,7 @@ def test_a_kwarg_the_protocol_cannot_carry_fails_before_the_call(serve):
 
 
 def test_the_worker_side_imports_without_torch_sglang_or_ray():
-    """The sandbox and CPU-box images carry no ML stack."""
+    """The sandbox and CPU-box images carry no ML stack; agents that report lifecycle phases still pull ray in."""
     code = textwrap.dedent("""
         import sys
 
@@ -220,6 +220,5 @@ def test_the_worker_side_imports_without_torch_sglang_or_ray():
 
         sys.meta_path.insert(0, Block())
         import miles.rollout.agentic.worker
-        import miles.utils.lifecycle
         """)
     subprocess.run([sys.executable, "-c", code], check=True, cwd=Path(__file__).resolve().parents[4])
