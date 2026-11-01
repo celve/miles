@@ -37,7 +37,7 @@ _ARGS_TO_CONFIG_FIELD = {
     "rollout_temperature": "rollout_temperature",
 }
 
-_CALL_SITE_FIELDS = ("host", "port", "instance_id", "backend_url")
+_CALL_SITE_FIELDS = ("host", "port", "instance_id", "backend_url", "eval_backend_url")
 _DERIVED_FIELDS = ("run_media_dir",)
 _OPTIONAL_ARGS_ATTRS = (
     "num_layers",
@@ -94,32 +94,53 @@ class TestComputeSessionServerConfig:
         assert covered == set(SessionServerConfig.model_fields)
 
     def test_call_site_fields_are_copied(self):
-        """Host, port, instance id, and backend url come from the caller, not from args."""
+        """Host, port, instance id, and both backend urls come from the caller, not from args."""
         config = compute_session_server_config(
-            _make_args(), host="10.0.0.1", port=5001, instance_id="abc", backend_url="http://10.0.0.2:3000"
+            _make_args(),
+            host="10.0.0.1",
+            port=5001,
+            instance_id="abc",
+            backend_url="http://10.0.0.2:3000",
+            eval_backend_url="http://10.0.0.3:3001",
         )
         assert config.host == "10.0.0.1"
         assert config.port == 5001
         assert config.instance_id == "abc"
         assert config.backend_url == "http://10.0.0.2:3000"
+        assert config.eval_backend_url == "http://10.0.0.3:3001"
 
     @pytest.mark.parametrize("args_attr,config_field", sorted(_ARGS_TO_CONFIG_FIELD.items()))
     def test_each_args_field_is_copied(self, args_attr: str, config_field: str):
         """Every args-derived field maps one-to-one, using values no hardcoded default would produce."""
         config = compute_session_server_config(
-            _make_args(), host="10.0.0.1", port=5001, instance_id="abc", backend_url="http://10.0.0.2:3000"
+            _make_args(),
+            host="10.0.0.1",
+            port=5001,
+            instance_id="abc",
+            backend_url="http://10.0.0.2:3000",
+            eval_backend_url=None,
         )
         assert getattr(config, config_field) == _DISTINCT_ARGS_VALUES[args_attr]
 
     def test_the_run_media_dir_is_this_runs_directory_under_the_shared_one(self):
         config = compute_session_server_config(
-            _make_args(), host="10.0.0.1", port=5001, instance_id="abc", backend_url="http://10.0.0.2:3000"
+            _make_args(),
+            host="10.0.0.1",
+            port=5001,
+            instance_id="abc",
+            backend_url="http://10.0.0.2:3000",
+            eval_backend_url=None,
         )
         assert config.run_media_dir == "/fake/media/fakerun"
 
     def test_no_shared_media_dir_means_no_run_media_dir(self):
         config = compute_session_server_config(
-            _make_args(shared_media_dir=None), host="10.0.0.1", port=5001, instance_id="abc", backend_url="http://x"
+            _make_args(shared_media_dir=None),
+            host="10.0.0.1",
+            port=5001,
+            instance_id="abc",
+            backend_url="http://x",
+            eval_backend_url=None,
         )
         assert config.run_media_dir is None
 
@@ -132,6 +153,7 @@ class TestComputeSessionServerConfig:
             port=5001,
             instance_id="abc",
             backend_url="http://10.0.0.2:3000",
+            eval_backend_url=None,
         )
         assert config.use_session_server is flag_value
 
@@ -139,7 +161,12 @@ class TestComputeSessionServerConfig:
         """An args object that omits the optional attributes yields None for them instead of failing."""
         present = {name: value for name, value in _DISTINCT_ARGS_VALUES.items() if name not in _OPTIONAL_ARGS_ATTRS}
         config = compute_session_server_config(
-            Namespace(**present), host="10.0.0.1", port=5001, instance_id="abc", backend_url="http://10.0.0.2:3000"
+            Namespace(**present),
+            host="10.0.0.1",
+            port=5001,
+            instance_id="abc",
+            backend_url="http://10.0.0.2:3000",
+            eval_backend_url=None,
         )
         assert [getattr(config, name) for name in _OPTIONAL_ARGS_ATTRS] == [None] * len(_OPTIONAL_ARGS_ATTRS)
 
@@ -148,7 +175,12 @@ class TestComputeSessionServerConfig:
             **{key: value for key, value in _DISTINCT_ARGS_VALUES.items() if key != "rollout_temperature"}
         )
         config = compute_session_server_config(
-            args, host="127.0.0.1", port=5001, instance_id=None, backend_url="http://127.0.0.1:3000"
+            args,
+            host="127.0.0.1",
+            port=5001,
+            instance_id=None,
+            backend_url="http://127.0.0.1:3000",
+            eval_backend_url=None,
         )
         assert config.rollout_temperature == 1.0
 
@@ -158,6 +190,7 @@ _COMPLETE_CONFIG_KWARGS = dict(
     port=5001,
     instance_id=None,
     backend_url="http://127.0.0.1:3000",
+    eval_backend_url=None,
     timeout=None,
     hf_checkpoint=None,
     chat_template_path=None,

@@ -2321,6 +2321,50 @@ class TestSnapshotEvalValidation:
         with pytest.raises(AssertionError, match="eval-function-path"):
             miles_validate_args(args)
 
+    def test_colocated_snapshot_eval_reuses_save_hf_checkpoints(self, tmp_path):
+        prompts = tmp_path / "eval.jsonl"
+        prompts.write_text("{}\n")
+        args = self._parse(
+            [
+                "--colocate",
+                "--eval-num-gpus",
+                "1",
+                "--eval-interval",
+                "5",
+                "--eval-prompt-data",
+                "dummy",
+                str(prompts),
+                "--save",
+                str(tmp_path / "ckpt"),
+                "--save-interval",
+                "5",
+                "--save-hf",
+                str(tmp_path / "hf"),
+            ]
+        )
+
+        miles_validate_args(args)
+
+        assert args.eval_uses_snapshots is True
+        assert args.save_hf == str(tmp_path / "hf" / "step_{rollout_id}")
+
+    def test_colocated_snapshot_eval_refuses_an_eval_hf_dir_export(self, tmp_path):
+        args = self._snapshot_eval_args(tmp_path, "--colocate")
+        with pytest.raises(AssertionError, match="--eval-hf-dir"):
+            miles_validate_args(args)
+
+    def test_eval_server_concurrency_defaults_to_the_training_engines(self, tmp_path):
+        args = self._snapshot_eval_args(tmp_path, "--sglang-server-concurrency", "16")
+
+        miles_validate_args(args)
+
+        assert args.eval_server_concurrency == 16
+
+    def test_eval_server_concurrency_needs_an_eval_pool(self):
+        args = self._parse(["--eval-server-concurrency", "64"])
+        with pytest.raises(AssertionError, match="--eval-num-gpus"):
+            miles_validate_args(args)
+
     def test_train_only_leaves_no_rollout_gpus_even_under_colocate(self):
         """The colocate normalization puts the actor's GPU count on rollout_num_gpus, which
         would claim rollout engines for a job that starts none."""

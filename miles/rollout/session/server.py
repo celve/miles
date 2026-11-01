@@ -51,6 +51,7 @@ class SessionServer:
 
     def __init__(self, config: SessionServerConfig):
         self.backend_url = config.backend_url
+        self.eval_backend_url = config.eval_backend_url or config.backend_url
         self.app = FastAPI(lifespan=self._lifespan)
 
         # Every turn's backend reply is megabytes (per-token logprobs, R3). aiohttp parses it in C;
@@ -60,10 +61,7 @@ class SessionServer:
         self.client: aiohttp.ClientSession
         # Read the proxy environment once, as httpx did: aiohttp's trust_env re-reads it, and ~/.netrc,
         # on a worker thread for every request.
-        try:
-            self.proxy, self.proxy_auth = get_env_proxy_for_url(URL(self.backend_url))
-        except LookupError:
-            self.proxy, self.proxy_auth = None, None
+        self._env_proxies = {url: _env_proxy_for(url) for url in {self.backend_url, self.eval_backend_url}}
 
         # `retract` may recompute earlier rows and must return full R3; all other
         # pause modes preserve prior rows and can request only the appended R3.
@@ -81,7 +79,9 @@ class SessionServer:
             yield
 
     async def do_proxy(self, request: ProxyRequest, path: str, *, body: bytes, headers: dict) -> dict:
-        url = f"{self.backend_url}/{path}"
+        backend_url = self.eval_backend_url if request.evaluation else self.backend_url
+        proxy, proxy_auth = self._env_proxies[backend_url]
+        url = f"{backend_url}/{path}"
         if request.query:
             url = f"{url}?{request.query}"
 
@@ -98,8 +98,8 @@ class SessionServer:
                 headers=headers,
                 allow_redirects=False,
                 skip_auto_headers=("Content-Type",),
-                proxy=self.proxy,
-                proxy_auth=self.proxy_auth,
+                proxy=proxy,
+                proxy_auth=proxy_auth,
             ) as response:
                 content = await response.read()
         # ValueError: aiohttp refuses to send a CR/LF header value (e.g. in a session id), which httpx raised as a
@@ -122,6 +122,13 @@ class SessionServer:
         }
 
 
+def _env_proxy_for(url: str):
+    try:
+        return get_env_proxy_for_url(URL(url))
+    except LookupError:
+        return None, None
+
+
 def run_session_server(config: SessionServerConfig):
     """Entry point to start the standalone session server as a subprocess."""
     # Spawned as a fresh interpreter, so it inherits no logging config.
@@ -133,10 +140,11 @@ def run_session_server(config: SessionServerConfig):
 
     server = SessionServer(config)
     logger.info(
-        "[session-server] Starting on %s:%s, proxying to %s",
+        "[session-server] Starting on %s:%s, proxying to %s (evaluation sessions to %s)",
         config.host,
         config.port,
         config.backend_url,
+        server.eval_backend_url,
     )
     # Keep server-side idle closure well after the HTTP client's default 5s expiry.
     uvicorn.run(

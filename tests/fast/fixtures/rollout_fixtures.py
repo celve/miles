@@ -87,7 +87,13 @@ def _build_args(*, data_path: str, router_port: int, extra_argv: list[str] | Non
 
 @contextmanager
 def _with_miles_router(args: Namespace) -> Iterator[UvicornThreadServer]:
-    config = compute_miles_router_config(args, host=args.sglang_router_ip, port=args.sglang_router_port, num_engines=1)
+    config = compute_miles_router_config(
+        args,
+        host=args.sglang_router_ip,
+        port=args.sglang_router_port,
+        num_engines=1,
+        server_concurrency=args.sglang_server_concurrency,
+    )
     router = MilesRouter(config, verbose=False)
     server = UvicornThreadServer(router.app, host=config.host, port=config.port)
     try:
@@ -114,6 +120,7 @@ def _with_session_server(args: Namespace, backend_url: str) -> Iterator[UvicornT
         port=port,
         instance_id=None,
         backend_url=backend_url,
+        eval_backend_url=None,
     )
     session_server = SessionServer(config)
     server = UvicornThreadServer(session_server.app, host="127.0.0.1", port=port)

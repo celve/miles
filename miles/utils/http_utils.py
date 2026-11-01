@@ -336,7 +336,7 @@ def init_http_client(args):
 
     _client_concurrency = args.sglang_server_concurrency * rollout_num_gpus // args.rollout_num_gpus_per_engine
     if args.eval_num_gpus > 0:
-        _client_concurrency += args.sglang_server_concurrency * args.eval_num_gpus // args.eval_num_gpus_per_engine
+        _client_concurrency += args.eval_server_concurrency * args.eval_num_gpus // args.eval_num_gpus_per_engine
     _client_concurrency = max(_client_concurrency, args.sglang_server_concurrency)
 
     # Optionally initialize distributed POST via Ray without changing interfaces

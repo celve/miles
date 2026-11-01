@@ -250,6 +250,7 @@ def with_session_server(
         port=port,
         instance_id=instance_id,
         backend_url=backend_url,
+        eval_backend_url=None,
     )
     session_server = SessionServer(config)
 

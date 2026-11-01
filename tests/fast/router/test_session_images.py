@@ -252,6 +252,7 @@ def build_server(args_values: dict[str, Any], *, backend_url: str) -> tuple[Sess
         port=port,
         instance_id=args_values["session_server_instance_id"],
         backend_url=backend_url,
+        eval_backend_url=None,
     )
     return SessionServer(config), port
 
