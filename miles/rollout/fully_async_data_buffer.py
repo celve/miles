@@ -27,6 +27,7 @@ from miles.rollout.filter_hub.common_filters import (
     group_weight_version_stats,
 )
 from miles.utils.audit_utils.sample_ownership.recorder import SampleOwnershipRecorder
+from miles.utils.data import get_steps_per_rollout
 from miles.utils.function_registry import load_function
 from miles.utils.types import Sample
 
@@ -115,6 +116,10 @@ class DataBuffer(ABC):
     def get_metrics(self, trainer_model_id: str | None = None) -> dict[str, float]:
         """Report the metrics of one policy since its previous call (its window counters reset here)."""
 
+    def admits(self, *, in_flight_groups: int) -> bool:
+        """Whether the producer may start another group, given how many it has in flight."""
+        return True
+
     def state_dict(self) -> Any:
         raise NotImplementedError(f"{type(self).__name__} must implement state_dict() for checkpointing")
 
@@ -147,6 +152,9 @@ class DefaultDataBuffer(DataBuffer):
         to aborted and stale groups: drop discards them, retry recycles their
         prompts for regeneration. Missing-reward and custom-filter rejections
         are discarded directly.
+    (3) admission: with ``--max-weight-staleness`` set, the producer starts a
+        group only while the groups in flight and buffered fit in the batches
+        that will be consumed within that staleness, as AReaL does.
     """
 
     def __init__(self, input: DataBufferConstructorInput):
@@ -165,6 +173,9 @@ class DefaultDataBuffer(DataBuffer):
         self._dynamic_filter = load_function(args.dynamic_sampling_filter_path)
         self._cond = asyncio.Condition()
         self._current_version: int | None = None
+        self._staleness_measure = _STALENESS_MEASURES[args.weight_staleness_measure]
+        self._admission_drains = _admission_drains(args)
+        self._get_pending = False
 
         self._metric_gatherer = MetricGatherer()
         self._metric_aborted_groups = 0
@@ -213,7 +224,21 @@ class DefaultDataBuffer(DataBuffer):
             return False
         return True
 
+    def admits(self, *, in_flight_groups: int) -> bool:
+        if self._admission_drains is None:
+            return True
+        # A drain follows each weight update, so only a waiting get takes groups of this version without lag.
+        batches = self._admission_drains + int(self._get_pending)
+        return in_flight_groups + len(self._buffer) < batches * self._args.rollout_batch_size
+
     async def get(self, *, num_groups: int, current_version: int | None = None, **_) -> list[DataBufferInput]:
+        self._get_pending = True
+        try:
+            return await self._get(num_groups=num_groups, current_version=current_version)
+        finally:
+            self._get_pending = False
+
+    async def _get(self, *, num_groups: int, current_version: int | None) -> list[DataBufferInput]:
         if current_version is not None:
             self._current_version = current_version
         async with self._cond:
@@ -246,7 +271,7 @@ class DefaultDataBuffer(DataBuffer):
         limit = self._args.max_weight_staleness
         kept: list[DataBufferInput] = []
         for entry in self._buffer:
-            staleness = group_staleness(entry.group, current_version)
+            staleness = self._staleness_measure(group_weight_version_stats(entry.group), current_version)
             if limit is None or staleness is None or staleness <= limit:
                 kept.append(entry)
             else:
@@ -329,6 +354,21 @@ class DefaultDataBuffer(DataBuffer):
         return metrics
 
 
+_STALENESS_MEASURES = {
+    "oldest": GroupWeightVersionStats.oldest_lag,
+    "token_mean": GroupWeightVersionStats.token_weighted_lag,
+    "newest": GroupWeightVersionStats.newest_lag,
+}
+
+
+def _admission_drains(args: Namespace) -> int | None:
+    """Drains after the current one that a group started now may still reach within --max-weight-staleness."""
+    if args.max_weight_staleness is None:
+        return None
+    versions_per_drain = get_steps_per_rollout(args) * args.update_weights_interval
+    return args.max_weight_staleness // versions_per_drain
+
+
 # ============================ multi policy buffer =============================
 
 
@@ -360,6 +400,9 @@ class DefaultMultiDataBuffer(DataBuffer):
 
     def get_metrics(self, trainer_model_id: str | None = None) -> dict[str, float]:
         return self._inner_of(trainer_model_id).get_metrics(trainer_model_id=trainer_model_id)
+
+    def admits(self, *, in_flight_groups: int) -> bool:
+        return all(inner.admits(in_flight_groups=in_flight_groups) for inner in self._inners.values())
 
     def state_dict(self) -> Any:
         logger.warning(MULTI_POLICY_CHECKPOINT_UNSUPPORTED)

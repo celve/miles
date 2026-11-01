@@ -102,6 +102,8 @@ def make_args(**overrides) -> Namespace:
         rollout_batch_size=2,
         n_samples_per_prompt=N_SAMPLES_PER_PROMPT,
         max_weight_staleness=None,
+        weight_staleness_measure="oldest",
+        update_weights_interval=1,
         async_max_concurrent_samples=None,
         async_data_buffer_capacity_factor=1000.0,
         async_unused_samples_handler="drop",
@@ -121,6 +123,7 @@ def make_args(**overrides) -> Namespace:
         namespaced_radix_cache=True,
     )
     defaults.update(overrides)
+    defaults.setdefault("global_batch_size", defaults["rollout_batch_size"] * defaults["n_samples_per_prompt"])
     return Namespace(**defaults)
 
 
@@ -567,6 +570,53 @@ async def test_a_dying_worker_cancels_the_step_and_is_logged(monkeypatch, caplog
         await step
 
     assert "generation exploded" in caplog.text
+
+
+def make_version_stamping_generate(engine: dict):
+    async def generate(state, group, sampling_params, evaluation=False, sample_done_callback=None):
+        await asyncio.sleep(0)
+        for sample in group:
+            sample.status = Sample.Status.COMPLETED
+            sample.weight_versions = [
+                WeightVersionsPerCall(spans=[WeightVersionSpan(version=str(engine["version"]), abs_start=0, abs_end=1)])
+            ]
+            if sample_done_callback is not None:
+                sample_done_callback()
+        return group
+
+    return generate
+
+
+async def test_the_producer_starts_only_the_groups_the_staleness_cap_lets_the_next_drains_take(monkeypatch):
+    data_source = FakeDataSource()
+    engine = {"version": 0}
+    args = make_args(rollout_batch_size=2, max_weight_staleness=2, global_batch_size=2)
+    fn = make_fn(monkeypatch, args, data_source, generate=make_version_stamping_generate(engine))
+
+    await fn(train_input(rollout_id=0, weight_version=0))
+    await asyncio.sleep(0.05)
+    assert data_source.num_get_calls == 4
+
+    engine["version"] = 2
+    await fn(train_input(rollout_id=1, weight_version=2))
+    await asyncio.sleep(0.05)
+    assert data_source.num_get_calls == 6
+
+
+async def test_a_producer_ahead_of_the_trainer_generates_no_group_that_goes_stale(monkeypatch):
+    engine = {"version": 0}
+    args = make_args(
+        rollout_batch_size=2, max_weight_staleness=2, global_batch_size=2, async_data_buffer_capacity_factor=2.0
+    )
+    fn = make_fn(monkeypatch, args, FakeDataSource(), generate=make_version_stamping_generate(engine))
+
+    for rollout_id in range(4):
+        engine["version"] = 2 * rollout_id
+        output = await fn(train_input(rollout_id=rollout_id, weight_version=engine["version"]))
+        await asyncio.sleep(0.02)
+
+        assert output.metrics["rollout/fully_async/stale_groups_filtered"] == 0
+        assert output.metrics["rollout/fully_async/max_staleness"] <= 2
 
 
 async def test_async_max_concurrent_samples_caps_in_flight_groups(monkeypatch):

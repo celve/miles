@@ -20,7 +20,7 @@ from miles.backends.training_utils.data.token_space_media_process import (
 from miles.backends.training_utils.parallel import get_parallel_state
 from miles.platforms import current_platform
 from miles.utils.audit_utils.witness.allocator import WitnessInfo
-from miles.utils.data import get_minimum_num_micro_batch_size, process_rollout_data
+from miles.utils.data import get_minimum_num_micro_batch_size, get_steps_per_rollout, process_rollout_data
 from miles.utils.dp_schedule import TrainParallelConfig
 from miles.utils.ft_utils.process_group_utils import GeneralPGUtil
 from miles.utils.object_store import ObjectStoreGetResult
@@ -637,11 +637,6 @@ class DataIterator:
         """Reset internal offset to the start and return self."""
         self.offset = 0
         return self
-
-
-def get_steps_per_rollout(args: Namespace) -> int:
-    """Optimizer steps per rollout round; one when the global batch counts the samples of multi-sample rollouts."""
-    return max(args.rollout_batch_size * args.n_samples_per_prompt // args.global_batch_size, 1)
 
 
 def get_num_rollouts(args: Namespace, rollout_data: RolloutBatch, num_steps: int) -> list[int]:
