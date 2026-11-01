@@ -772,6 +772,7 @@ class TestInitHttpClientConcurrency:
             rollout_num_gpus_per_engine=1,
             eval_num_gpus=0,
             eval_num_gpus_per_engine=1,
+            eval_server_concurrency=512,
             eval_uses_snapshots=True,
             sglang_server_concurrency=512,
             use_distributed_post=False,
@@ -803,6 +804,13 @@ class TestInitHttpClientConcurrency:
         concurrency, client = self._init(monkeypatch, args)
         assert client is not None
         assert concurrency == 512 * 4 // 2
+
+    def test_the_eval_fleet_adds_its_own_concurrency_per_engine(self, monkeypatch):
+        args = self._args(
+            rollout_num_gpus=4, sglang_server_concurrency=16, eval_num_gpus=1, eval_server_concurrency=64
+        )
+        concurrency, _ = self._init(monkeypatch, args)
+        assert concurrency == 16 * 4 + 64
 
     def test_in_job_gpu_sizing_is_unchanged(self, monkeypatch):
         args = self._args(rollout_num_gpus=8, rollout_num_gpus_per_engine=2, eval_uses_snapshots=False)
