@@ -1,6 +1,8 @@
 import logging
+import weakref
 from argparse import Namespace
 from collections.abc import Callable, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 
 import torch
 import torch.distributed as dist
@@ -43,6 +45,85 @@ def _media_dtype(args: Namespace) -> torch.dtype | None:
     return None
 
 
+class LazyMultimodalTrainInputs(Sequence):
+    def __init__(
+        self,
+        rollout_engine_args: RolloutEngineProcessorArgs,
+        multimodal_inputs: list,
+        token_ids: list,
+        *,
+        device: torch.device,
+        dtype: torch.dtype | None,
+        prefetch: bool,
+    ) -> None:
+        self._rollout_engine_args = rollout_engine_args
+        self._multimodal_inputs = multimodal_inputs
+        self._token_ids = token_ids
+        self._device = device
+        self._dtype = dtype
+        self._rebuilder = None
+        self._stream = None
+        self._pending: tuple[tuple[int, ...], Future] | None = None
+        if prefetch:
+            self._rebuilder = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="miles-media-rebuild",
+                initializer=torch.cuda.set_device,
+                initargs=(device,),
+            )
+            weakref.finalize(self, self._rebuilder.shutdown, wait=False, cancel_futures=True)
+            self._stream = torch.cuda.Stream(device)
+
+    def __getstate__(self) -> dict:
+        return {**self.__dict__, "_rebuilder": None, "_stream": None, "_pending": None}
+
+    def __len__(self) -> int:
+        return len(self._multimodal_inputs)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return self.get_many(range(*index.indices(len(self))))
+        return self.get_many([index])[0]
+
+    def _rebuild(self, index: int) -> dict[str, torch.Tensor] | None:
+        (mm,) = compute_multimodal_train_inputs(
+            self._rollout_engine_args,
+            [self._multimodal_inputs[index]],
+            [torch.as_tensor(self._token_ids[index])],
+            device=self._device,
+            dtype=self._dtype,
+        )
+        return mm
+
+    def _rebuild_on_stream(self, indices: tuple[int, ...]) -> tuple[list, torch.cuda.Event]:
+        with torch.cuda.stream(self._stream):
+            out = [self._rebuild(i) for i in indices]
+            return out, self._stream.record_event()
+
+    def get_many(self, indices) -> list:
+        indices = tuple(indices)
+        if self._rebuilder is None:
+            return [self._rebuild(i) for i in indices]
+        pending, self._pending = self._pending, None
+        if pending is not None and pending[0] == indices:
+            future = pending[1]
+        else:
+            future = self._rebuilder.submit(self._rebuild_on_stream, indices)
+        out, ready = future.result()
+        consumer = torch.cuda.current_stream(self._device)
+        consumer.wait_event(ready)
+        for mm in out:
+            for value in (mm or {}).values():
+                if value.is_cuda:
+                    value.record_stream(consumer)
+        return out
+
+    def prefetch(self, indices) -> None:
+        if self._rebuilder is not None:
+            indices = tuple(indices)
+            self._pending = (indices, self._rebuilder.submit(self._rebuild_on_stream, indices))
+
+
 def get_rollout_data(
     args: Namespace,
     rollout_data_ref: Box,
@@ -62,6 +143,7 @@ def get_rollout_data(
         witness_info=witness_info,
         output_store_read=output_store_read,
     )
+    token_ids = rollout_data["tokens"]
     # move tokens to the device in advance
     rollout_data["tokens"] = [
         torch.tensor(t, dtype=torch.long, device=current_platform.current_device()) for t in rollout_data["tokens"]
@@ -81,13 +163,17 @@ def get_rollout_data(
         ]
 
     if "multimodal_inputs" in rollout_data:
-        rollout_data["multimodal_train_inputs"] = compute_multimodal_train_inputs(
+        multimodal_train_inputs = LazyMultimodalTrainInputs(
             RolloutEngineProcessorArgs.from_sglang_config(args.sglang),
             rollout_data.pop("multimodal_inputs"),
-            rollout_data["tokens"],
+            token_ids,
             device=current_platform.current_device(),
             dtype=_media_dtype(args),
+            prefetch=args.multimodal_rebuild == "micro_batch_prefetch",
         )
+        if args.multimodal_rebuild == "round":
+            multimodal_train_inputs = multimodal_train_inputs.get_many(range(len(multimodal_train_inputs)))
+        rollout_data["multimodal_train_inputs"] = multimodal_train_inputs
     elif "multimodal_train_inputs" in rollout_data:
         # Move multimodal training tensors to the device in advance
         rollout_data["multimodal_train_inputs"] = [
@@ -450,20 +536,32 @@ class DataIterator:
             if vals is None:
                 batch[key] = None
             else:
+                rebuilt_per_micro_batch = hasattr(
+                    vals, "get_many"
+                )  # config-access-exempt: rollout values rebuilt per micro-batch
                 if self.micro_batch_indices is not None:
                     indices = self.micro_batch_indices[self.offset]
-                    batch[key] = [vals[i] for i in indices]
+                    batch[key] = vals.get_many(indices) if rebuilt_per_micro_batch else [vals[i] for i in indices]
                 else:
                     assert self.offset + self.micro_batch_size <= len(
                         vals
                     ), f"offset: {self.offset}, micro_batch_size: {self.micro_batch_size}, len(vals): {len(vals)}"
                     batch[key] = vals[self.offset : self.offset + self.micro_batch_size]
+                if rebuilt_per_micro_batch and (next_indices := self._next_indices(len(vals))):
+                    vals.prefetch(next_indices)
 
         if self.micro_batch_indices is not None:
             self.offset += 1
         else:
             self.offset += self.micro_batch_size
         return batch
+
+    def _next_indices(self, size: int) -> list[int]:
+        if self.micro_batch_indices is not None:
+            following = self.offset + 1
+            return self.micro_batch_indices[following] if following < len(self.micro_batch_indices) else []
+        start = self.offset + self.micro_batch_size
+        return list(range(start, min(start + self.micro_batch_size, size)))
 
     def reset(self) -> "DataIterator":
         """Reset internal offset to the start and return self."""
@@ -497,7 +595,10 @@ def get_data_iterator(
     - `data_iterators`: list of `DataIterator`, one per VPP stage (size 1 if VPP disabled)
     - `num_microbatches`: list[int], one per local step in the rollout (length = steps)
     """
-    expand_multimodal_rollout_data_in_place(rollout_data, qkv_format=args.qkv_format)
+    if not hasattr(
+        rollout_data.get("multimodal_train_inputs"), "get_many"
+    ):  # config-access-exempt: rollout values rebuilt per micro-batch are already expanded
+        expand_multimodal_rollout_data_in_place(rollout_data, qkv_format=args.qkv_format)
 
     parallel_state = get_parallel_state()
 

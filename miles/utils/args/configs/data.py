@@ -97,6 +97,19 @@ class DataConfig(BaseConfig):
             help="SGLang expands media placeholders and the trainer builds the processor inputs (models with an SGLang token-space strategy)."
         ),
     ] = False
+    multimodal_rebuild: A[
+        str | None,
+        Arg(
+            choices=["round", "micro_batch", "micro_batch_prefetch"],
+            help=(
+                "How the trainer rebuilds media tensors with --multimodal-token-space-processing. round: once per "
+                "round, held for the whole step. micro_batch: each time a micro-batch is fetched, so the GPU holds "
+                "one micro-batch's media, at the cost of one rebuild per forward pass. micro_batch_prefetch: also "
+                "rebuild the next micro-batch on a background thread and its own CUDA stream while the current one "
+                "computes (CUDA only). Defaults to micro_batch_prefetch on CUDA and micro_batch elsewhere."
+            ),
+        ),
+    ] = None
     shared_media_dir: A[
         str | None,
         Arg(

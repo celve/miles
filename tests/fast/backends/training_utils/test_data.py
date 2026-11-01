@@ -181,23 +181,27 @@ class TestGetRolloutDataParallelWiring:
 
 
 class TestGetRolloutDataMediaRebuild:
-    @pytest.mark.parametrize(
-        ("bf16", "fp16", "expected"),
-        [(True, False, torch.bfloat16), (False, True, torch.float16), (False, False, torch.float32)],
-    )
-    def test_rebuilt_tensors_are_held_in_the_training_dtype(
-        self, monkeypatch: pytest.MonkeyPatch, bf16: bool, fp16: bool, expected: torch.dtype
-    ) -> None:
+    @staticmethod
+    def _get_rollout_data(monkeypatch: pytest.MonkeyPatch, *, mode: str, bf16: bool = True, fp16: bool = False):
+        rebuilds = []
+
         def process(args, rollout_data_ref, **kwargs):
             return {
-                "tokens": [[1, 9, 9, 2], [1, 2]],
-                "loss_masks": [[1], [1]],
-                "multimodal_inputs": [{"images": ["/shared/a.png"]}, None],
+                "tokens": [[1, 9, 2], [1, 2], [1, 9, 9, 2]],
+                "loss_masks": [[1], [1], [1]],
+                "total_lengths": [3, 2, 4],
+                "multimodal_inputs": [{"images": ["/shared/a.png"]}, None, {"images": ["/shared/b.png", "/c.png"]}],
+                "micro_batch_indices": [[2, 1], [0]],
+                "num_microbatches": [2],
             }, None
 
         class Processor:
-            async def process(self, **kwargs):
-                return {"pixel_values": torch.ones(2, 3), "image_grid_thw": torch.tensor([[1, 1, 2]])}
+            async def process(self, *, image_data, input_ids, **kwargs):
+                rebuilds.append((image_data, input_ids))
+                return {
+                    "pixel_values": torch.ones(len(image_data), 3),
+                    "image_grid_thw": torch.tensor([[1, 1, 2]] * len(image_data)),
+                }
 
         monkeypatch.setattr(data_utils, "get_parallel_state", lambda: _parallel_state(dp_size=1))
         monkeypatch.setattr(data_utils, "process_rollout_data", process)
@@ -212,15 +216,54 @@ class TestGetRolloutDataMediaRebuild:
             data_utils, "RolloutEngineProcessorArgs", Namespace(from_sglang_config=lambda sglang: None)
         )
         monkeypatch.setattr(data_utils.current_platform, "current_device", lambda: torch.device("cpu"))
-        args = Namespace(enable_witness=False, qkv_format="thd", sglang=None, backend=Namespace(bf16=bf16, fp16=fp16))
+        args = Namespace(
+            enable_witness=False,
+            qkv_format="thd",
+            sglang=None,
+            use_dynamic_global_batch_size=False,
+            backend=Namespace(bf16=bf16, fp16=fp16),
+            multimodal_rebuild=mode,
+        )
 
         rollout, _ = data_utils.get_rollout_data(
             args=args,
             rollout_data_ref=object(),
             train_parallel_config=_parallel_state(dp_size=1).train_parallel_config(supports_precomputed_schedule=True),
         )
+        return args, rollout, rebuilds
 
-        rebuilt, text_only = rollout["multimodal_train_inputs"]
+    @pytest.mark.parametrize(
+        ("bf16", "fp16", "expected"),
+        [(True, False, torch.bfloat16), (False, True, torch.float16), (False, False, torch.float32)],
+    )
+    @pytest.mark.parametrize("mode", ["round", "micro_batch"])
+    def test_rebuilt_tensors_are_held_in_the_training_dtype(
+        self, monkeypatch: pytest.MonkeyPatch, bf16: bool, fp16: bool, expected: torch.dtype, mode: str
+    ) -> None:
+        _, rollout, _ = self._get_rollout_data(monkeypatch, mode=mode, bf16=bf16, fp16=fp16)
+
+        rebuilt, text_only = rollout["multimodal_train_inputs"][:2]
         assert rebuilt["pixel_values"].dtype == expected
         assert rebuilt["image_grid_thw"].dtype == torch.int64
         assert text_only is None
+
+    def test_the_round_rebuild_holds_every_sample(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _, rollout, rebuilds = self._get_rollout_data(monkeypatch, mode="round")
+
+        assert isinstance(rollout["multimodal_train_inputs"], list)
+        assert rebuilds == [(["/shared/a.png"], [1, 9, 2]), (["/shared/b.png", "/c.png"], [1, 9, 9, 2])]
+
+    def test_per_micro_batch_rebuild_rebuilds_only_the_fetched_micro_batch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        args, rollout, rebuilds = self._get_rollout_data(monkeypatch, mode="micro_batch")
+        (iterator,), _ = data_utils.get_data_iterator(args, model=None, rollout_data=rollout)
+        assert rebuilds == []
+
+        first = iterator.get_next(["multimodal_train_inputs"])["multimodal_train_inputs"]
+
+        assert rebuilds == [(["/shared/b.png", "/c.png"], [1, 9, 9, 2])]
+        assert first[0]["pixel_values"].shape == (2, 3)
+        assert first[1] is None
+        iterator.get_next(["multimodal_train_inputs"])
+        assert rebuilds[1:] == [(["/shared/a.png"], [1, 9, 2])]

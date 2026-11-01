@@ -137,6 +137,7 @@ def _trainer_processor(rollout_engine_args: RolloutEngineProcessorArgs, device: 
             image_processor_backend=rollout_engine_args.image_processor_backend,
             disable_fast_image_processor=rollout_engine_args.disable_fast_image_processor,
             mm_process_config=json.loads(rollout_engine_args.mm_process_config_json),
+            keep_mm_features_on_device=True,
         ),
         worker_thread_device=worker_thread_device,
     )
