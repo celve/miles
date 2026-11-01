@@ -119,7 +119,7 @@ GPU box, run Harbor's agent server (`miles_agent_server.py` on
 machine and set `AGENT_SERVER_URL` for the rollout. The agent function still
 builds each trial from its bindings and env vars here, sends it in `/run`'s
 `trial_config`, and maps the returned `TrialResult` exactly as it would
-in-process. Keep `--custom-agent-function-mode inline`, since each call is now
+in-process. Use `--custom-agent-function-mode inline`, since each call is now
 one HTTP request.
 
 On the CPU box, the server needs:
