@@ -39,6 +39,7 @@ export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && ray job submit
   --diffusion-num-sde-steps 10
   --diffusion-sde-window-range 0,10 
   --advantage-estimator grpo
+  --rm-type ocr
   --diffusion-globalize-reward-std
   --diffusion-clip-range 1e-4
   --diffusion-kl-beta 0.04 

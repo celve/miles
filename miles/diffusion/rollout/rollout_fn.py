@@ -1,4 +1,4 @@
-"""Flow-GRPO rollout: SDE-sampled images from sglang.multimodal_gen through the Miles router, scored by OCR."""
+"""Flow-GRPO rollout: SDE-sampled images from sglang.multimodal_gen through the Miles router, scored by `rm_hub`."""
 
 import asyncio
 import logging
@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 
-from miles.diffusion.rollout.ocr import OcrRewardPool, image_to_rgb_uint8
+from miles.diffusion.rollout.ocr import OcrRewardPool
 from miles.diffusion.rollout.response import parse_rollout_response
 from miles.rollout.base_types import (
     BaseRolloutFn,
@@ -17,6 +17,7 @@ from miles.rollout.base_types import (
     RolloutFnTrainOutput,
 )
 from miles.rollout.inference_rollout.inference_rollout_train import get_worker_urls
+from miles.rollout.rm_hub import batched_async_rm
 from miles.utils.function_registry import load_function
 from miles.utils.types import Sample
 
@@ -35,7 +36,8 @@ class DiffusionRolloutFn(BaseRolloutFn):
         self.step_strategy = load_function(args.diffusion_step_strategy_path)
         self.sampling_params = build_sampling_params(args)
         self.semaphore: asyncio.Semaphore | None = None
-        self.reward_pool = OcrRewardPool(num_workers=args.diffusion_ocr_num_workers)
+        self.reward_pool = OcrRewardPool(num_workers=args.diffusion_ocr_num_workers) if args.rm_type == "ocr" else None
+        self.reward_kwargs = {"ocr_pool": self.reward_pool} if self.reward_pool is not None else {}
         self.client = httpx.AsyncClient(limits=httpx.Limits(max_keepalive_connections=0), timeout=httpx.Timeout(None))
 
     async def __call__(self, input: RolloutFnInput) -> RolloutFnTrainOutput:
@@ -58,7 +60,10 @@ class DiffusionRolloutFn(BaseRolloutFn):
                 for start in range(0, len(group), size)
             )
         )
-        return [sample for microgroup in microgroups for sample in microgroup]
+        group = [sample for microgroup in microgroups for sample in microgroup]
+        if self.args.group_rm:
+            await batched_async_rm(self.args, group, inplace_set_reward_field=True, **self.reward_kwargs)
+        return group
 
     async def _generate_microgroup(self, microgroup: list[Sample], *, seed: int) -> list[Sample]:
         num_steps = self.sampling_params["num_inference_steps"]
@@ -82,12 +87,8 @@ class DiffusionRolloutFn(BaseRolloutFn):
             sample.diffusion = rollout
             sample.status = Sample.Status.COMPLETED
 
-        rewards = await self.reward_pool.score(
-            [image_to_rgb_uint8(sample.diffusion.generated_output) for sample in microgroup],
-            [sample.prompt for sample in microgroup],
-        )
-        for sample, reward in zip(microgroup, rewards, strict=True):
-            sample.reward = reward
+        if not self.args.group_rm:
+            await batched_async_rm(self.args, microgroup, inplace_set_reward_field=True, **self.reward_kwargs)
         return microgroup
 
     async def _post(self, payload: dict[str, Any]) -> bytes:
@@ -105,7 +106,8 @@ class DiffusionRolloutFn(BaseRolloutFn):
 
     async def dispose(self) -> None:
         await self.client.aclose()
-        self.reward_pool.shutdown()
+        if self.reward_pool is not None:
+            self.reward_pool.shutdown()
 
 
 def build_sampling_params(args: Namespace) -> dict[str, Any]:

@@ -102,6 +102,7 @@ def execute(args: ScriptArgs) -> None:
 
     grpo_args = (
         "--advantage-estimator grpo "
+        "--rm-type ocr "
         "--diffusion-globalize-reward-std "
         "--diffusion-clip-range 1e-4 "
         "--diffusion-kl-beta 0.04 "

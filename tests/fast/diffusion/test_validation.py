@@ -22,6 +22,7 @@ def _supported(**overrides):
         hf_checkpoint="/models/stable-diffusion-3.5-medium",
         # An FSDP backend flag, absent from the shared parser's defaults.
         optimizer_cpu_offload=False,
+        rm_type="ocr",
         **_HOOKS,
     )
     return Namespace(**(defaults | recipe | overrides))
@@ -52,6 +53,7 @@ def test_the_recipe_layout_passes_and_resolves_the_family_defaults():
         (dict(partial_rollout=True), "async"),
         (dict(dynamic_sampling_filter_path="f"), "filters"),
         (dict(rm_type="math"), "reward"),
+        (dict(rm_type=None), "reward"),
         (dict(use_output_store=True), "output store"),
         (dict(object_store_backend="mooncake"), "Mooncake"),
         (dict(use_fault_tolerance=True), "fault tolerance"),
@@ -71,6 +73,17 @@ def test_the_recipe_layout_passes_and_resolves_the_family_defaults():
 def test_each_unsupported_option_is_rejected_at_startup(override, message):
     with pytest.raises(ValueError, match=message):
         validate_diffusion_args(_supported(**override))
+
+
+def test_a_custom_reward_replaces_the_ocr_reward():
+    validate_diffusion_args(_supported(rm_type=None, custom_rm_path="my.rewards.score"))
+
+
+def test_a_text_run_rejects_the_image_reward():
+    from tests.fast.fixtures.args_fixtures import parse_fsdp_test_config
+
+    with pytest.raises(ValueError, match="--rm-type ocr"):
+        parse_fsdp_test_config("--rm-type", "ocr")
 
 
 def test_the_fsdp_parse_rejects_optimizer_cpu_offload_for_diffusion():

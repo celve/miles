@@ -874,6 +874,8 @@ def miles_validate_args(args):
     if mode == "broadcast_packed" and (args.train_backend != "megatron" or args.colocate):
         raise ValueError("broadcast_packed requires Megatron non-colocated weight transfer")
     validate_dashboard_args(args)
+    if args.rm_type == "ocr" and args.model_kind != "diffusion":
+        raise ValueError("--rm-type ocr scores generated images, so it needs --model-kind diffusion")
     if args.model_kind == "diffusion":
         # Local import: the diffusion package pulls in optional dependencies text runs never install.
         from miles.diffusion.arguments import validate_diffusion_args
