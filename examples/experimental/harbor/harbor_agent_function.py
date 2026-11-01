@@ -60,12 +60,20 @@ Env vars (read on the rollout worker):
   HARBOR_VERIFIER_IMPORT_PATH / HARBOR_VERIFIER_KWARGS
                          a Harbor verifier class, and its JSON kwargs, run in
                          place of the task's ``tests/``
+  AGENT_SERVER_URL       run the built trial on Harbor's agent server
+                         (``miles_agent_server.py``, celve/harbor) instead of in
+                         this process; the server runs it on its own CPUs and
+                         returns the ``TrialResult``. The sandbox provider key,
+                         the task dirs and the agent/verifier classes are then
+                         needed on the server, not here.
 
 Failure semantics: a verdict is returned as-is. A trial the policy cannot have
 failed is discarded with ``InfraAbort``: one that failed before its agent
 started (``SandboxUnavailable``, ``AgentSetupFailed``), one whose in-process
 agent lost the model service (``ServerUnreachable``), or a computer-1 trial whose
-own in-sandbox command failed mid-episode (``SandboxLost``). Every other episode that ends
+own in-sandbox command failed mid-episode (``SandboxLost``), plus, with an agent server, a
+trial the server could not run or answer for (``AgentServerUnreachable``, ``AgentServerLost``).
+Every other episode that ends
 without a verdict scores 0 with a named ``exit_status`` (``TimeLimitExceeded``,
 ``SequenceLengthLimitExceeded``, ``AgentError``), matching the agent-server
 path. Configuration errors (missing task dir, bad env vars) raise instead:
@@ -83,6 +91,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
+
+import httpx
 
 from miles.rollout.agentic.agent_function import InfraAbort
 from miles.rollout.agentic.credentials import PROVIDER_CREDENTIALS, resolve_provider_api_key
@@ -562,6 +573,79 @@ def _agent_started(result) -> bool:
 # --- entry -----------------------------------------------------------------
 
 
+# The server answers these when it never ran the trial: a lost worker, or a /flush.
+_AGENT_SERVER_LOST_STATUSES = {"Error: NoResult", "Flushed"}
+
+_agent_server_client: httpx.AsyncClient | None = None
+
+
+class AgentServerRefused(Exception):
+    """The agent server refused the trial for a reason that fails every sample (missing task dir, bad import)."""
+
+
+def _agent_server_url() -> str | None:
+    return os.getenv("AGENT_SERVER_URL", "").strip().rstrip("/") or None
+
+
+def _get_agent_server_client() -> httpx.AsyncClient:
+    global _agent_server_client
+    if _agent_server_client is None:
+        # each in-flight trial holds one connection for its whole run; AGENT_TRIAL_TIMEOUT bounds it
+        _agent_server_client = httpx.AsyncClient(timeout=None, limits=httpx.Limits(max_connections=None))
+    return _agent_server_client
+
+
+def _agent_server_request(config, metadata: dict[str, Any], session_url: str) -> dict[str, Any]:
+    request = {
+        "instance_id": str(metadata.get("instance_id", "")),
+        "base_url": session_url,
+        "model": config.agent.model_name or "",
+        "agent_name": _agent_name(metadata),
+        "trial_config": config.model_dump(mode="json"),
+    }
+    if metadata.get("session_server_id") is not None:
+        # The id in metadata is the cluster address; the server checks it against the host base_url names.
+        request["session_server_id"] = urlsplit(session_url).netloc
+    if (instance_id := metadata.get("session_server_instance_id")) is not None:
+        request["session_server_instance_id"] = instance_id
+    return request
+
+
+async def _run_on_agent_server(url: str, config, metadata: dict[str, Any], session_url: str):
+    """POST the built trial to the agent server; return its ``TrialResult`` and trial dir."""
+    from harbor.models.trial.result import TrialResult
+
+    instance_id = metadata.get("instance_id")
+    try:
+        response = await _get_agent_server_client().post(
+            f"{url}/run", json=_agent_server_request(config, metadata, session_url)
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise InfraAbort("AgentServerUnreachable", f"agent server {url} for {instance_id}: {exc!r}") from exc
+    if payload.get("trial_result") is not None:
+        try:
+            return TrialResult.model_validate(payload["trial_result"]), payload.get("trial_dir")
+        except ValueError as exc:
+            raise AgentServerRefused(f"agent server {url} returned a TrialResult this Harbor cannot read") from exc
+    exit_status = str(payload.get("exit_status", ""))
+    if exit_status in _AGENT_SERVER_LOST_STATUSES:
+        raise InfraAbort("AgentServerLost", f"agent server {url} for {instance_id}: {exit_status}")
+    if exit_status.startswith("Error:"):
+        # Trial.create or Trial.run raised on the server, as the in-process path's except clause catches.
+        raise RuntimeError(f"agent server trial for {instance_id} failed: {exit_status}")
+    raise AgentServerRefused(f"agent server {url} refused {instance_id}: {exit_status!r}")
+
+
+async def _run_in_process(config):
+    from harbor.trial.trial import Trial
+
+    trial = await Trial.create(config)
+    # wait_for cancels the coroutine on expiry; Trial.run handles the cancellation and stops its environment.
+    return await trial.run(), str(trial.paths.trial_dir)
+
+
 async def run(
     base_url: str,
     prompt: Any,
@@ -569,30 +653,34 @@ async def run(
     metadata: dict[str, Any] | None = None,
     **kwargs,
 ) -> dict[str, Any]:
-    """Run one Harbor trial for the sample; return its verdict as metadata."""
-    from harbor.trial.trial import Trial
-
+    """Run one Harbor trial for the sample, here or on the agent server; return its verdict as metadata."""
     metadata = metadata or {}
     request_kwargs = request_kwargs or {}
     session_url = openai_session_url(base_url)
     instance_id = metadata.get("instance_id")
     trial_timeout_s = _trial_timeout_s()
+    agent_server_url = _agent_server_url()
 
     # Config errors (missing task dir, bad env vars, unresolvable provider key)
     # fail every sample the same way; raising beats training on silent all-zero
     # rewards.
-    _ensure_provider_key()
+    if agent_server_url is None:
+        _ensure_provider_key()
     config = build_trial_config(metadata, session_url, request_kwargs)
+    trial_run = (
+        _run_on_agent_server(agent_server_url, config, metadata, session_url)
+        if agent_server_url
+        else _run_in_process(config)
+    )
 
     try:
-        trial = await Trial.create(config)
-        # wait_for cancels the coroutine on expiry; Trial.run handles the
-        # cancellation and stops its environment.
-        result = await asyncio.wait_for(trial.run(), timeout=trial_timeout_s)
-    except asyncio.TimeoutError:
+        result, trial_dir = await asyncio.wait_for(trial_run, timeout=trial_timeout_s)
+    except TimeoutError:
         # The policy may be what is stalling, so this is a negative sample.
         logger.error(f"Harbor trial for {instance_id} exceeded {trial_timeout_s}s; scoring 0")
         return _failed("TimeLimitExceeded")
+    except (InfraAbort, AgentServerRefused):
+        raise
     except Exception as e:
         logger.error(f"Harbor trial for {instance_id} failed: {e}", exc_info=True)
         return _failed("AgentError")
@@ -602,6 +690,16 @@ async def run(
         raise InfraAbort(cause, f"Harbor trial for {instance_id}: {exc.exception_type}: {exc.exception_message}")
 
     out = trial_result_to_metadata(result)
-    out["trial_dir"] = str(trial.paths.trial_dir)
+    out["trial_dir"] = trial_dir
     logger.info(f"Harbor trial {instance_id}: exit_status={out['exit_status']} reward={out['reward']}")
     return out
+
+
+async def abort(args) -> None:
+    """Flush the agent server's trials for this run's session servers when Miles aborts a rollout."""
+    if _agent_server_url() is None:
+        return
+    # the agent-server example's module, which the reward hook (generate.py) already puts on the path
+    from swe_agent_function import abort as flush_agent_server
+
+    await flush_agent_server(args)
