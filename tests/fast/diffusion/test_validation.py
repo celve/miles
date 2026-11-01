@@ -24,6 +24,7 @@ def _supported(**overrides):
         # An FSDP backend flag, absent from the shared parser's defaults.
         optimizer_cpu_offload=False,
         rm_type="ocr",
+        eps_clip=1e-4,
     )
     return Namespace(**(defaults | recipe | overrides))
 
@@ -65,6 +66,7 @@ def test_the_recipe_layout_passes_and_resolves_the_family_defaults():
         (dict(debug_rollout_only=True), "debug"),
         (dict(ci_test=True), "ci-test"),
         (dict(optimizer_cpu_offload=True), "optimizer-cpu-offload"),
+        (dict(eps_clip=0.2), "explicitly"),
         (dict(eps_clip_high=0.3), "asymmetric"),
         (dict(eps_clip_c=3.0), "dual-clip"),
         (dict(save_debug_rollout_data="/dump/{rollout_id}.pt"), "debug dumps"),
@@ -105,6 +107,13 @@ def test_model_kind_sets_the_four_hooks():
 
 def test_the_diffusion_flags_hold_no_copy_of_the_ppo_clip_flags():
     assert not {"diffusion_clip_range", "diffusion_clip_grad"} & DiffusionConfig.model_fields.keys()
+
+
+def test_a_parsed_diffusion_run_needs_an_explicit_eps_clip():
+    from tests.fast.fixtures.args_fixtures import parse_fsdp_test_config
+
+    with pytest.raises(ValueError, match="--eps-clip 0.2"):
+        parse_fsdp_test_config("--model-kind", "diffusion")
 
 
 def test_a_foreign_hook_is_rejected():
