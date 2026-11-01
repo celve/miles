@@ -1,4 +1,5 @@
 from argparse import Namespace
+from types import SimpleNamespace
 
 import msgpack
 import numpy as np
@@ -10,6 +11,7 @@ from miles.diffusion.rollout.data_source import DiffusionPromptDataSource
 from miles.diffusion.rollout.ocr import image_to_rgb_uint8, ocr_reward, ocr_target_text
 from miles.diffusion.rollout.response import parse_rollout_response
 from miles.diffusion.rollout.step_strategy import sde_window
+from miles.ray.rollout.rollout_executor import RolloutExecutor
 
 
 def _tensor(t):
@@ -91,3 +93,19 @@ def test_the_data_source_repeats_prompts_wraps_the_file_and_resumes(tmp_path):
     assert [[s.prompt for s in g] for g in groups] == [["a", "a"], ["b", "b"], ["a", "a"]]
     assert [[(s.group_index, s.index) for s in g] for g in groups][2] == [(2, 4), (2, 5)]
     assert [(s.prompt, s.group_index, s.index) for s in resumed.get_samples(1)[0]] == [("b", 3, 6), ("b", 3, 7)]
+
+
+def test_num_epoch_counts_the_diffusion_prompts(tmp_path):
+    path = tmp_path / "prompts.jsonl"
+    path.write_text("".join(f'{{"input": "p{i}"}}\n' for i in range(6)))
+    args = Namespace(
+        prompt_data=str(path),
+        input_key="input",
+        metadata_key="metadata",
+        n_samples_per_prompt=2,
+        rollout_global_dataset=True,
+        rollout_batch_size=2,
+    )
+    executor = SimpleNamespace(args=args, data_source=DiffusionPromptDataSource(args))
+
+    assert RolloutExecutor.get_num_rollout_per_epoch(executor) == 3

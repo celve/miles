@@ -3,10 +3,10 @@
 import argparse
 import dataclasses
 import json
-import logging
 import os
 
-logger = logging.getLogger(__name__)
+# `ServerGroupConfig.resolve` adds this text-engine key to a group's overrides; multimodal_gen sleeps whole engines.
+_MILES_INJECTED_TEXT_ARGS = {"enable_memory_saver"}
 
 
 def _pin_gpu(base_gpu_id: int) -> None:
@@ -27,9 +27,8 @@ def main() -> None:
     from sglang.multimodal_gen.runtime.server_args import ServerArgs
 
     accepted = {field.name for field in dataclasses.fields(ServerArgs)} | {"dit_precision", "vae_precision"}
-    # Miles adds text-engine keys (e.g. enable_memory_saver) to every group's overrides; drop what this server lacks.
-    if dropped := sorted(cli.server_args.keys() - accepted):
-        logger.warning(f"sglang.multimodal_gen does not take these server args, dropping them: {dropped}")
+    if unknown := sorted(cli.server_args.keys() - accepted - _MILES_INJECTED_TEXT_ARGS):
+        raise ValueError(f"sglang.multimodal_gen does not take these server args: {unknown}")
     launch_server(ServerArgs.from_kwargs(**{k: v for k, v in cli.server_args.items() if k in accepted}))
 
 

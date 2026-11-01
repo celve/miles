@@ -21,6 +21,11 @@ class DiffusionPromptDataSource(DataSource):
         self.sample_group_index = 0
         self.sample_index = 0
 
+    @property
+    def dataset(self) -> list[tuple[str, dict]]:
+        """The prompt list; its length is what `--num-epoch` counts."""
+        return self.prompts
+
     def get_samples(self, num_samples: int) -> list[list[Sample]]:
         groups = []
         for _ in range(num_samples):
