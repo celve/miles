@@ -372,6 +372,7 @@ def parse_args_and_get_parser(
 
     sglang_validate_args(args)
 
+    # CPU-offloaded FSDP params already leave the GPU free during rollout; offload_train would move them again.
     if backend == "fsdp" and args.optimizer_cpu_offload:
         args.offload_train = False
 

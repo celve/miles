@@ -16,7 +16,8 @@ class _PeftDiT(torch.nn.Module):
         return SimpleNamespace(_no_split_modules=["Linear"])
 
 
-def test_the_dit_is_sharded_by_miles_apply_fsdp2_without_casting_inputs(monkeypatch):
+@pytest.mark.parametrize("cpu_offload", [False, True])
+def test_the_dit_is_sharded_by_miles_apply_fsdp2_without_casting_inputs(monkeypatch, cpu_offload):
     calls = []
     monkeypatch.setattr(fsdp, "fully_shard", lambda module, **kwargs: calls.append((module, kwargs)))
     monkeypatch.setattr(dit_model.dist, "get_rank", lambda: 1)
@@ -30,7 +31,7 @@ def test_the_dit_is_sharded_by_miles_apply_fsdp2_without_casting_inputs(monkeypa
     args = SimpleNamespace(
         hf_checkpoint="/ckpt",
         diffusion_forward_dtype="fp16",
-        backend=SimpleNamespace(gradient_checkpointing=False, fp16=False),
+        backend=SimpleNamespace(gradient_checkpointing=False, fp16=False, optimizer_cpu_offload=cpu_offload),
     )
 
     with pytest.raises(AttributeError, match="_get_fsdp_state"):
@@ -42,6 +43,7 @@ def test_the_dit_is_sharded_by_miles_apply_fsdp2_without_casting_inputs(monkeypa
         and kwargs["mp_policy"].param_dtype is torch.float16
         and kwargs["mp_policy"].reduce_dtype is torch.float32
         and not kwargs["mp_policy"].cast_forward_inputs
+        and isinstance(kwargs["offload_policy"], fsdp.CPUOffloadPolicy) == cpu_offload
         for _, kwargs in calls
     )
-    assert loaded == [False]
+    assert loaded == [cpu_offload]
