@@ -334,7 +334,9 @@ def _make_episode_group(group_index: int, *, turn_versions: list[int]) -> list[S
             reward=1.0,
             status=Sample.Status.COMPLETED,
             weight_versions=[
-                WeightVersionsPerCall(spans=[WeightVersionSpan(version=str(version), abs_start=turn, abs_end=turn + 1)])
+                WeightVersionsPerCall(
+                    spans=[WeightVersionSpan(version=str(version), abs_start=turn, abs_end=turn + 1)]
+                )
                 for turn, version in enumerate(turn_versions)
             ],
         )

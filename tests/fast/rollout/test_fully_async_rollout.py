@@ -578,7 +578,9 @@ def make_version_stamping_generate(engine: dict):
         for sample in group:
             sample.status = Sample.Status.COMPLETED
             sample.weight_versions = [
-                WeightVersionsPerCall(spans=[WeightVersionSpan(version=str(engine["version"]), abs_start=0, abs_end=1)])
+                WeightVersionsPerCall(
+                    spans=[WeightVersionSpan(version=str(engine["version"]), abs_start=0, abs_end=1)]
+                )
             ]
             if sample_done_callback is not None:
                 sample_done_callback()
