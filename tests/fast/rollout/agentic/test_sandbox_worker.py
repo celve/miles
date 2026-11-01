@@ -295,6 +295,19 @@ def test_a_call_that_starts_after_an_abort_runs(service):
     assert _in_sandbox(stubs.report_pid)["pid"]
 
 
+@pytest.mark.parametrize(
+    "stub, kwargs",
+    [
+        ("hold_semaphore", {"name": "create", "limit": 2, "hold_s": 0.0}),
+        ("hold_lock", {"name": "build", "hold_s": 0.0}),
+    ],
+)
+def test_rollout_wide_limits_refuse_rather_than_limit_one_sandbox(service, stub, kwargs):
+    """Each sandbox has its own /tmp, so a flock there would limit one agent and silently stop coordinating the rest."""
+    with pytest.raises(RuntimeError, match="cannot be shared from a sandbox agent"):
+        _in_sandbox(getattr(stubs, stub), **kwargs)
+
+
 def test_the_trial_records_are_copied_out_before_the_kill(service, tmp_path):
     FakeAsyncSandbox.files_on_disk = {
         "/opt/t/x/result.json": b'{"reward": 1}',

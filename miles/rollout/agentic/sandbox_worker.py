@@ -21,6 +21,7 @@ import httpx
 
 from miles.rollout.agentic.credentials import PROVIDER_CREDENTIALS, resolve_provider_api_key
 from miles.rollout.agentic.errors import InfraAbort
+from miles.rollout.agentic.rollout_limits import UNSHARED_ENV_VAR
 from miles.rollout.agentic.remote import AgentWorkerEndpoint, aborts_so_far, call_on_worker
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,8 @@ async def call_in_sandbox(
     aborts = aborts_so_far()
     async with open_worker(config, label, boot_env(config), aborts=aborts) as (endpoint, sandbox):
         _raise_if_aborted(aborts, label)
+        # every call has a host of its own, so the rollout's flock-based limits would each limit one agent
+        env = {**env, UNSHARED_ENV_VAR: "sandbox"}
         value = await call_on_worker(endpoint, fn, kwargs, env=env, on_child_reports=on_child_reports)
         return await _copy_records(config, sandbox, value)
 
