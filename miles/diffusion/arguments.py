@@ -7,6 +7,7 @@ starts, rather than failing inside one.
 
 from miles.backends.sglang_utils.sglang_api_client import WorkerType
 from miles.diffusion.train.pipeline_config import get_train_pipeline_config, resolve_model_family
+from miles.utils.args.configs.algo import AlgoConfig
 from miles.utils.args.configs.data import DataConfig
 
 _HOOKS = {
@@ -55,6 +56,11 @@ _UNSUPPORTED = [
     ("routing replay or true on-policy mode", lambda a: a.use_rollout_routing_replay or a.true_on_policy_mode),
     ("--debug-train-only or --debug-rollout-only", lambda a: a.debug_train_only or a.debug_rollout_only),
     ("--ci-test: its version readback and sample-ownership audit read token fields", lambda a: a.ci_test),
+    (
+        # Equality with the parser default is all args can tell; Flow-GRPO clips near 1e-4, never at text PPO's 0.2.
+        "Miles' text PPO clip default (--eps-clip 0.2); pass the ratio clip explicitly, e.g. --eps-clip 1e-4",
+        lambda a: a.eps_clip == AlgoConfig.model_fields["eps_clip"].default,
+    ),
     (
         "asymmetric or dual-clip PPO (--eps-clip-high, --eps-clip-c); --eps-clip sets the symmetric ratio clip",
         lambda a: a.eps_clip_high is not None or a.eps_clip_c is not None,
