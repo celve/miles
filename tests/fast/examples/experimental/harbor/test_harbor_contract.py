@@ -173,3 +173,22 @@ def test_the_result_fields_the_mapping_reads_still_exist():
         "verifier_result",
         "agent_result",
     } <= fields
+
+
+def test_the_built_config_survives_the_agent_server_json_round_trip(tasks_dir, monkeypatch):
+    """The agent server rebuilds the config from /run's JSON; every field the bindings set must come back."""
+    monkeypatch.setenv("HARBOR_AGENT_IMPORT_PATH", "lin2399_agent:LiteOSWorldComputer1")
+    monkeypatch.setenv("HARBOR_AGENT_KWARGS", json.dumps({"settle_sec": 2.0, "keep_screenshots": 2}))
+    monkeypatch.setenv("HARBOR_VERIFIER_IMPORT_PATH", "harbor_liteosworld.verifier:LiteOSWorldVerifier")
+    monkeypatch.setenv("HARBOR_ENV_KWARGS", json.dumps({"prebuilt_template_id": "lin2139-liteosworld"}))
+    cfg = haf.build_trial_config(
+        {"instance_id": "task-1", "agent_name": "computer-1"}, "http://trainer:30000/sessions/s1/v1", _SESSION_SAMPLING
+    )
+
+    request = haf._agent_server_request(cfg, {"instance_id": "task-1", "agent_name": "computer-1"}, "http://t/v1")
+    received = TrialConfig.model_validate(json.loads(json.dumps(request["trial_config"])))
+
+    assert received == cfg
+    assert received.agent.import_path == "lin2399_agent:LiteOSWorldComputer1"
+    assert received.verifier.import_path == "harbor_liteosworld.verifier:LiteOSWorldVerifier"
+    assert received.environment.kwargs == {"prebuilt_template_id": "lin2139-liteosworld"}
