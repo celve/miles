@@ -107,6 +107,7 @@ def fake_harbor(monkeypatch):
     FakeTrialResult.by_ref = {}
     monkeypatch.setattr(swe_agent_function, "_agent_server_client", None)
     monkeypatch.delenv("AGENT_SERVER_URL", raising=False)
+    monkeypatch.delenv("AGENT_SERVER_SANDBOX_TEMPLATE", raising=False)
     yield FakeTrial
 
 
@@ -907,3 +908,179 @@ def test_abort_sends_the_admin_secret_read_from_its_file(fake_harbor, agent_serv
 
 def test_abort_is_a_no_op_without_an_agent_server(fake_harbor):
     run_async(haf.abort(SimpleNamespace(session_server_instances=[SimpleNamespace(instance_id="inst-1")])))
+
+
+# --- per-trial agent server sandboxes --------------------------------------
+
+
+class StubJobServer:
+    """The gateway and the in-sandbox server in one: real HTTP ``/health``, ``/runs`` and ``/runs/{id}``, scripted polls."""
+
+    def __init__(self):
+        self.requests: list[tuple[str, str, dict, dict]] = []
+        self.polls: list[tuple[int, dict]] = []
+        self.poll_delay_s = 0.0
+        stub = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def _answer(self, status, reply):
+                body = json.dumps(reply).encode()
+                self.send_response(status)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                stub.requests.append(("GET", self.path, dict(self.headers), {}))
+                if self.path == "/health":
+                    return self._answer(200, {"status": "ok"})
+                time.sleep(stub.poll_delay_s)
+                status, reply = stub.polls.pop(0) if len(stub.polls) > 1 else stub.polls[0]
+                self._answer(status, reply)
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["content-length"])))
+                stub.requests.append(("POST", self.path, dict(self.headers), body))
+                self._answer(200, {"run_id": body["run_id"]})
+
+            def log_message(self, *args):
+                pass
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._server.daemon_threads = True
+        self.url = f"http://127.0.0.1:{self._server.server_port}"
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+
+    def finish_with(self, result, running_polls=1):
+        FakeTrialResult.by_ref["r1"] = result
+        done = {
+            "state": "done",
+            "result": {"reward": 0.0, "exit_status": "", "trial_result": {"ref": "r1"}, "trial_dir": "/opt/t/x"},
+        }
+        self.polls = [(200, {"state": "running"})] * running_polls + [(200, done)]
+
+    def close(self):
+        self._server.shutdown()
+
+
+class FakeAsyncSandbox:
+    created: list = []
+    killed: list = []
+    create_error: Exception | None = None
+
+    def __init__(self, template, kwargs):
+        self.sandbox_id = f"sbx-{len(FakeAsyncSandbox.created)}"
+        self.template, self.kwargs, self.written = template, kwargs, {}
+        sandbox = self
+
+        class Files:
+            async def write(self, path, data):
+                sandbox.written[path] = data
+
+        self.files = Files()
+
+    @classmethod
+    async def create(cls, template, **kwargs):
+        if cls.create_error is not None:
+            raise cls.create_error
+        sandbox = cls(template, kwargs)
+        cls.created.append(sandbox)
+        return sandbox
+
+    async def kill(self):
+        FakeAsyncSandbox.killed.append(self.sandbox_id)
+
+
+@pytest.fixture
+def job_server(monkeypatch):
+    import harness_sandbox
+
+    server = StubJobServer()
+    e2b = types.ModuleType("e2b")
+    e2b.AsyncSandbox = FakeAsyncSandbox
+    monkeypatch.setitem(sys.modules, "e2b", e2b)
+    FakeAsyncSandbox.created, FakeAsyncSandbox.killed, FakeAsyncSandbox.create_error = [], [], None
+    monkeypatch.setenv("AGENT_SERVER_SANDBOX_TEMPLATE", "lin2511-harness")
+    monkeypatch.setenv("AGENT_SERVER_SANDBOX_OWNER", "run-7")
+    monkeypatch.setenv("E2B_SANDBOX_URL", server.url)
+    monkeypatch.setattr(harness_sandbox, "_POLL_WAIT_S", 0.5)
+    yield server
+    server.close()
+
+
+def test_a_sandbox_template_runs_the_trial_on_a_server_of_its_own(tasks_dir, fake_harbor, job_server):
+    job_server.finish_with(_verdict(reward=1.0), running_polls=2)
+
+    out = _remote_run({"session_server_id": "10.0.0.5:30001"})
+
+    assert fake_harbor.created == []
+    assert out["reward"] == 1.0 and out["trial_dir"] == "/opt/t/x"
+    (sandbox,) = FakeAsyncSandbox.created
+    assert sandbox.template == "lin2511-harness"
+    assert sandbox.kwargs["metadata"] == {"owner": "run-7", "role": "harness", "trial": "task-1"}
+    # the sandbox outlives the trial cap, so one this process never killed still expires
+    assert sandbox.kwargs["timeout"] > haf._trial_timeout_s()
+    assert json.loads(sandbox.written["/tmp/harness_boot.json"]) == {"env": {"E2B_API_KEY": "test-key"}}
+    assert FakeAsyncSandbox.killed == ["sbx-0"]
+    assert [(m, p) for m, p, _, _ in job_server.requests[:2]] == [("GET", "/health"), ("POST", "/runs")]
+    assert all(
+        h["E2b-Sandbox-Id"] == "sbx-0" and h["E2b-Sandbox-Port"] == "8000" for _, _, h, _ in job_server.requests
+    )
+    ((_, _, _, body),) = [r for r in job_server.requests if r[0] == "POST"]
+    assert body["trial_config"] == {"_kind": "TrialConfig"} and body["session_server_id"] == "100.64.0.7:30001"
+    polls = [p for m, p, _, _ in job_server.requests if m == "GET" and p != "/health"]
+    assert len(polls) == 3 and all(p.endswith("?wait=0.5") and body["run_id"] in p for p in polls)
+
+
+def test_a_sandbox_trial_keeps_the_in_process_discards(tasks_dir, fake_harbor, job_server):
+    job_server.finish_with(_failed_trial("EnvironmentStartTimeoutError", agent_setup=True))
+
+    with pytest.raises(InfraAbort) as raised:
+        _remote_run()
+
+    assert raised.value.exit_status == "AgentSetupFailed"
+    assert FakeAsyncSandbox.killed == ["sbx-0"]
+
+
+def test_a_gateway_timeout_on_a_poll_is_retried(tasks_dir, fake_harbor, job_server):
+    job_server.finish_with(_verdict(reward=1.0), running_polls=0)
+    job_server.polls.insert(0, (504, {"code": "deadline_exceeded"}))
+
+    assert _remote_run()["reward"] == 1.0
+
+
+def test_a_sandbox_that_cannot_be_created_discards_the_sample(tasks_dir, fake_harbor, job_server):
+    FakeAsyncSandbox.create_error = RuntimeError("500: snapshot not ready")
+
+    with pytest.raises(InfraAbort) as raised:
+        _remote_run()
+
+    assert raised.value.exit_status == "HarnessSandboxUnavailable"
+
+
+def test_a_run_the_server_no_longer_knows_is_discarded(tasks_dir, fake_harbor, job_server):
+    job_server.polls = [(404, {"detail": "no run"})]
+
+    with pytest.raises(InfraAbort) as raised:
+        _remote_run()
+
+    assert raised.value.exit_status == "AgentServerLost"
+    assert FakeAsyncSandbox.killed == ["sbx-0"]
+
+
+def test_a_sandbox_trial_past_the_cap_scores_zero_and_kills_its_sandbox(
+    tasks_dir, fake_harbor, job_server, monkeypatch
+):
+    job_server.polls = [(200, {"state": "running"})]
+    monkeypatch.setenv("AGENT_TRIAL_TIMEOUT", "1")
+
+    assert _remote_run()["exit_status"] == "TimeLimitExceeded"
+    assert FakeAsyncSandbox.killed == ["sbx-0"]
+
+
+def test_a_fixed_server_and_a_sandbox_template_together_stop_the_run(tasks_dir, fake_harbor, job_server, monkeypatch):
+    monkeypatch.setenv("AGENT_SERVER_URL", "http://10.0.0.9:11000")
+
+    with pytest.raises(ValueError, match="not both"):
+        _remote_run()

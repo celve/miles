@@ -69,6 +69,16 @@ Env vars (read on the rollout worker):
   HARBOR_ADMIN_SECRET_FILE
                          the agent server's admin secret, by path, for the
                          ``/flush`` that ``abort`` sends
+  AGENT_SERVER_SANDBOX_TEMPLATE
+                         instead of one fixed server, run each trial on its own
+                         agent server in a fresh sandbox from this template on
+                         the sandbox service (``harness_sandbox.py``), reached
+                         through E2B_SANDBOX_URL and killed when the trial ends.
+                         This process then needs the E2B key, which it hands to
+                         the server; the server's sandbox holds the rest.
+  AGENT_SERVER_SANDBOX_OWNER
+                         the ``owner`` metadata on those sandboxes (default:
+                         this host's name), for finding the ones a run left
 
 Failure semantics: a verdict is returned as-is. A trial the policy cannot have
 failed is discarded with ``InfraAbort``: one that failed before its agent
@@ -77,7 +87,8 @@ agent lost the model service (``ServerUnreachable``), or a computer-1 trial whos
 own in-sandbox command failed mid-episode (``SandboxLost``), plus, with an agent server, a
 trial the server could not run or answer for (``AgentServerUnreachable``, ``AgentServerLost``), could
 not set up (``AgentServerRefused``: its task dir, Harbor, or a class the config names), or answered with a
-``TrialResult`` this Harbor cannot read (``AgentServerResultUnreadable``). Those two fail every sample alike;
+``TrialResult`` this Harbor cannot read (``AgentServerResultUnreadable``), or whose per-trial server sandbox
+never came up (``HarnessSandboxUnavailable``). The two server-side failures fail every sample alike;
 Miles's ``--max-consecutive-aborted-groups`` guard then stops the rollout. Every other episode that ends
 without a verdict scores 0 with a named ``exit_status`` (``TimeLimitExceeded``,
 ``SequenceLengthLimitExceeded``, ``AgentError``), matching the agent-server
@@ -586,6 +597,13 @@ def _agent_server_url() -> str | None:
     return os.getenv("AGENT_SERVER_URL", "").strip().rstrip("/") or None
 
 
+def _agent_server_sandbox_template() -> str | None:
+    template = os.getenv("AGENT_SERVER_SANDBOX_TEMPLATE", "").strip() or None
+    if template and _agent_server_url():
+        raise ValueError("set AGENT_SERVER_URL or AGENT_SERVER_SANDBOX_TEMPLATE, not both")
+    return template
+
+
 def _agent_server_request(config, metadata: dict[str, Any], session_url: str) -> dict[str, Any]:
     request = {
         "instance_id": str(metadata.get("instance_id", "")),
@@ -604,8 +622,6 @@ def _agent_server_request(config, metadata: dict[str, Any], session_url: str) ->
 
 async def _run_on_agent_server(url: str, config, metadata: dict[str, Any], session_url: str):
     """POST the built trial to the agent server; return its ``TrialResult`` and trial dir."""
-    from harbor.models.trial.result import TrialResult
-
     # the agent-server example's keepalive client; deferred so package-qualified importers need no bare-name path
     from swe_agent_function import _get_agent_server_client
 
@@ -618,6 +634,25 @@ async def _run_on_agent_server(url: str, config, metadata: dict[str, Any], sessi
         payload = response.json()
     except (httpx.HTTPError, ValueError) as exc:
         raise InfraAbort("AgentServerUnreachable", f"agent server {url} for {instance_id}: {exc!r}") from exc
+    return _trial_from_reply(url, payload, instance_id)
+
+
+async def _run_on_harness_sandbox(template: str, config, metadata: dict[str, Any], session_url: str):
+    """Run the built trial on an agent server in its own sandbox, created for it and killed after it."""
+    import harness_sandbox
+
+    instance_id = metadata.get("instance_id")
+    request = _agent_server_request(config, metadata, session_url)
+    lifetime_s = _trial_timeout_s() + 600
+    async with harness_sandbox.open_server(template, str(instance_id), lifetime_s) as server:
+        payload = await harness_sandbox.run_job(server, request)
+    return _trial_from_reply(f"harness sandbox {server.sandbox_id}", payload, instance_id)
+
+
+def _trial_from_reply(url: str, payload: dict[str, Any], instance_id):
+    """The ``TrialResult`` and trial dir in an agent server's ``/run`` reply, or the failure it stands for."""
+    from harbor.models.trial.result import TrialResult
+
     if payload.get("trial_result") is not None:
         try:
             return TrialResult.model_validate(payload["trial_result"]), payload.get("trial_dir")
@@ -658,6 +693,7 @@ async def run(
     instance_id = metadata.get("instance_id")
     trial_timeout_s = _trial_timeout_s()
     agent_server_url = _agent_server_url()
+    sandbox_template = _agent_server_sandbox_template()
 
     # Config errors (missing task dir, bad env vars, unresolvable provider key)
     # fail every sample the same way; raising beats training on silent all-zero
@@ -665,11 +701,12 @@ async def run(
     if agent_server_url is None:
         _ensure_provider_key()
     config = build_trial_config(metadata, session_url, request_kwargs)
-    trial_run = (
-        _run_on_agent_server(agent_server_url, config, metadata, session_url)
-        if agent_server_url
-        else _run_in_process(config)
-    )
+    if agent_server_url:
+        trial_run = _run_on_agent_server(agent_server_url, config, metadata, session_url)
+    elif sandbox_template:
+        trial_run = _run_on_harness_sandbox(sandbox_template, config, metadata, session_url)
+    else:
+        trial_run = _run_in_process(config)
 
     try:
         result, trial_dir = await asyncio.wait_for(trial_run, timeout=trial_timeout_s)
