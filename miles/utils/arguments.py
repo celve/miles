@@ -4376,8 +4376,10 @@ def miles_validate_args(args):
         validate_skip_actor_forward_only(args)
 
     assert not args.freeze_vision_model or (
-        args.train_backend == "megatron" and args.megatron_to_hf_mode == "bridge"
-    ), "--freeze-vision-model needs --train-backend megatron with --megatron-to-hf-mode bridge"
+        args.train_backend == "megatron"
+        and args.megatron_to_hf_mode == "bridge"
+        and args.custom_model_provider_path is None
+    ), "--freeze-vision-model needs --train-backend megatron with --megatron-to-hf-mode bridge and no custom model provider"
 
     validate_score_centering_args(args)
 
