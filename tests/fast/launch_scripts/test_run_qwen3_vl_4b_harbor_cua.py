@@ -158,3 +158,45 @@ def test_the_run_starts_with_a_clearing_sglang_or_no_cache(monkeypatch, tmp_path
 
     (command,) = [cmd for cmd in recording.commands if "ray job submit" in cmd]
     assert f'"SGLANG_VLM_CACHE_SIZE_MB": "{cache_mb}"' in command
+
+
+def test_an_agent_worker_runs_the_session_paths_trials(monkeypatch, tmp_path):
+    command, env = _train_command(
+        monkeypatch,
+        tmp_path,
+        rollout_path="session",
+        agent_worker_url="http://100.87.162.43:11100",
+        session_server_external_host="127.0.0.1",
+    )
+
+    assert "--custom-agent-function-mode worker" in command
+    assert "--custom-agent-function-worker-url http://100.87.162.43:11100" in command
+    assert "--session-server-external-host 127.0.0.1" in command
+
+
+def test_an_agent_worker_needs_the_session_path(monkeypatch, tmp_path):
+    freeze_environment(monkeypatch)
+    install_command_recorder(monkeypatch)
+    with pytest.raises(typer.BadParameter, match="--rollout-path session"):
+        call_entrypoint(
+            import_launch_script(LAUNCHER),
+            "main",
+            {"harbor_env_type": "e2b", "skip_prepare": True, "agent_worker_url": "http://w:11100"},
+            tmp_path,
+        )
+
+
+@pytest.mark.parametrize(("worker_url", "warms_here"), [("", True), ("http://w:11100", False)])
+def test_templates_are_warmed_where_the_sandboxes_are_created(monkeypatch, tmp_path, worker_url, warms_here):
+    freeze_environment(monkeypatch)
+    recording = install_command_recorder(monkeypatch)
+
+    call_entrypoint(
+        import_launch_script(LAUNCHER),
+        "prepare",
+        {"harbor_env_type": "e2b", "rollout_path": "session", "agent_worker_url": worker_url},
+        tmp_path,
+    )
+
+    assert any("make_harbor_cua_tasks" in cmd for cmd in recording.commands)
+    assert any("warm_templates" in cmd for cmd in recording.commands) == warms_here

@@ -62,6 +62,8 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     # The host agents outside the cluster reach every session server on; passed as
     # --session-server-external-host, which also keeps the session servers on the head node.
     session_server_external_host: str = ""
+    # Set to run every trial on an agent worker there (python -m miles.rollout.agentic.worker), off this host.
+    agent_worker_url: str = ""
     miles_host_ip: str = os.environ.get("MILES_HOST_IP", "")
 
     # W&B settings
@@ -159,6 +161,7 @@ def execute(args: ScriptArgs):
         tito_model="glm47",
         session_server_workers=32,
         session_server_external_host=args.session_server_external_host,
+        agent_worker_url=args.agent_worker_url,
     )
     misc_args = (
         "--attention-dropout 0.0 "
