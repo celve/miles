@@ -1,3 +1,4 @@
+import random
 from argparse import Namespace
 from types import SimpleNamespace
 
@@ -82,7 +83,14 @@ def test_ocr_input_is_rounded_rgb_uint8():
 def test_the_data_source_repeats_prompts_wraps_the_file_and_resumes(tmp_path):
     path = tmp_path / "prompts.jsonl"
     path.write_text('{"input": " a "}\n{"input": ""}\n{"input": "b"}\n')
-    args = Namespace(prompt_data=str(path), input_key="input", metadata_key="metadata", n_samples_per_prompt=2)
+    args = Namespace(
+        prompt_data=str(path),
+        input_key="input",
+        metadata_key="metadata",
+        n_samples_per_prompt=2,
+        rollout_shuffle=False,
+        rollout_seed=0,
+    )
     source = DiffusionPromptDataSource(args)
 
     groups = source.get_samples(3)
@@ -105,7 +113,37 @@ def test_num_epoch_counts_the_diffusion_prompts(tmp_path):
         n_samples_per_prompt=2,
         rollout_global_dataset=True,
         rollout_batch_size=2,
+        rollout_shuffle=False,
+        rollout_seed=0,
     )
     executor = SimpleNamespace(args=args, data_source=DiffusionPromptDataSource(args))
 
     assert RolloutExecutor.get_num_rollout_per_epoch(executor) == 3
+
+
+def test_rollout_shuffle_permutes_each_epoch_by_seed_and_resumes(tmp_path):
+    path = tmp_path / "prompts.jsonl"
+    path.write_text("".join(f'{{"input": "p{i}"}}\n' for i in range(5)))
+    args = Namespace(
+        prompt_data=str(path),
+        input_key="input",
+        metadata_key="metadata",
+        n_samples_per_prompt=1,
+        rollout_shuffle=True,
+        rollout_seed=7,
+    )
+    source = DiffusionPromptDataSource(args)
+
+    first_epoch = [g[0].prompt for g in source.get_samples(5)]
+    source.get_samples(2)
+    source.save(tmp_path / "ckpt")
+    resumed = DiffusionPromptDataSource(args)
+    resumed.load(tmp_path / "ckpt")
+
+    expected = []
+    for epoch in range(2):
+        order = list(range(5))
+        random.Random(7 + epoch).shuffle(order)
+        expected.append([f"p{i}" for i in order])
+    assert first_epoch == expected[0] != [f"p{i}" for i in range(5)]
+    assert [g[0].prompt for g in resumed.get_samples(3)] == expected[1][2:]

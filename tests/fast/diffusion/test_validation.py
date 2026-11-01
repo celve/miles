@@ -7,6 +7,7 @@ from tests.fast.fixtures.args_fixtures import _RESOLVED_AFTER_PARSING, parser_de
 
 from miles.backends.sglang_utils.sglang_api_client import WorkerType
 from miles.diffusion.arguments import _HOOKS, validate_diffusion_args, validate_diffusion_sglang_config
+from miles.utils.args.configs.diffusion import DiffusionConfig
 
 
 def _supported(**overrides):
@@ -23,7 +24,6 @@ def _supported(**overrides):
         # An FSDP backend flag, absent from the shared parser's defaults.
         optimizer_cpu_offload=False,
         rm_type="ocr",
-        **_HOOKS,
     )
     return Namespace(**(defaults | recipe | overrides))
 
@@ -65,6 +65,8 @@ def test_the_recipe_layout_passes_and_resolves_the_family_defaults():
         (dict(debug_rollout_only=True), "debug"),
         (dict(ci_test=True), "ci-test"),
         (dict(optimizer_cpu_offload=True), "optimizer-cpu-offload"),
+        (dict(eps_clip_high=0.3), "asymmetric"),
+        (dict(eps_clip_c=3.0), "dual-clip"),
         (dict(save_debug_rollout_data="/dump/{rollout_id}.pt"), "debug dumps"),
         (dict(save_debug_train_data="/dump/{rollout_id}_{rank}.pt"), "debug dumps"),
         (dict(dump_details="/dump"), "debug dumps"),
@@ -91,6 +93,18 @@ def test_the_fsdp_parse_rejects_optimizer_cpu_offload_for_diffusion():
 
     with pytest.raises(ValueError, match="optimizer-cpu-offload"):
         parse_fsdp_test_config("--model-kind", "diffusion", "--optimizer-cpu-offload")
+
+
+def test_model_kind_sets_the_four_hooks():
+    args = _supported()
+
+    validate_diffusion_args(args)
+
+    assert {name: vars(args)[name] for name in _HOOKS} == _HOOKS
+
+
+def test_the_diffusion_flags_hold_no_copy_of_the_ppo_clip_flags():
+    assert not {"diffusion_clip_range", "diffusion_clip_grad"} & DiffusionConfig.model_fields.keys()
 
 
 def test_a_foreign_hook_is_rejected():

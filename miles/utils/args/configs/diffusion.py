@@ -47,12 +47,10 @@ class DiffusionConfig(BaseConfig):
     diffusion_forward_dtype: A[
         str, Arg(choices=["fp16", "bf16", "fp32"], help="DiT forward dtype; fp32 master weights are kept regardless.")
     ] = "bf16"
-    diffusion_clip_range: A[float, Arg(help="PPO ratio clip range.")] = 1e-4
     diffusion_kl_beta: A[
         float, Arg(help="KL coefficient against the LoRA base model (adapter disabled); 0 disables it.")
     ] = 0.0
     diffusion_adv_clip_max: A[float, Arg(help="Advantages are clamped to +-this value.")] = 5.0
-    diffusion_clip_grad: A[float, Arg(help="Gradient-norm clip.")] = 1.0
     diffusion_globalize_reward_std: A[
         bool, Arg(help="GRPO: divide by the rollout-wide reward std instead of each prompt group's.")
     ] = False

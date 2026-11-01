@@ -79,10 +79,6 @@ def execute(args: ScriptArgs) -> None:
         ckpt_args += f"--save {save_dir} --save-interval {args.save_interval} "
 
     rollout_args = (
-        "--rollout-function-path miles.diffusion.rollout.rollout_fn.DiffusionRolloutFn "
-        "--data-source-path miles.diffusion.rollout.data_source.DiffusionPromptDataSource "
-        "--custom-convert-samples-to-train-data-path miles.diffusion.conversion.convert_samples_to_train_data "
-        "--custom-rollout-log-function-path miles.diffusion.conversion.log_rollout_data "
         f"--prompt-data {args.dataset_dir}/{DATASET_SUBSET}/train.jsonl "
         "--input-key input "
         "--rollout-batch-size 8 "
@@ -104,11 +100,11 @@ def execute(args: ScriptArgs) -> None:
         "--advantage-estimator grpo "
         "--rm-type ocr "
         "--diffusion-globalize-reward-std "
-        "--diffusion-clip-range 1e-4 "
+        "--eps-clip 1e-4 "
         "--diffusion-kl-beta 0.04 "
     )
 
-    optimizer_args = "--lr 3e-4 --adam-beta2 0.999 --weight-decay 1e-4 "
+    optimizer_args = "--lr 3e-4 --adam-beta2 0.999 --weight-decay 1e-4 --clip-grad 1.0 "
 
     lora_args = "--diffusion-lora-rank 32 --diffusion-lora-alpha 64 --diffusion-lora-init gaussian "
 

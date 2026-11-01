@@ -134,7 +134,7 @@ class DiffusionFSDPTrainRayActor(TorchNativeTrainRayActor):
             self.scaler.scale(loss_sum / float(num_pairs)).backward()
 
         self.scaler.unscale_(self.optimizer)
-        grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.diffusion_clip_grad)
+        grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.backend.clip_grad)
         if isinstance(grad_norm, DTensor):
             # clip returns a lazily reduced partial norm; the full tensor is the true global norm.
             grad_norm = grad_norm.full_tensor()
@@ -177,7 +177,7 @@ class DiffusionFSDPTrainRayActor(TorchNativeTrainRayActor):
             new_pred=new_pred,
             ref_pred=ref_pred,
             noise_level=args.diffusion_noise_level,
-            clip_range=args.diffusion_clip_range,
+            clip_range=args.eps_clip,
             kl_beta=args.diffusion_kl_beta,
             metrics=metrics,
         )
