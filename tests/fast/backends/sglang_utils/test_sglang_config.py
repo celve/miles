@@ -39,6 +39,7 @@ def _make_args(**overrides) -> Namespace:
         critic_num_gpus_per_node=0,
         use_critic=False,
         multi_lora=False,
+        model_kind="text",
     )
     defaults.update(overrides)
     defaults.setdefault("starts_inference_engines", not defaults["debug_train_only"] or defaults["eval_num_gpus"] > 0)

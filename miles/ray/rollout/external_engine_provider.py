@@ -137,6 +137,7 @@ def _compute_cells(*, args: Any, engines: list[_ExternalEngineInfo]) -> dict[str
                     sglang_api_key=args.sglang.base_args["api_key"],
                     needs_offload=False,
                     update_weights=True,
+                    engine_kind="text",
                 ),
             ),
             addrs=_compute_engine_addrs(engine),
