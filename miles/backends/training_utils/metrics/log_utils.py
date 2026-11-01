@@ -155,9 +155,9 @@ def aggregate_forward_results(
             assert isinstance(batch_result[key], list), f"Expected list for key {key}, got {type(batch_result[key])}"
             values += batch_result[key]
 
-        # Handle dynamic batch size: restore original order
-        if args.use_dynamic_batch_size and hasattr(data_iterator, "micro_batch_indices"):
-            micro_batch_indices = data_iterator.micro_batch_indices
+        # An explicit schedule (dynamic, or the rollout's own) orders samples by its indices: restore rollout order.
+        micro_batch_indices = getattr(data_iterator, "micro_batch_indices", None)
+        if micro_batch_indices is not None:
             origin_values = [None] * sum(len(indices) for indices in micro_batch_indices)
             origin_indices = sum(micro_batch_indices[first_microbatch:], [])
             for value, origin_index in zip(values, origin_indices, strict=False):

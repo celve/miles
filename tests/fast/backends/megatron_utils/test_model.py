@@ -520,6 +520,13 @@ def test_ft_discard_stays_invalid_with_finite_gradient_norm(
             [None, None, None, 3, 4, 5],
         ),
         (False, {"micro_batch_size": 2}, [2, 1], [[4, 5]], [None, None, None, None, 4, 5]),
+        (
+            False,
+            {"micro_batch_indices": [[0, 1], [2, 3], [5, 4]]},
+            [2, 1],
+            [[5, 4]],
+            [None, None, None, None, 4, 5],
+        ),
     ],
 )
 def test_forward_only_from_a_later_step_scores_only_that_steps_samples(
