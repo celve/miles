@@ -19,8 +19,12 @@ logger = logging.getLogger(__name__)
 
 
 def convert_samples_to_train_data(args, samples: list[Sample]) -> dict[str, Any]:
-    """One row per image, each holding that image's train pairs, so the DP split keeps an image on one rank."""
+    """One row per image, each holding that image's train pairs, so the DP split keeps an image on one rank.
+
+    The only `post_process_rewards` call of a rollout: its rewards are logged here and trained on, never recomputed.
+    """
     raw_rewards, advantages = post_process_rewards(args, samples)
+    _log_reward_metrics(args, samples, raw_rewards=raw_rewards, advantages=advantages)
     return {
         "diffusion_train_pairs": [
             build_train_pairs(sample, advantage=advantage)
@@ -101,26 +105,43 @@ def _latent_positions(traj) -> dict[int, int]:
 
 
 def log_rollout_data(rollout_id: int, args, samples: list[Sample], rollout_extra_metrics, rollout_time: float) -> bool:
-    # The executor logs before it converts, so this recomputes the converter's rewards through the same function.
-    raw_rewards, advantages = post_process_rewards(args, samples)
+    """Rollout metrics that need no post-processed reward; the converter logs those (`_log_reward_metrics`)."""
+    _log_rollout_step(
+        args,
+        rollout_id,
+        {
+            **(rollout_extra_metrics or {}),
+            **dict_add_prefix(_compute_zero_std_metrics(args, samples), "rollout/"),
+            "perf/rollout_time": rollout_time,
+        },
+    )
+    # The default text-rollout metrics read token fields these samples do not have.
+    return True
+
+
+def _log_reward_metrics(args, samples: list[Sample], *, raw_rewards: list[float], advantages: list[float]) -> None:
+    (rollout_id,) = {sample.diffusion.rollout_id for sample in samples}
+    assert rollout_id is not None, "DiffusionRolloutFn stamps each sample with its rollout id"
     raw = torch.tensor(raw_rewards, dtype=torch.float)
     grouped = raw.view(-1, args.n_samples_per_prompt)
-    log_dict = {
-        **(rollout_extra_metrics or {}),
-        **_stats(raw, prefix="rollout/reward/raw_"),
-        **_stats(torch.tensor(advantages, dtype=torch.float), prefix="rollout/reward/norm_"),
-        "rollout/reward/group_mean_avg": float(grouped.mean(dim=-1).mean()),
-        "rollout/reward/group_std_avg": float(grouped.std(dim=-1, unbiased=False).mean()),
-        **dict_add_prefix(_compute_zero_std_metrics(args, samples), "rollout/"),
-        "perf/rollout_time": rollout_time,
-    }
+    _log_rollout_step(
+        args,
+        rollout_id,
+        {
+            **_stats(raw, prefix="rollout/reward/raw_"),
+            **_stats(torch.tensor(advantages, dtype=torch.float), prefix="rollout/reward/norm_"),
+            "rollout/reward/group_mean_avg": float(grouped.mean(dim=-1).mean()),
+            "rollout/reward/group_std_avg": float(grouped.std(dim=-1, unbiased=False).mean()),
+        },
+    )
+
+
+def _log_rollout_step(args, rollout_id: int, metrics: dict[str, float]) -> None:
     log_dict, step_key = namespace_metrics(
-        log_dict, trainer_model_id=None, step_name="rollout/step", step=compute_rollout_step(args, rollout_id)
+        metrics, trainer_model_id=None, step_name="rollout/step", step=compute_rollout_step(args, rollout_id)
     )
     logger.info(f"rollout {rollout_id}: {log_dict}")
     log_metrics(args, log_dict, step_key=step_key)
-    # The default text-rollout metrics read token fields these samples do not have.
-    return True
 
 
 def _stats(values: torch.Tensor, *, prefix: str) -> dict[str, float]:

@@ -44,3 +44,5 @@ class DiffusionRollout:
     dit_trajectory: DiTTrajectory | None = None
     sde_step_indices: list[int] = field(default_factory=list)
     inference_time_s: float | None = None
+    # The training rollout this image belongs to; the converter logs its reward metrics at that step.
+    rollout_id: int | None = None
