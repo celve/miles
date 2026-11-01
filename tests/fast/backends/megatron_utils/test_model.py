@@ -507,3 +507,72 @@ def test_ft_discard_stays_invalid_with_finite_gradient_norm(
     )
 
     assert outcome is model_module.TrainStepOutcome.DISCARDED_SHOULD_RETRY
+
+
+@pytest.mark.parametrize(
+    ("use_dynamic_batch_size", "iterator_kwargs", "expected_fetched", "expected_scores"),
+    [
+        (
+            True,
+            {"micro_batch_indices": [[2, 0], [1], [5, 3], [4]]},
+            [[5, 3], [4]],
+            [None, None, None, 3, 4, 5],
+        ),
+        (False, {"micro_batch_size": 2}, [[4, 5]], [None, None, None, None, 4, 5]),
+    ],
+)
+def test_forward_only_from_a_later_step_scores_only_that_steps_samples(
+    monkeypatch, use_dynamic_batch_size, iterator_kwargs, expected_fetched, expected_scores
+):
+    from miles.backends.megatron_utils import model as model_module
+
+    def forward_backward(**kwargs):
+        results = []
+        for _ in range(kwargs["num_microbatches"]):
+            output, callback = kwargs["forward_step_func"](kwargs["data_iterator"][0], kwargs["model"][0])
+            results.append(callback(output))
+        return results
+
+    fetched = []
+
+    def get_batch(data_iterator, *_args, **_kwargs):
+        fetched.append(data_iterator.get_next(["sample_ids"])["sample_ids"])
+        return {
+            "tokens": None,
+            "input_loss_masks": None,
+            "multimodal_train_inputs": None,
+            "unconcat_tokens": [],
+            "total_lengths": [],
+            "response_lengths": [],
+            "max_seq_lens": None,
+        }
+
+    def score(_output, **_kwargs):
+        return {"log_probs": [torch.tensor(float(i)) for i in fetched[-1]]}
+
+    args = Namespace(
+        data_pad_size_multiplier=1,
+        qkv_format="thd",
+        allgather_cp=False,
+        enable_witness=False,
+        use_rollout_entropy=False,
+        use_dynamic_batch_size=use_dynamic_batch_size,
+        custom_megatron_before_log_prob_hook_path=None,
+        seq_length=8,
+        micro_batch_size=2,
+    )
+    dumper = Mock()
+    dumper.wrap_forward_step.side_effect = lambda fn: fn
+    iterator = DataIterator({"sample_ids": list(range(6))}, **iterator_kwargs)
+
+    monkeypatch.setattr(model_module, "DumperMegatronUtil", lambda *_args, **_kwargs: dumper)
+    monkeypatch.setattr(model_module, "get_model_config", lambda _model: Mock(timers=None))
+    monkeypatch.setattr(model_module, "get_batch", get_batch)
+    monkeypatch.setattr(model_module, "get_packed_seq_params", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(model_module, "get_forward_backward_func", lambda: forward_backward)
+    monkeypatch.setattr(model_module, "mpu", FakeMpu(is_last_pipeline_stage=True))
+
+    out = model_module.forward_only(score, args, [Mock()], [iterator], [2, 1], rollout_id=0, first_step=1)
+
+    assert fetched == expected_fetched
+    assert [None if value is None else int(value) for value in out["log_probs"]] == expected_scores

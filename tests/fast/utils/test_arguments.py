@@ -3101,7 +3101,7 @@ def test_skip_actor_forward_only_is_gated_during_miles_validation():
     parser = argparse.ArgumentParser()
     get_miles_extra_args_provider()(parser)
     args = parser.parse_args(
-        ["--skip-actor-forward-only", "--global-batch-size", "32", "--num-rollout", "1"] + REQUIRED_ARGS
+        ["--skip-actor-forward-only", "--kl-coef", "0.1", "--num-rollout", "1"] + REQUIRED_ARGS
     )
     vars(args).update(
         hidden_dropout=0.0,
@@ -3231,8 +3231,6 @@ class TestValidateSkipActorForwardOnly:
             {"save_debug_train_data": "train-{rollout_id}.pt"},
             {"use_routing_replay": True},
             {"use_indexer_replay": True},
-            {"num_steps_per_rollout": 2},
-            {"global_batch_size": 32},
         ],
     )
     def test_incompatible_configuration_is_rejected(self, overrides):
@@ -3263,6 +3261,10 @@ class TestValidateSkipActorForwardOnly:
                 use_dynamic_global_batch_size=True,
             )
         )
+
+    @pytest.mark.parametrize("overrides", [{"num_steps_per_rollout": 2}, {"global_batch_size": 32}])
+    def test_several_optimizer_steps_pass(self, overrides):
+        validate_skip_actor_forward_only(_make_skip_actor_forward_only_args(**overrides))
 
 
 class TestRunUuidResolution:

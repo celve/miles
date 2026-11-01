@@ -638,6 +638,11 @@ class DataIterator:
         self.offset = 0
         return self
 
+    def skip_microbatches(self, count: int) -> "DataIterator":
+        """Advance past the next ``count`` micro-batches without fetching them, and return self."""
+        self.offset += count if self.micro_batch_indices is not None else count * self.micro_batch_size
+        return self
+
 
 def get_steps_per_rollout(args: Namespace) -> int:
     """Optimizer steps per rollout round; one when the global batch counts the samples of multi-sample rollouts."""

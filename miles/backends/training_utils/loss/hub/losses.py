@@ -128,8 +128,14 @@ def policy_loss_function(
     )
 
     log_probs = log_probs_and_entropy["log_probs"]
+    scored_log_probs = batch.get("log_probs") or [None] * len(log_probs)
+    # Samples the forward-only pass skipped (the first optimizer step's) take this forward's own scores.
+    reuses_training_forward = [args.skip_actor_forward_only and old is None for old in scored_log_probs]
     if args.skip_actor_forward_only:
-        trainer_scored_log_probs = [log_prob.detach() for log_prob in log_probs]
+        trainer_scored_log_probs = [
+            (log_prob if reuse else old).detach()
+            for log_prob, old, reuse in zip(log_probs, scored_log_probs, reuses_training_forward, strict=True)
+        ]
     else:
         trainer_scored_log_probs = (
             [log_prob.detach() for log_prob in batch["log_probs"]] if batch.get("log_probs") is not None else None
@@ -153,15 +159,16 @@ def policy_loss_function(
                 log_probs, total_lengths, response_lengths, strict=False
             )
         ]
-        if args.skip_actor_forward_only and not args.use_rollout_logprobs:
-            full_old_log_probs = [full_log_prob.detach() for full_log_prob in full_log_probs]
-        else:
-            full_old_log_probs = [
-                all_gather_with_cp(old_log_prob, total_length, response_length)
-                for old_log_prob, total_length, response_length in zip(
-                    old_log_probs, total_lengths, response_lengths, strict=False
-                )
-            ]
+        full_old_log_probs = [
+            (
+                full_log_prob.detach()
+                if reuse and not args.use_rollout_logprobs
+                else all_gather_with_cp(old_log_prob, total_length, response_length)
+            )
+            for full_log_prob, old_log_prob, reuse, total_length, response_length in zip(
+                full_log_probs, old_log_probs, reuses_training_forward, total_lengths, response_lengths, strict=False
+            )
+        ]
 
     local_loss_mask_list = get_local_response_loss_masks(
         total_lengths,

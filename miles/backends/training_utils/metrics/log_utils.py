@@ -141,7 +141,9 @@ def aggregate_forward_results(
     data_iterator: DataIterator,
     args: Namespace,
     store_prefix: str = "",
+    first_microbatch: int = 0,
 ) -> dict[str, list]:
+    """Per-sample outputs in rollout order; samples of micro-batches before ``first_microbatch`` get None."""
     rollout_data = {}
     if not forward_data_store:
         return rollout_data
@@ -155,11 +157,14 @@ def aggregate_forward_results(
 
         # Handle dynamic batch size: restore original order
         if args.use_dynamic_batch_size and hasattr(data_iterator, "micro_batch_indices"):
-            origin_values = [None] * len(values)
-            origin_indices = sum(data_iterator.micro_batch_indices, [])
+            micro_batch_indices = data_iterator.micro_batch_indices
+            origin_values = [None] * sum(len(indices) for indices in micro_batch_indices)
+            origin_indices = sum(micro_batch_indices[first_microbatch:], [])
             for value, origin_index in zip(values, origin_indices, strict=False):
                 origin_values[origin_index] = value
             values = origin_values
+        elif first_microbatch:
+            values = [None] * (first_microbatch * data_iterator.micro_batch_size) + values
 
         rollout_data[key] = values
 

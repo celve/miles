@@ -1908,8 +1908,9 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help=(
                     "Skip the standalone Megatron actor forward-only pass. With --use-rollout-logprobs, "
                     "those log-probs remain the old-policy baseline; otherwise detached training log-probs "
-                    "are reused and the actor importance log-ratio is exactly 0. This requires a single "
-                    "optimizer step. The skipped pass's rollout/log_probs metric is not emitted. "
+                    "are reused and the actor importance log-ratio is exactly 0. With several optimizer "
+                    "steps per rollout only the first step's samples skip the pass; the later steps' are "
+                    "still scored before training. The skipped pass's rollout/log_probs metric is not emitted. "
                     "Custom model providers and the before-train-step hook must not make the training "
                     "forward differ from the skipped forward."
                 ),
@@ -4427,17 +4428,6 @@ def validate_skip_actor_forward_only(args) -> None:
         if enabled
     ]
     assert not incompatible_options, f"{option} is incompatible with: {', '.join(incompatible_options)}"
-
-    assert args.num_steps_per_rollout in (None, 1), (
-        f"{option} requires exactly one optimizer step per rollout; "
-        f"got --num-steps-per-rollout {args.num_steps_per_rollout}"
-    )
-    if not args.use_dynamic_global_batch_size and not args.multi_lora:
-        samples_per_rollout = args.rollout_batch_size * args.n_samples_per_prompt
-        assert args.global_batch_size == samples_per_rollout, (
-            f"{option} requires exactly one optimizer step for {samples_per_rollout} rollout samples; "
-            f"got --global-batch-size {args.global_batch_size}"
-        )
 
 
 def validate_async_off_policy_correction(args) -> None:
