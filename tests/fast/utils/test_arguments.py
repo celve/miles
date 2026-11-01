@@ -2360,6 +2360,12 @@ class TestSnapshotEvalValidation:
 
         assert args.eval_server_concurrency == 16
 
+    @pytest.mark.parametrize("value", ["0", "-1"])
+    def test_eval_server_concurrency_must_be_positive(self, tmp_path, value):
+        args = self._snapshot_eval_args(tmp_path, "--eval-server-concurrency", value)
+        with pytest.raises(AssertionError, match="must be positive"):
+            miles_validate_args(args)
+
     def test_eval_server_concurrency_needs_an_eval_pool(self):
         args = self._parse(["--eval-server-concurrency", "64"])
         with pytest.raises(AssertionError, match="--eval-num-gpus"):

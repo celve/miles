@@ -3815,6 +3815,9 @@ def miles_validate_args(args):
         )
         if args.eval_server_concurrency is None:
             args.eval_server_concurrency = args.sglang_server_concurrency
+        assert (
+            args.eval_server_concurrency > 0
+        ), f"--eval-server-concurrency must be positive, got {args.eval_server_concurrency}."
     else:
         assert (
             args.eval_server_concurrency is None
