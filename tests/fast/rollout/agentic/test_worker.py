@@ -90,8 +90,14 @@ def test_the_child_gets_the_forwarded_env_except_what_the_worker_keeps(serve, mo
     assert seen == {"LIN2510_KEPT": "the worker's own", "LIN2510_FORWARDED": "the caller's"}
 
 
-def test_the_child_shares_the_callers_rollout_limits(serve):
-    assert _on_worker(serve(), stubs.report_limits_scope) == current_scope()
+def test_the_childs_rollout_limits_are_the_callers_and_no_other_hosts(serve):
+    endpoint = serve()
+
+    scopes = {_on_worker(endpoint, stubs.report_limits_scope) for _ in range(2)}
+
+    assert len(scopes) == 1
+    (scope,) = scopes
+    assert scope.startswith(f"{current_scope()}-") and scope != current_scope()
 
 
 def test_reports_reach_the_caller_in_order(serve):
@@ -306,8 +312,10 @@ def test_secrets_are_not_forwarded_by_value(monkeypatch):
     monkeypatch.setenv("E2B_API_KEY", "e2b_value")
     monkeypatch.setenv("HARBOR_TASKS_DIR", "/tasks")
     monkeypatch.setenv("AGENT_MAX_OUTPUT_TOKENS", "2048")
+    monkeypatch.setenv("MODAL_TOKEN_ID", "ak-value")
+    monkeypatch.setenv("MODAL_PROFILE", "team")
 
-    env = remote.forwarded_env(["HARBOR_*", "E2B_*", "AGENT_*"])
+    env = remote.forwarded_env(["HARBOR_*", "E2B_*", "AGENT_*", "MODAL_*"])
 
     assert env["HARBOR_ADMIN_SECRET_FILE"] == "/secrets/harbor_admin"
     assert env["HARBOR_TASKS_DIR"] == "/tasks"
@@ -315,6 +323,8 @@ def test_secrets_are_not_forwarded_by_value(monkeypatch):
     assert env["AGENT_MAX_OUTPUT_TOKENS"] == "2048"
     assert "HARBOR_ADMIN_SECRET" not in env
     assert "E2B_API_KEY" not in env
+    assert "MODAL_TOKEN_ID" not in env
+    assert env["MODAL_PROFILE"] == "team"
 
 
 def test_the_default_forwarded_names_carry_every_providers_endpoint_but_no_key():

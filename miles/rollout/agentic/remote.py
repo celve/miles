@@ -13,6 +13,7 @@ reports and outcome, and cancels it when its own task is cancelled. Every worker
 import asyncio
 import base64
 import fnmatch
+import functools
 import json
 import logging
 import os
@@ -26,6 +27,7 @@ from typing import Any
 import httpx
 
 from miles.rollout.agentic import rollout_limits
+from miles.rollout.agentic.credentials import PROVIDER_CREDENTIALS
 from miles.rollout.agentic.errors import InfraAbort, RemoteTraceback
 
 logger = logging.getLogger(__name__)
@@ -36,6 +38,7 @@ _REQUEST_ATTEMPTS = 3
 _CANCEL_TIMEOUT_S = 10.0
 # never forwarded by value, whatever --custom-agent-function-worker-env says; a *_FILE path to one is fine
 _SECRET_PATTERNS = ("*SECRET", "*SECRET_KEY", "*TOKEN", "*PASSWORD", "*API_KEY")
+_CREDENTIAL_NAMES = frozenset(name for spec in PROVIDER_CREDENTIALS.values() for name in spec["key_env_vars"])
 
 
 @dataclass
@@ -65,7 +68,9 @@ def forwarded_env(patterns: Sequence[str]) -> dict[str, str]:
     return {
         name: value
         for name, value in os.environ.items()
-        if _matches(name, patterns) and (name.endswith("_FILE") or not _matches(name, _SECRET_PATTERNS))
+        if _matches(name, patterns)
+        and name not in _CREDENTIAL_NAMES
+        and (name.endswith("_FILE") or not _matches(name, _SECRET_PATTERNS))
     }
 
 
@@ -85,6 +90,12 @@ async def cancel_inflight_calls() -> int:
         for call_id, inflight in calls:
             group.create_task(_cancel_on(inflight.worker, call_id))
     return len(calls)
+
+
+@functools.cache
+def _caller_scope() -> str:
+    # a PID alone can repeat across the hosts and PID namespaces sharing one worker
+    return f"{rollout_limits.current_scope()}-{uuid.uuid4().hex[:12]}"
 
 
 def encode_report(item: Any) -> str:
@@ -110,7 +121,7 @@ async def call_on_worker(
         "fn": function_path(fn),
         "kwargs": kwargs,
         "env": env,
-        "scope": rollout_limits.current_scope(),
+        "scope": _caller_scope(),
     }
     json.dumps(body)  # a kwarg the protocol cannot carry fails here, before anything runs
     async with _client(worker) as client:
