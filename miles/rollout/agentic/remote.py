@@ -37,8 +37,15 @@ _CANCEL_TIMEOUT_S = 10.0
 # never forwarded by value, whatever --custom-agent-function-worker-env says; a *_FILE path to one is fine
 _SECRET_PATTERNS = ("*SECRET", "*SECRET_KEY", "*TOKEN", "*PASSWORD", "*API_KEY")
 
+
+@dataclass
+class _Inflight:
+    worker: "AgentWorkerEndpoint"
+    aborted: bool = False
+
+
 # this process's calls on workers, by call_id, so a rollout abort can cancel them all
-_inflight: dict[str, "AgentWorkerEndpoint"] = {}
+_inflight: dict[str, _Inflight] = {}
 
 
 @dataclass(frozen=True)
@@ -67,11 +74,16 @@ def _matches(name: str, patterns: Sequence[str]) -> bool:
 
 
 async def cancel_inflight_calls() -> int:
-    """Cancel every call this process has running on a worker (their children get SIGTERM); return how many."""
+    """Cancel every call this process has submitted or is submitting to a worker; return how many.
+
+    The worker cancels each on its DELETE, or refuses a submit the DELETE overtook. The caller stops polling
+    either way, so a call whose DELETE was lost is cancelled by the worker's orphan timer."""
     calls = list(_inflight.items())
+    for _, inflight in calls:
+        inflight.aborted = True
     async with asyncio.TaskGroup() as group:
-        for call_id, worker in calls:
-            group.create_task(_cancel_on(worker, call_id))
+        for call_id, inflight in calls:
+            group.create_task(_cancel_on(inflight.worker, call_id))
     return len(calls)
 
 
@@ -102,10 +114,10 @@ async def call_on_worker(
     }
     json.dumps(body)  # a kwarg the protocol cannot carry fails here, before anything runs
     async with _client(worker) as client:
-        _inflight[call_id] = worker
+        _inflight[call_id] = inflight = _Inflight(worker=worker)
         try:
             await _request(client, "POST", "/calls", json=body)
-            return await _poll_until_done(client, call_id, on_child_reports)
+            return await _poll_until_done(client, call_id, inflight, on_child_reports)
         except asyncio.CancelledError:
             await asyncio.shield(_cancel(client, call_id))
             raise
@@ -114,7 +126,10 @@ async def call_on_worker(
 
 
 async def _poll_until_done(
-    client: httpx.AsyncClient, call_id: str, on_child_reports: Callable[[list[Any]], None] | None
+    client: httpx.AsyncClient,
+    call_id: str,
+    inflight: _Inflight,
+    on_child_reports: Callable[[list[Any]], None] | None,
 ) -> Any:
     after = 0
     while True:
@@ -127,6 +142,10 @@ async def _poll_until_done(
         after = state["next"]
         if state["state"] == "done":
             return _unpack_outcome(state["outcome"])
+        if inflight.aborted:
+            raise InfraAbort(
+                "WorkerCancelled", f"the rollout aborted call {call_id} on agent worker {client.base_url}"
+            )
 
 
 def _unpack_outcome(outcome: dict[str, Any]) -> Any:

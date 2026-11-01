@@ -267,6 +267,39 @@ def test_an_abort_during_the_submit_keeps_the_trial_from_starting(serve, tmp_pat
     assert not pid_file.exists()
 
 
+def test_an_aborted_call_whose_cancel_is_lost_stops_polling_and_is_reaped(serve, tmp_path, monkeypatch):
+    """The DELETE never arrives; the caller still stops, and the worker's orphan timer ends the child."""
+    monkeypatch.setattr("miles.rollout.agentic.worker._REAP_INTERVAL_S", 0.2)
+    monkeypatch.setattr(remote, "_POLL_WAIT_S", 1.0)
+    endpoint = serve(WorkerConfig(orphan_timeout_s=2.0))
+    pid_file, cleaned_up = tmp_path / "pid", tmp_path / "cleaned_up"
+
+    async def lose_the_cancel(worker, call_id):
+        return None
+
+    monkeypatch.setattr(remote, "_cancel_on", lose_the_cancel)
+
+    async def abort_with_a_lost_cancel():
+        task = asyncio.create_task(
+            call_agent_function(
+                stubs.wait_until_cancelled,
+                mode="worker",
+                worker=endpoint,
+                pid_file=str(pid_file),
+                cleaned_up=str(cleaned_up),
+            )
+        )
+        while not pid_file.exists():
+            await asyncio.sleep(0.1)
+        await remote.cancel_inflight_calls()
+        with pytest.raises(InfraAbort) as raised:
+            await asyncio.wait_for(task, timeout=30)
+        return raised.value.exit_status
+
+    assert asyncio.run(abort_with_a_lost_cancel()) == "WorkerCancelled"
+    assert _wait_for(cleaned_up, timeout_s=30)
+
+
 def test_secrets_are_not_forwarded_by_value(monkeypatch):
     monkeypatch.setenv("HARBOR_ADMIN_SECRET", "s3cret")
     monkeypatch.setenv("HARBOR_ADMIN_SECRET_FILE", "/secrets/harbor_admin")
