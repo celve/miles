@@ -7,6 +7,7 @@ starts, rather than failing inside one.
 
 from miles.backends.sglang_utils.sglang_api_client import WorkerType
 from miles.diffusion.train.pipeline_config import get_train_pipeline_config, resolve_model_family
+from miles.utils.args.configs.data import DataConfig
 
 _HOOKS = {
     "rollout_function_path": "miles.diffusion.rollout.rollout_fn.DiffusionRolloutFn",
@@ -55,6 +56,10 @@ _UNSUPPORTED = [
     ("--debug-train-only or --debug-rollout-only", lambda a: a.debug_train_only or a.debug_rollout_only),
     ("--ci-test: its version readback and sample-ownership audit read token fields", lambda a: a.ci_test),
     (
+        "asymmetric or dual-clip PPO (--eps-clip-high, --eps-clip-c); --eps-clip sets the symmetric ratio clip",
+        lambda a: a.eps_clip_high is not None or a.eps_clip_c is not None,
+    ),
+    (
         "--optimizer-cpu-offload: the diffusion trainer keeps AdamW on the GPU",
         lambda a: a.optimizer_cpu_offload,
     ),
@@ -71,10 +76,7 @@ def validate_diffusion_args(args) -> None:
     unsupported = [what for what, requested in _UNSUPPORTED if requested(args)]
     if unsupported:
         raise ValueError("--model-kind diffusion does not support: " + "; ".join(unsupported))
-    hooks = {name: vars(args)[name] for name in _HOOKS}
-    wrong_hooks = {name: value for name, value in hooks.items() if value != _HOOKS[name]}
-    if wrong_hooks:
-        raise ValueError(f"--model-kind diffusion needs its own hooks {_HOOKS}; got {wrong_hooks}")
+    _derive_hooks(args)
     if (args.rollout_batch_size * args.n_samples_per_prompt) % args.global_batch_size:
         raise ValueError("--global-batch-size must divide --rollout-batch-size x --n-samples-per-prompt")
     if args.diffusion_lora_rank <= 0 or args.diffusion_num_sde_steps <= 0:
@@ -84,6 +86,19 @@ def validate_diffusion_args(args) -> None:
         args.diffusion_model_family = resolve_model_family(args.hf_checkpoint)
     if args.diffusion_lora_target_modules is None:
         args.diffusion_lora_target_modules = get_train_pipeline_config(args.diffusion_model_family).lora_target_modules
+
+
+def _derive_hooks(args) -> None:
+    """`--model-kind diffusion` sets its four hooks; an explicit different one is an error."""
+    unset = {None, DataConfig.model_fields["data_source_path"].default.path}
+    wrong = {}
+    for name, hook in _HOOKS.items():
+        if vars(args)[name] in unset:
+            vars(args)[name] = hook
+        elif vars(args)[name] != hook:
+            wrong[name] = vars(args)[name]
+    if wrong:
+        raise ValueError(f"--model-kind diffusion sets its own hooks {_HOOKS}; got {wrong}")
 
 
 def validate_diffusion_sglang_config(sglang) -> None:

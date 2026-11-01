@@ -11,17 +11,19 @@ export HF_TOKEN=...  # SD3.5 is gated; the launcher installs CPU PaddleOCR when 
 python scripts/run_sd35_medium_flow_grpo_ocr.py --num-rollout 600
 ```
 
-`--model-kind diffusion` selects the diffusion path inside Miles' own driver and control plane:
+`--model-kind diffusion` selects the diffusion path inside Miles' own driver and control plane, and sets the rollout
+function, data source, converter and rollout log hooks:
 
 | Piece | Where |
 | --- | --- |
 | Engine | `sglang.multimodal_gen`, launched by the inference engine spec (`miles/diffusion/engine.py`) and served through the Miles router |
-| Rollout | `miles.diffusion.rollout.rollout_fn.DiffusionRolloutFn`: SDE-sampled trajectories from `/rollout/generate`, scored by CPU PaddleOCR |
-| Train data | `miles.diffusion.conversion`: GRPO advantages and one train pair per SDE step, one row per image in the DP split |
+| Rollout | `miles.diffusion.rollout.rollout_fn.DiffusionRolloutFn`: SDE-sampled trajectories from `/rollout/generate`, scored through `rm_hub` by `--rm-type ocr` (CPU PaddleOCR) or a `--custom-rm-path`, per microgroup or per group under `--group-rm` |
+| Train data | `miles.diffusion.conversion`: rewards through the text runs' post-process boundary (`--reward-key`, `--custom-reward-post-process-path`, `--disable-rewards-normalization`), Flow-GRPO advantages, one train pair per SDE step, one row per image in the DP split |
 | Trainer | `miles.diffusion.train.actor.DiffusionFSDPTrainRayActor`: FSDP2 DiT with a PEFT LoRA adapter, Flow-GRPO loss, KL to the LoRA base |
 | Weight sync | LoRA A/B pairs over CUDA IPC, merged by the engine (`lora_merge`) |
 
 Supported today: SD3 family, LoRA, colocated GPUs, FSDP, the `sde` sampler and the OCR reward. Under
 `--deterministic-mode` a 2-rollout run reproduces miles_diffusion's metric series bit for bit on the same image.
 `tests/e2e/fsdp/test_sd35_medium_flow_grpo_ocr_2xGPU.py` checks that series against a recorded standard, with
-tolerances that absorb engine, torch and PaddleOCR differences between images.
+tolerances that absorb engine, torch and PaddleOCR differences between images; `MILES_DIFFUSION_PARITY_EXACT=1`
+makes it exact, the parity check on the recording image.

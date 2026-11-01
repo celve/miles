@@ -9,8 +9,10 @@ from typing import Any
 import torch
 
 from miles.diffusion.metrics import log_metrics
+from miles.ray.rollout.metrics import _compute_zero_std_metrics
 from miles.utils.args.custom_view import compute_custom_function_config
 from miles.utils.function_registry import load_function
+from miles.utils.metric_utils import compute_rollout_step, dict_add_prefix, namespace_metrics
 from miles.utils.types import Sample
 
 logger = logging.getLogger(__name__)
@@ -102,25 +104,27 @@ def log_rollout_data(rollout_id: int, args, samples: list[Sample], rollout_extra
     # The executor logs before it converts, so this recomputes the converter's rewards through the same function.
     raw_rewards, advantages = post_process_rewards(args, samples)
     raw = torch.tensor(raw_rewards, dtype=torch.float)
-    advantages = torch.tensor(advantages, dtype=torch.float)
     grouped = raw.view(-1, args.n_samples_per_prompt)
-    metrics = {
+    log_dict = {
         **(rollout_extra_metrics or {}),
         **_stats(raw, prefix="rollout/reward/raw_"),
-        **_stats(advantages, prefix="rollout/reward/norm_"),
+        **_stats(torch.tensor(advantages, dtype=torch.float), prefix="rollout/reward/norm_"),
         "rollout/reward/group_mean_avg": float(grouped.mean(dim=-1).mean()),
         "rollout/reward/group_std_avg": float(grouped.std(dim=-1, unbiased=False).mean()),
-        "rollout/zero_std_groups": float((grouped.std(dim=-1) == 0).sum()),
+        **dict_add_prefix(_compute_zero_std_metrics(args, samples), "rollout/"),
         "perf/rollout_time": rollout_time,
-        "rollout/step": rollout_id,
     }
-    logger.info(f"rollout {rollout_id}: {metrics}")
-    log_metrics(args, metrics, step_key="rollout/step")
+    log_dict, step_key = namespace_metrics(
+        log_dict, trainer_model_id=None, step_name="rollout/step", step=compute_rollout_step(args, rollout_id)
+    )
+    logger.info(f"rollout {rollout_id}: {log_dict}")
+    log_metrics(args, log_dict, step_key=step_key)
     # The default text-rollout metrics read token fields these samples do not have.
     return True
 
 
 def _stats(values: torch.Tensor, *, prefix: str) -> dict[str, float]:
+    # Not `compute_statistics`: the e2e gate records float32 means, torch's lower median and the population std.
     return {
         f"{prefix}mean": float(values.mean()),
         f"{prefix}std": float(values.std(unbiased=False)),

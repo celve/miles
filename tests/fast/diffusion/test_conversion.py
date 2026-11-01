@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from miles.diffusion import conversion
 from miles.diffusion.conversion import build_train_pairs, compute_grpo_advantages, convert_samples_to_train_data
 from miles.diffusion.types import DenoisingEnv, DiffusionRollout, DiTTrajectory
 from miles.ray.rollout.train_data_conversion import split_train_data_by_dp
@@ -18,6 +19,10 @@ class _Args:
     rewards_normalization = True
     reward_key = None
     custom_reward_post_process_path = None
+    advantage_estimator = "grpo"
+    wandb_always_use_train_step = False
+    rollout_batch_size = 2
+    global_batch_size = 2
 
 
 def _fn_args(**overrides):
@@ -128,3 +133,18 @@ def test_disabled_normalization_trains_on_the_raw_rewards():
     data = convert_samples_to_train_data(_fn_args(rewards_normalization=False), _rewarded([1.0, 0.25]))
 
     assert _advantages(data) == [1.0, 0.25]
+
+
+def test_rollout_metrics_use_miles_step_and_zero_std_helpers(monkeypatch):
+    logged = []
+    monkeypatch.setattr(conversion, "log_metrics", lambda args, metrics, *, step_key: logged.append((step_key, metrics)))
+    samples = _rewarded([1.0, 1.0, 0.0, 1.0])
+    for sample in samples:
+        sample.group_index = sample.index // 2
+
+    conversion.log_rollout_data(3, _fn_args(wandb_always_use_train_step=True), samples, {}, rollout_time=1.5)
+
+    ((step_key, metrics),) = logged
+    assert step_key == "rollout/step" and metrics["rollout/step"] == 3 * 2 * 2 // 2
+    assert metrics["rollout/zero_std/count_1.0"] == 1 and metrics["rollout/zero_std/all_one_percentage"] == 0.5
+    assert metrics["rollout/reward/raw_mean"] == 0.75 and metrics["perf/rollout_time"] == 1.5
