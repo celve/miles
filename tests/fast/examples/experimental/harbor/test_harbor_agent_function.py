@@ -9,6 +9,7 @@ import asyncio
 import enum
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -18,11 +19,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 
 import harbor_agent_function as haf
-import swe_agent_function
+import httpx
 import pytest
-
+import swe_agent_function
 
 from miles.rollout.agentic.agent_function import InfraAbort
+
+from . import EXAMPLE_DIR
 
 
 class _EnvironmentType(str, enum.Enum):
@@ -775,8 +778,34 @@ def test_agent_server_runs_the_built_trial_instead_of_this_process(tasks_dir, fa
     assert body["session_server_instance_id"] == "inst-1"
 
 
-def test_the_remote_client_is_the_agent_server_examples_keepalive_client():
-    assert haf._get_agent_server_client is swe_agent_function._get_agent_server_client
+def test_the_remote_client_is_the_agent_server_examples_keepalive_client(tasks_dir, fake_harbor, monkeypatch):
+    used = []
+    monkeypatch.setattr(swe_agent_function, "_get_agent_server_client", lambda: used.append(1) or _Unreachable())
+    monkeypatch.setenv("AGENT_SERVER_URL", "http://127.0.0.1:9")
+
+    with pytest.raises(InfraAbort):
+        _remote_run()
+
+    assert used == [1]
+
+
+class _Unreachable:
+    async def post(self, *args, **kwargs):
+        raise httpx.ConnectError("no server")
+
+
+def test_the_module_imports_by_package_without_the_agent_server_example_on_the_path():
+    """warm_templates and trial_driver import it package-qualified, from a repo-only path."""
+    repo = EXAMPLE_DIR.parents[2]
+    example_dirs = {str(EXAMPLE_DIR), str(EXAMPLE_DIR.parents[1] / "swe-agent-harbor-docker")}
+    path = [str(repo), *(p for p in sys.path if p and p not in example_dirs)]
+
+    subprocess.run(
+        [sys.executable, "-c", "import examples.experimental.harbor.harbor_agent_function"],
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(path)},
+        cwd=repo.parent,
+        check=True,
+    )
 
 
 def test_agent_server_results_keep_the_in_process_discards(tasks_dir, fake_harbor, agent_server):

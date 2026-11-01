@@ -97,8 +97,6 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
-from swe_agent_function import _get_agent_server_client
-from swe_agent_function import abort as _flush_agent_server
 
 from miles.rollout.agentic.agent_function import InfraAbort
 from miles.rollout.agentic.credentials import PROVIDER_CREDENTIALS, resolve_provider_api_key
@@ -614,6 +612,9 @@ async def _run_on_agent_server(url: str, config, metadata: dict[str, Any], sessi
     """POST the built trial to the agent server; return its ``TrialResult`` and trial dir."""
     from harbor.models.trial.result import TrialResult
 
+    # the agent-server example's keepalive client; deferred so package-qualified importers need no bare-name path
+    from swe_agent_function import _get_agent_server_client
+
     instance_id = metadata.get("instance_id")
     try:
         response = await _get_agent_server_client().post(
@@ -700,4 +701,6 @@ async def abort(args) -> None:
         return
     if not os.getenv("HARBOR_ADMIN_SECRET") and (secret_file := os.getenv("HARBOR_ADMIN_SECRET_FILE")):
         os.environ["HARBOR_ADMIN_SECRET"] = Path(secret_file).expanduser().read_text().strip()
-    await _flush_agent_server(args)
+    from swe_agent_function import abort as flush_agent_server
+
+    await flush_agent_server(args)
