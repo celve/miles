@@ -267,6 +267,7 @@ async def test_training_and_the_eval_engines_each_get_their_own_recorder(monkeyp
         return f"engine-behind-{a.sglang_router_ip}:{a.sglang_router_port}"
 
     monkeypatch.setattr(harbor_cua, "_recorders", {})
+    monkeypatch.setattr(harbor_cua, "_recorder", None, raising=False)
     monkeypatch.setattr(harbor_cua, "CallRecorder", Recorder)
     monkeypatch.setattr(harbor_cua, "_resolve_upstream", resolve_upstream)
     order = [first, "eval" if first == "train" else "train"]
