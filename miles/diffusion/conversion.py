@@ -9,7 +9,7 @@ from typing import Any
 import torch
 
 from miles.diffusion.metrics import log_metrics
-from miles.ray.rollout.metrics import _compute_zero_std_metrics
+from miles.ray.rollout.metrics import compute_zero_std_metrics
 from miles.utils.args.custom_view import compute_custom_function_config
 from miles.utils.function_registry import load_function
 from miles.utils.metric_utils import compute_rollout_step, dict_add_prefix, namespace_metrics
@@ -111,7 +111,7 @@ def log_rollout_data(rollout_id: int, args, samples: list[Sample], rollout_extra
         rollout_id,
         {
             **(rollout_extra_metrics or {}),
-            **dict_add_prefix(_compute_zero_std_metrics(args, samples), "rollout/"),
+            **dict_add_prefix(compute_zero_std_metrics(args, samples), "rollout/"),
             "perf/rollout_time": rollout_time,
         },
     )
