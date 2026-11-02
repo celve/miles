@@ -89,8 +89,6 @@ def validate_diffusion_args(args) -> None:
     if unsupported:
         raise ValueError("--model-kind diffusion does not support: " + "; ".join(unsupported))
     _derive_hooks(args)
-    if (args.rollout_batch_size * args.n_samples_per_prompt) % args.global_batch_size:
-        raise ValueError("--global-batch-size must divide --rollout-batch-size x --n-samples-per-prompt")
     if args.diffusion_lora_rank <= 0 or args.diffusion_num_sde_steps <= 0:
         raise ValueError("--diffusion-lora-rank and --diffusion-num-sde-steps must be positive")
 
@@ -98,6 +96,14 @@ def validate_diffusion_args(args) -> None:
         args.diffusion_model_family = resolve_model_family(args.hf_checkpoint)
     if args.diffusion_lora_target_modules is None:
         args.diffusion_lora_target_modules = get_train_pipeline_config(args.diffusion_model_family).lora_target_modules
+
+
+def validate_diffusion_batch_size(args) -> None:
+    """Run once `--num-steps-per-rollout` has been turned into `--global-batch-size`."""
+    if args.global_batch_size is None:
+        raise ValueError("--model-kind diffusion needs --global-batch-size or --num-steps-per-rollout")
+    if (args.rollout_batch_size * args.n_samples_per_prompt) % args.global_batch_size:
+        raise ValueError("--global-batch-size must divide --rollout-batch-size x --n-samples-per-prompt")
 
 
 def _derive_hooks(args) -> None:
