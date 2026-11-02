@@ -94,6 +94,7 @@ async def call_agent_function(
     worker: AgentWorkerEndpoint | None = None,
     sandbox: SandboxWorkerConfig | None = None,
     extra_env: dict[str, str] | None = None,
+    abort_scope: str | None = None,
     **kwargs: Any,
 ) -> Any:
     """Await ``fn(**kwargs)`` on this loop (``inline``), in a child process of its own (``subproc``), or in one on
@@ -101,17 +102,22 @@ async def call_agent_function(
     created for this call (``sandbox``, from ``sandbox``).
 
     Under ``subproc``, ``worker`` and ``sandbox``, ``on_child_reports`` receives each item the agent sends with
-    ``report_to_caller``, and ``extra_env`` is added to the agent process's environment."""
+    ``report_to_caller``, and ``extra_env`` is added to the agent process's environment. Under ``worker`` and
+    ``sandbox``, a rollout abort cancels the call only if it aborts ``abort_scope`` or every scope."""
     if mode == "inline":
         return await fn(**kwargs)
     if mode == "worker":
         if worker is None:
             raise ValueError("--custom-agent-function-mode worker needs --custom-agent-function-worker-url")
-        return await call_on_worker(worker, fn, kwargs, env=extra_env or {}, on_child_reports=on_child_reports)
+        return await call_on_worker(
+            worker, fn, kwargs, env=extra_env or {}, on_child_reports=on_child_reports, abort_scope=abort_scope
+        )
     if mode == "sandbox":
         if sandbox is None:
             raise ValueError("--custom-agent-function-mode sandbox needs --custom-agent-function-sandbox-template")
-        return await call_in_sandbox(sandbox, fn, kwargs, env=extra_env or {}, on_child_reports=on_child_reports)
+        return await call_in_sandbox(
+            sandbox, fn, kwargs, env=extra_env or {}, on_child_reports=on_child_reports, abort_scope=abort_scope
+        )
     # pickled before the process starts, so an unpicklable argument fails here
     call = pickle.dumps(sys.path) + pickle.dumps((fn, kwargs, _CANCEL_GRACE_S, _LEFTOVER_CLEANUP_S))
     proc = await asyncio.create_subprocess_exec(

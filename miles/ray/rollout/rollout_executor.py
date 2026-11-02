@@ -27,7 +27,7 @@ from miles.rollout.base_types import (
 )
 from miles.rollout.checkpoint_eval import CheckpointEvalFn, EvalSkip
 from miles.rollout.fully_async_data_buffer import Group
-from miles.rollout.inference_rollout.compatibility import load_rollout_function
+from miles.rollout.inference_rollout.compatibility import LegacyRolloutFnAdapter, load_rollout_function
 from miles.utils import object_store
 from miles.utils.async_utils import maybe_await
 from miles.utils.audit_utils.event_analyzer import analyzer as event_analyzer
@@ -421,6 +421,13 @@ class RolloutExecutor(DedicatedRpcLoopWorker):
         if eval_fleet_info is None:
             self._eval_fleet = None
             return
+        if isinstance(self.eval_generate_rollout, LegacyRolloutFnAdapter):
+            # A legacy fn takes only args, whose router is training's, so it would score the training weights as the snapshot.
+            raise ValueError(
+                f"{self.args.eval_function_path} is a legacy rollout function and cannot generate on the dedicated eval "
+                "engines (--eval-num-gpus); make it a BaseRolloutFn that generates against input.generate_state, or "
+                "evaluate on the training engines without --eval-num-gpus."
+            )
 
         self._eval_fleet = RolloutExecutorEvalFleet(
             self.args, info=eval_fleet_info, inference_controller_provider=self._inference_controller_provider

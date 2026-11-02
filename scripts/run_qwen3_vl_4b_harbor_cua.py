@@ -16,7 +16,8 @@ Needs, before ``execute``:
 * a Megatron-LM checkout at ``--megatron-path``, because the FSDP log-prob path
   imports ``megatron.core.fusions.fused_cross_entropy``;
 * ``harbor`` installed in the trainer's environment from the branch Miles pins
-  (``uv pip install "harbor[e2b] @ git+https://github.com/harbor-framework/harbor@harbor-miles-v0.20.0"``).
+  (``uv pip install "harbor[e2b] @ git+https://github.com/harbor-framework/harbor@harbor-miles-v0.20.0" pymupdf==1.28.2``);
+  PyMuPDF 2.0's import loads ONNX layout models on every core, ~350 CPU-s per trial, which starves a GPU box's harness.
 
 Args:
     --harbor-env-type: Harbor ``EnvironmentType`` for the trials (required).
@@ -37,6 +38,11 @@ Args:
         and the TITO session server with images, which assembles the samples.
         ``--max-sandboxes``, ``--recorder-upstream`` and the OSWorld runner
         belong to ``generate``.
+    --eval-num-gpus: GPUs, beyond ``--num-gpus-per-node``, for engines that evaluate each saved HF snapshot while
+        training goes on; applied to ``--mode train`` on megatron, which saves the snapshots. 0 evaluates on the
+        training engines, pausing training.
+    --freeze-vision-model: ``auto`` freezes the vision tower from 3,000 training episodes up, where a frozen tower
+        ended level with a trained one at 1.2x the episodes per GPU-hour but learned slower early; megatron only.
     --vlm-cache-size-mb: the engines' ViT embedding cache, ``SGLANG_VLM_CACHE_SIZE_MB``;
         when the workers' value, after ``--extra-env-vars``, is above 0, the run refuses
         unless the workers' SGLang clears it on weight updates (celve/sglang 55bdbddf84,
@@ -130,6 +136,11 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     mode: Literal["train", "rollout", "eval"] = "train"
     rollout_path: Literal["generate", "session"] = "generate"
     session_server_workers: int = 4
+    max_tokens_per_gpu: int = 12288
+    skip_actor_forward_only: bool = True
+    eval_num_gpus: int = 1
+    eval_server_concurrency: int = 32
+    freeze_vision_model: Literal["auto", "on", "off"] = "auto"
     media_refs: bool = False
     # Keeps the resent screenshot's ViT embedding (~42 MB at 1080p) for 64 desktops.
     vlm_cache_size_mb: int = 4096
@@ -160,6 +171,21 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     def rollouts(self) -> int:
         """``--num-rollout 0`` with an eval interval is Miles's eval-only mode."""
         return {"train": self.num_rollout, "rollout": 1, "eval": 0}[self.mode]
+
+    @property
+    def snapshot_eval_gpus(self) -> int:
+        return self.eval_num_gpus if self.backend == "megatron" and self.mode == "train" else 0
+
+    @property
+    def save_interval(self) -> int:
+        """Snapshot eval reads the --save-hf checkpoints, so it needs a save at every eval point."""
+        return self.eval_interval if self.snapshot_eval_gpus else 5
+
+    @property
+    def freezes_vision(self) -> bool:
+        if self.backend != "megatron" or self.freeze_vision_model == "off":
+            return False
+        return self.freeze_vision_model == "on" or self.rollouts * self.global_batch_size >= 3000
 
 
 def prepare(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
@@ -265,6 +291,11 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
         "--n-samples-per-eval-prompt 4 "
         "--eval-max-response-len 4096 "
         "--eval-top-p 1 "
+        + (
+            f"--eval-num-gpus {args.snapshot_eval_gpus} --eval-server-concurrency {args.eval_server_concurrency} "
+            if args.snapshot_eval_gpus
+            else ""
+        )
     )
 
     grpo_args = (
@@ -291,7 +322,7 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
     # returns no dynamic_global_batch_size, which convert_samples_to_train_data then
     # asserts against the flag. The compact schedule drops whole trailing rollouts
     # instead, which is what makes a variable sibling count safe without it.
-    perf_args = "--use-dynamic-batch-size --max-tokens-per-gpu 16384 "
+    perf_args = f"--use-dynamic-batch-size --max-tokens-per-gpu {args.max_tokens_per_gpu} "
 
     fsdp_args = (
         "--train-backend fsdp "
@@ -323,6 +354,9 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
         "--attention-backend flash "
         "--megatron-to-hf-mode bridge "
         "--distributed-timeout-minutes 60 "
+        # Exact: the training forward's log-probs stand in for a separate forward-only pass.
+        + ("--skip-actor-forward-only " if args.skip_actor_forward_only else "")
+        + ("--freeze-vision-model " if args.freezes_vision else "")
     )
 
     sglang_args = (
@@ -346,7 +380,7 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
         f"--actor-num-gpus-per-node {args.num_gpus_per_node} "
         "--colocate "
         f"--save {args.output_dir}/ckpt "
-        "--save-interval 5 "
+        f"--save-interval {args.save_interval} "
         f"--dump-details {args.output_dir}/dump "
         # An HF copy of each saved checkpoint, so a trained policy can be served, evaluated
         # and diffed against the base weights without a conversion step.
@@ -370,7 +404,7 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
             f"{optimizer_args} {perf_args} {backend_args} {sglang_args} "
             f"{wandb_args} {misc_args} {args.extra_args} "
         ),
-        num_gpus_per_node=args.num_gpus_per_node,
+        num_gpus_per_node=args.num_gpus_per_node + args.snapshot_eval_gpus,
         megatron_model_type=_megatron_model_type(args),
         megatron_path=args.megatron_path,
         extra_env_vars=_worker_env(args, harbor_env or {}),

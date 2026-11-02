@@ -20,6 +20,7 @@ import os
 import pickle
 import socket
 import uuid
+from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -44,17 +45,29 @@ _CREDENTIAL_NAMES = frozenset(name for spec in PROVIDER_CREDENTIALS.values() for
 @dataclass
 class _Inflight:
     worker: "AgentWorkerEndpoint"
+    scope: str | None = None
     aborted: bool = False
 
 
-# this process's calls on workers, by call_id, so a rollout abort can cancel them all
+# this process's calls on workers, by call_id, so a rollout abort can cancel its own
 _inflight: dict[str, _Inflight] = {}
-_aborts = 0
+# aborts by scope; None aborts every scope
+_aborts: Counter = Counter()
 
 
-def aborts_so_far() -> int:
-    """How many rollout aborts this process has seen, for a caller still preparing a worker when one lands."""
-    return _aborts
+def rollout_abort_scope(args) -> str | None:
+    """The router a rollout generates through; training and the dedicated eval engines (--eval-num-gpus) differ."""
+    ip, port = getattr(args, "sglang_router_ip", None), getattr(args, "sglang_router_port", None)
+    return None if ip is None or port is None else f"{ip}:{port}"
+
+
+def _reaches(abort_scope: str | None, call_scope: str | None) -> bool:
+    return abort_scope is None or call_scope is None or abort_scope == call_scope
+
+
+def aborts_so_far(scope: str | None = None) -> int:
+    """How many rollout aborts reaching ``scope`` this process has seen, for a caller still preparing a worker."""
+    return sum(n for aborted, n in _aborts.items() if _reaches(aborted, scope))
 
 
 @dataclass(frozen=True)
@@ -84,14 +97,14 @@ def _matches(name: str, patterns: Sequence[str]) -> bool:
     return any(fnmatch.fnmatchcase(name, p) for p in patterns)
 
 
-async def cancel_inflight_calls() -> int:
-    """Cancel every call this process has submitted or is submitting to a worker; return how many.
+async def cancel_inflight_calls(scope: str | None = None) -> int:
+    """Cancel the calls of ``scope`` (every call when None) this process has submitted or is submitting to a
+    worker; return how many.
 
     The worker cancels each on its DELETE, or refuses a submit the DELETE overtook. The caller stops polling
     either way, so a call whose DELETE was lost is cancelled by the worker's orphan timer."""
-    global _aborts
-    _aborts += 1
-    calls = list(_inflight.items())
+    _aborts[scope] += 1
+    calls = [(call_id, inflight) for call_id, inflight in _inflight.items() if _reaches(scope, inflight.scope)]
     for _, inflight in calls:
         inflight.aborted = True
     async with asyncio.TaskGroup() as group:
@@ -121,8 +134,11 @@ async def call_on_worker(
     *,
     env: dict[str, str],
     on_child_reports: Callable[[list[Any]], None] | None = None,
+    abort_scope: str | None = None,
 ) -> Any:
-    """Run ``fn(**kwargs)`` on the worker and return its result, as ``call_agent_function``'s ``subproc`` would."""
+    """Run ``fn(**kwargs)`` on the worker and return its result, as ``call_agent_function``'s ``subproc`` would.
+
+    Only a rollout abort of ``abort_scope`` (``rollout_abort_scope``), or of every scope, cancels it."""
     call_id = uuid.uuid4().hex
     body = {
         "call_id": call_id,
@@ -133,7 +149,7 @@ async def call_on_worker(
     }
     json.dumps(body)  # a kwarg the protocol cannot carry fails here, before anything runs
     async with _client(worker) as client:
-        _inflight[call_id] = inflight = _Inflight(worker=worker)
+        _inflight[call_id] = inflight = _Inflight(worker=worker, scope=abort_scope)
         try:
             await _request(client, "POST", "/calls", json=body)
             return await _poll_until_done(client, call_id, inflight, on_child_reports)

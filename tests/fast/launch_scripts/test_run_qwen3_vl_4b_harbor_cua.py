@@ -200,3 +200,27 @@ def test_templates_are_warmed_where_the_sandboxes_are_created(monkeypatch, tmp_p
 
     assert any("make_harbor_cua_tasks" in cmd for cmd in recording.commands)
     assert any("warm_templates" in cmd for cmd in recording.commands) == warms_here
+
+
+@pytest.mark.parametrize(
+    ("overrides", "eval_gpus", "save_interval"),
+    [({}, 1, 5), ({"eval_interval": 1}, 1, 1), ({"backend": "fsdp"}, 0, 5), ({"eval_num_gpus": 0, "eval_interval": 1}, 0, 5)],
+)
+def test_snapshot_eval_gets_its_own_gpu_and_a_save_at_every_eval_point(
+    monkeypatch, tmp_path, overrides, eval_gpus, save_interval
+):
+    command, _ = _train_command(monkeypatch, tmp_path, **overrides)
+
+    assert (f"--eval-num-gpus 1 --eval-server-concurrency 32" in command) == bool(eval_gpus)
+    assert f"--save-interval {save_interval} " in command
+
+
+@pytest.mark.parametrize(
+    ("overrides", "freezes"),
+    [({}, False), ({"num_rollout": 100}, True), ({"num_rollout": 100, "freeze_vision_model": "off"}, False),
+     ({"freeze_vision_model": "on"}, True)],
+)
+def test_the_vision_tower_freezes_from_3000_training_episodes(monkeypatch, tmp_path, overrides, freezes):
+    command, _ = _train_command(monkeypatch, tmp_path, **overrides)
+
+    assert ("--freeze-vision-model" in command) == freezes

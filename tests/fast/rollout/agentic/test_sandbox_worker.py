@@ -18,6 +18,7 @@ from miles.rollout.agentic import sandbox_worker
 from miles.rollout.agentic.agent_function import InfraAbort, call_agent_function
 from miles.rollout.agentic.sandbox_worker import SandboxWorkerConfig
 from miles.rollout.agentic.worker import create_app
+from miles.utils.misc import call_agent_abort_hook
 from miles.utils.test_utils import agent_function_stubs as stubs
 
 from .test_worker import _Served
@@ -263,10 +264,10 @@ def test_a_rollout_abort_while_the_sandbox_boots_stops_the_call_before_it_starts
             await gate.wait()
         return await real_create(template, **kwargs)
 
-    async def wait_held(endpoint, label, aborts):
+    async def wait_held(endpoint, label, aborts, abort_scope=None):
         if phase == "health":
             await gate.wait()
-        return await real_wait(endpoint, label, aborts)
+        return await real_wait(endpoint, label, aborts, abort_scope)
 
     monkeypatch.setattr(FakeAsyncSandbox, "create", create_held)
     monkeypatch.setattr(sandbox_worker, "_wait_healthy", wait_held)
@@ -285,6 +286,31 @@ def test_a_rollout_abort_while_the_sandbox_boots_stops_the_call_before_it_starts
     assert abort.exit_status == "WorkerCancelled"
     assert ("POST", "/calls") not in service.requests
     assert FakeAsyncSandbox.killed == ["sbx-0"]
+
+
+def test_an_abort_of_another_rollout_while_the_sandbox_boots_leaves_the_call_running(service, monkeypatch):
+    """Training's oversampling abort must not stop a dedicated eval engine's call that is still booting."""
+    gate = asyncio.Event()
+    real_create = FakeAsyncSandbox.create
+
+    async def create_held(template, **kwargs):
+        await gate.wait()
+        return await real_create(template, **kwargs)
+
+    monkeypatch.setattr(FakeAsyncSandbox, "create", create_held)
+
+    async def abort_training_while_eval_boots():
+        task = asyncio.create_task(
+            call_agent_function(stubs.report_pid, mode="sandbox", sandbox=_config(), abort_scope="127.0.0.1:31000")
+        )
+        await asyncio.sleep(0.3)
+        await call_agent_abort_hook(
+            types.SimpleNamespace(custom_agent_function_path=None, sglang_router_ip="127.0.0.1", sglang_router_port=30000)
+        )
+        gate.set()
+        return await task
+
+    assert asyncio.run(abort_training_while_eval_boots())["pid"]
 
 
 def test_a_call_that_starts_after_an_abort_runs(service):
