@@ -10,6 +10,7 @@ from miles.diffusion.train.pipeline_config import get_train_pipeline_config, res
 from miles.utils.args.configs.algo import AlgoConfig
 from miles.utils.args.configs.backend_fields import TrainerBackendTraitConfig
 from miles.utils.args.configs.data import DataConfig
+from miles.utils.args.configs.rollout import RolloutRelatedConfig, RolloutRelatedRolloutOnlyConfig
 
 _HOOKS = {
     "rollout_function_path": "miles.diffusion.rollout.rollout_fn.DiffusionRolloutFn",
@@ -84,10 +85,48 @@ _UNSUPPORTED = [
 ]
 
 
+# Text-training and text-sampling flags the Flow-GRPO path never reads (the ones above have their own messages);
+# each must keep its default, or the run would silently differ from what was asked.
+_UNREAD = {
+    AlgoConfig: sorted(
+        AlgoConfig.model_fields.keys()
+        - {"eps_clip", "advantage_estimator", "ref_load", "kl_coef", "use_kl_loss", "eps_clip_high", "eps_clip_c"}
+        - {"use_rollout_routing_replay"}
+        # Derived from --advantage-estimator after parsing, which the grpo check above already pins.
+        - {"use_critic"}
+    ),
+    RolloutRelatedConfig: [
+        "rollout_temperature",
+        "rollout_top_p",
+        "rollout_top_k",
+        "rollout_max_response_len",
+        "rollout_top_logprobs_num",
+        "custom_generate_function_path",
+        "custom_agent_function_path",
+        "rollout_data_postprocess_path",
+    ],
+    RolloutRelatedRolloutOnlyConfig: [
+        "max_seq_len",
+        "rollout_max_prompt_len",
+        "rollout_stop",
+        "rollout_stop_token_ids",
+        "buffer_filter_path",
+    ],
+}
+
+
 def validate_diffusion_args(args) -> None:
     unsupported = [what for what, requested in _UNSUPPORTED if requested(args)]
     if unsupported:
         raise ValueError("--model-kind diffusion does not support: " + "; ".join(unsupported))
+    unread = [
+        f"--{name.replace('_', '-')}"
+        for config, names in _UNREAD.items()
+        for name in names
+        if vars(args)[name] != config.model_fields[name].get_default(call_default_factory=True)
+    ]
+    if unread:
+        raise ValueError("--model-kind diffusion trains Flow-GRPO on images and never reads: " + ", ".join(unread))
     _derive_hooks(args)
     if args.diffusion_lora_rank <= 0 or args.diffusion_num_sde_steps <= 0:
         raise ValueError("--diffusion-lora-rank and --diffusion-num-sde-steps must be positive")
