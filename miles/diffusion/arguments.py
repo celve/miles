@@ -100,9 +100,13 @@ def validate_diffusion_args(args) -> None:
 
 def validate_diffusion_batch_size(args) -> None:
     """Run once `--num-steps-per-rollout` has been turned into `--global-batch-size`."""
+    num_images = args.rollout_batch_size * args.n_samples_per_prompt
     if args.global_batch_size is None:
         raise ValueError("--model-kind diffusion needs --global-batch-size or --num-steps-per-rollout")
-    if (args.rollout_batch_size * args.n_samples_per_prompt) % args.global_batch_size:
+    # The derivation floor-divides, so a non-dividing step count would silently train a different number of steps.
+    if args.num_steps_per_rollout is not None and num_images % args.num_steps_per_rollout:
+        raise ValueError("--num-steps-per-rollout must divide --rollout-batch-size x --n-samples-per-prompt")
+    if num_images % args.global_batch_size:
         raise ValueError("--global-batch-size must divide --rollout-batch-size x --n-samples-per-prompt")
 
 
