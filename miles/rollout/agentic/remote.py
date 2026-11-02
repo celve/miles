@@ -49,6 +49,12 @@ class _Inflight:
 
 # this process's calls on workers, by call_id, so a rollout abort can cancel them all
 _inflight: dict[str, _Inflight] = {}
+_aborts = 0
+
+
+def aborts_so_far() -> int:
+    """How many rollout aborts this process has seen, for a caller still preparing a worker when one lands."""
+    return _aborts
 
 
 @dataclass(frozen=True)
@@ -83,6 +89,8 @@ async def cancel_inflight_calls() -> int:
 
     The worker cancels each on its DELETE, or refuses a submit the DELETE overtook. The caller stops polling
     either way, so a call whose DELETE was lost is cancelled by the worker's orphan timer."""
+    global _aborts
+    _aborts += 1
     calls = list(_inflight.items())
     for _, inflight in calls:
         inflight.aborted = True

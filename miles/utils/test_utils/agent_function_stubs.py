@@ -41,6 +41,10 @@ async def report_then_return(*, items: list, **kwargs) -> str:
     return "done"
 
 
+async def return_value(*, value, **kwargs):
+    return value
+
+
 async def report_limits_scope(**kwargs) -> str:
     return current_scope()
 
@@ -70,6 +74,16 @@ async def wait_until_cancelled(*, pid_file: str, cleaned_up: str, **kwargs) -> N
     try:
         await asyncio.sleep(3600)
     except asyncio.CancelledError:
+        Path(cleaned_up).touch()
+        raise
+
+
+async def clean_up_slowly_when_cancelled(*, pid_file: str, cleaned_up: str, cleanup_s: float, **kwargs) -> None:
+    Path(pid_file).write_text(str(os.getpid()))
+    try:
+        await asyncio.sleep(3600)
+    except asyncio.CancelledError:
+        await asyncio.sleep(cleanup_s)
         Path(cleaned_up).touch()
         raise
 

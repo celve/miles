@@ -25,13 +25,14 @@ from typing import Any, BinaryIO, NoReturn
 from miles.rollout.agentic import rollout_limits
 from miles.rollout.agentic.errors import InfraAbort, RemoteTraceback
 from miles.rollout.agentic.remote import AgentWorkerEndpoint, call_on_worker
+from miles.rollout.agentic.sandbox_worker import SandboxWorkerConfig, call_in_sandbox
 from miles.utils.logging_utils import configure_logger_raw
 
 __all__ = ["AGENT_FUNCTION_MODES", "InfraAbort", "call_agent_function", "report_to_caller"]
 
 logger = logging.getLogger(__name__)
 
-AGENT_FUNCTION_MODES = ("subproc", "inline", "worker")
+AGENT_FUNCTION_MODES = ("subproc", "inline", "worker", "sandbox")
 
 # A cancelled agent gets this long to run its own cleanup (closing its sandbox) before its process exits.
 _CANCEL_GRACE_S = 120.0
@@ -91,13 +92,15 @@ async def call_agent_function(
     mode: str,
     on_child_reports: Callable[[list[Any]], None] | None = None,
     worker: AgentWorkerEndpoint | None = None,
+    sandbox: SandboxWorkerConfig | None = None,
     extra_env: dict[str, str] | None = None,
     **kwargs: Any,
 ) -> Any:
     """Await ``fn(**kwargs)`` on this loop (``inline``), in a child process of its own (``subproc``), or in one on
-    an agent worker (``worker``, at ``worker``), whose ``subproc`` runs it.
+    an agent worker (``worker``, at ``worker``), whose ``subproc`` runs it, or in one on a worker in a sandbox
+    created for this call (``sandbox``, from ``sandbox``).
 
-    Under ``subproc`` and ``worker``, ``on_child_reports`` receives each item the agent sends with
+    Under ``subproc``, ``worker`` and ``sandbox``, ``on_child_reports`` receives each item the agent sends with
     ``report_to_caller``, and ``extra_env`` is added to the agent process's environment."""
     if mode == "inline":
         return await fn(**kwargs)
@@ -105,6 +108,10 @@ async def call_agent_function(
         if worker is None:
             raise ValueError("--custom-agent-function-mode worker needs --custom-agent-function-worker-url")
         return await call_on_worker(worker, fn, kwargs, env=extra_env or {}, on_child_reports=on_child_reports)
+    if mode == "sandbox":
+        if sandbox is None:
+            raise ValueError("--custom-agent-function-mode sandbox needs --custom-agent-function-sandbox-template")
+        return await call_in_sandbox(sandbox, fn, kwargs, env=extra_env or {}, on_child_reports=on_child_reports)
     # pickled before the process starts, so an unpicklable argument fails here
     call = pickle.dumps(sys.path) + pickle.dumps((fn, kwargs, _CANCEL_GRACE_S, _LEFTOVER_CLEANUP_S))
     proc = await asyncio.create_subprocess_exec(
