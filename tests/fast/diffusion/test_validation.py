@@ -206,6 +206,14 @@ def test_a_text_flag_the_diffusion_path_never_reads_is_rejected(override, flag):
         validate_diffusion_args(_supported(**override))
 
 
+def test_the_shared_loop_save_sentinel_stays_accepted():
+    config = _parse_diffusion_run(
+        "--global-batch-size", "64", "--save", "/ckpts", "--save-trigger-sentinel", "/tmp/checkpoint-now"
+    )
+
+    assert config.save_trigger_sentinel == "/tmp/checkpoint-now"
+
+
 def test_the_parsed_recipe_flags_pass_the_unread_flag_check():
     assert _parse_diffusion_run("--global-batch-size", "64").global_batch_size == 64
 

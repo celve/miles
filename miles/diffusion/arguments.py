@@ -93,6 +93,8 @@ _UNREAD = {
         - {"use_rollout_routing_replay"}
         # Derived from --advantage-estimator after parsing, which the grpo check above already pins.
         - {"use_critic"}
+        # Read by the shared train loop (train.py), which saves through the diffusion actor's checkpointing.
+        - {"save_trigger_sentinel"}
     ),
     RolloutRelatedConfig: [
         "rollout_temperature",
