@@ -173,16 +173,24 @@ def test_a_text_engine_group_is_rejected_in_a_diffusion_run():
         validate_diffusion_sglang_config(SimpleNamespace(models=[_model("m", [_group(), _group(engine_kind="text")])]))
 
 
-def test_a_parsed_diffusion_run_derives_its_batch_size_from_steps_per_rollout():
+def _parse_diffusion_run(*argv):
     from tests.fast.fixtures.args_fixtures import parse_fsdp_test_config
 
-    config = parse_fsdp_test_config(
+    return parse_fsdp_test_config(
         *("--model-kind", "diffusion", "--colocate", "--use-miles-router", "--rm-type", "ocr", "--eps-clip", "1e-4"),
         *("--hf-checkpoint", "/models/stable-diffusion-3.5-medium", "--actor-num-gpus-per-node", "2"),
-        *("--rollout-batch-size", "8", "--n-samples-per-prompt", "16", "--num-steps-per-rollout", "2"),
+        *("--rollout-batch-size", "8", "--n-samples-per-prompt", "16"),
+        *argv,
     )
 
-    assert config.global_batch_size == 64
+
+def test_a_parsed_diffusion_run_derives_its_batch_size_from_steps_per_rollout():
+    assert _parse_diffusion_run("--num-steps-per-rollout", "2").global_batch_size == 64
+
+
+def test_a_step_count_that_does_not_divide_the_images_is_rejected():
+    with pytest.raises(ValueError, match="num-steps-per-rollout must divide"):
+        _parse_diffusion_run("--num-steps-per-rollout", "48")
 
 
 @pytest.mark.parametrize("global_batch_size,message", [(None, "num-steps-per-rollout"), (48, "must divide")])
