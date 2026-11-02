@@ -23,6 +23,7 @@ def _supported(**overrides):
         hf_checkpoint="/models/stable-diffusion-3.5-medium",
         # An FSDP backend flag, absent from the shared parser's defaults.
         optimizer_cpu_offload=False,
+        micro_batch_size=1,
         rm_type="ocr",
         eps_clip=1e-4,
     )
@@ -68,6 +69,7 @@ def test_the_recipe_layout_passes_and_resolves_the_family_defaults():
         (dict(eps_clip=0.2), "explicitly"),
         (dict(use_dynamic_batch_size=True), "token-based batching"),
         (dict(use_dynamic_global_batch_size=True), "token-based batching"),
+        (dict(micro_batch_size=8), "--micro-batch-size"),
         (dict(eps_clip_high=0.3), "asymmetric"),
         (dict(eps_clip_c=3.0), "dual-clip"),
         (dict(save_debug_rollout_data="/dump/{rollout_id}.pt"), "debug dumps"),

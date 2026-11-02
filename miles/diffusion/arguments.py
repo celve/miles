@@ -8,6 +8,7 @@ starts, rather than failing inside one.
 from miles.backends.sglang_utils.sglang_api_client import WorkerType
 from miles.diffusion.train.pipeline_config import get_train_pipeline_config, resolve_model_family
 from miles.utils.args.configs.algo import AlgoConfig
+from miles.utils.args.configs.backend_fields import TrainerBackendTraitConfig
 from miles.utils.args.configs.data import DataConfig
 
 _HOOKS = {
@@ -65,6 +66,10 @@ _UNSUPPORTED = [
         "token-based batching (--use-dynamic-batch-size, --use-dynamic-global-batch-size); images are tiled by "
         "--diffusion-micro-batch-size-sample/-tstep into --global-batch-size steps",
         lambda a: a.use_dynamic_batch_size or a.use_dynamic_global_batch_size,
+    ),
+    (
+        "--micro-batch-size: use --diffusion-micro-batch-size-sample and --diffusion-micro-batch-size-tstep",
+        lambda a: a.micro_batch_size != TrainerBackendTraitConfig.model_fields["micro_batch_size"].default,
     ),
     (
         "asymmetric or dual-clip PPO (--eps-clip-high, --eps-clip-c); --eps-clip sets the symmetric ratio clip",
