@@ -18,6 +18,7 @@ from miles.rollout.agentic import sandbox_worker
 from miles.rollout.agentic.agent_function import InfraAbort, call_agent_function
 from miles.rollout.agentic.sandbox_worker import SandboxWorkerConfig
 from miles.rollout.agentic.worker import create_app
+from miles.utils.misc import call_agent_abort_hook
 from miles.utils.test_utils import agent_function_stubs as stubs
 
 from .test_worker import _Served
@@ -289,8 +290,6 @@ def test_a_rollout_abort_while_the_sandbox_boots_stops_the_call_before_it_starts
 
 def test_an_abort_of_another_rollout_while_the_sandbox_boots_leaves_the_call_running(service, monkeypatch):
     """Training's oversampling abort must not stop a dedicated eval engine's call that is still booting."""
-    from miles.rollout.agentic import remote
-
     gate = asyncio.Event()
     real_create = FakeAsyncSandbox.create
 
@@ -305,7 +304,9 @@ def test_an_abort_of_another_rollout_while_the_sandbox_boots_leaves_the_call_run
             call_agent_function(stubs.report_pid, mode="sandbox", sandbox=_config(), abort_scope="127.0.0.1:31000")
         )
         await asyncio.sleep(0.3)
-        await remote.cancel_inflight_calls("127.0.0.1:30000")
+        await call_agent_abort_hook(
+            types.SimpleNamespace(custom_agent_function_path=None, sglang_router_ip="127.0.0.1", sglang_router_port=30000)
+        )
         gate.set()
         return await task
 
