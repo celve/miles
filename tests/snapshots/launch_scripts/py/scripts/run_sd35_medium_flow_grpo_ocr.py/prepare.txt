@@ -4,11 +4,14 @@ python -c 'import importlib.metadata as m, sys; sys.exit(any(m.version(p) != v f
   --no-deps "opencv-python-headless==$OPENCV")
 
 ### 1
+PYTHONPATH=<REPO_ROOT> python -c 'from miles.diffusion.rollout.ocr import OcrScorer; OcrScorer()'
+
+### 2
 hf download
   --repo-type dataset rockdu/miles-diffusion-datasets
   --include 'flowgrpo_ocr/**'
   --local-dir /root/datasets/miles-diffusion-datasets
 
-### 2
+### 3
 hf download stabilityai/stable-diffusion-3.5-medium
   --local-dir /root/models/stable-diffusion-3.5-medium

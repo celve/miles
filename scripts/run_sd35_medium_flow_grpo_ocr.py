@@ -63,6 +63,11 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
 def prepare(args: ScriptArgs) -> None:
     U = args.create_backend()
     U.exec_command_cpu(_OCR_DEPS_INSTALL)
+    # Fetch PaddleOCR's models once; the reward pool's workers would each download them and race on a cold cache.
+    U.exec_command_cpu(
+        f"PYTHONPATH={command_utils.repo_base_dir} python -c "
+        "'from miles.diffusion.rollout.ocr import OcrScorer; OcrScorer()'"
+    )
     U.exec_command_cpu(
         f"hf download --repo-type dataset {DATASET} --include '{DATASET_SUBSET}/**' --local-dir {args.dataset_dir}"
     )
