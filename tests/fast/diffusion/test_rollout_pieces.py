@@ -88,6 +88,7 @@ def test_the_data_source_repeats_prompts_wraps_the_file_and_resumes(tmp_path):
         prompt_data=str(path),
         input_key="input",
         metadata_key="metadata",
+        label_key=None,
         n_samples_per_prompt=2,
         rollout_shuffle=False,
         rollout_seed=0,
@@ -111,6 +112,7 @@ def test_num_epoch_counts_the_diffusion_prompts(tmp_path):
         prompt_data=str(path),
         input_key="input",
         metadata_key="metadata",
+        label_key=None,
         n_samples_per_prompt=2,
         rollout_global_dataset=True,
         rollout_batch_size=2,
@@ -129,6 +131,7 @@ def test_rollout_shuffle_permutes_each_epoch_by_seed_and_resumes(tmp_path):
         prompt_data=str(path),
         input_key="input",
         metadata_key="metadata",
+        label_key=None,
         n_samples_per_prompt=1,
         rollout_shuffle=True,
         rollout_seed=7,
@@ -157,6 +160,7 @@ def test_a_checkpoint_saved_before_rollout_shuffle_still_loads(tmp_path):
         prompt_data=str(path),
         input_key="input",
         metadata_key="metadata",
+        label_key=None,
         n_samples_per_prompt=1,
         rollout_shuffle=False,
         rollout_seed=0,
@@ -169,3 +173,21 @@ def test_a_checkpoint_saved_before_rollout_shuffle_still_loads(tmp_path):
     source.load(tmp_path / "ckpt")
 
     assert [(g[0].prompt, g[0].index) for g in source.get_samples(2)] == [("p2", 5), ("p0", 6)]
+
+
+def test_a_label_key_carries_each_rows_label_to_its_samples(tmp_path):
+    path = tmp_path / "prompts.jsonl"
+    path.write_text('{"input": "a", "answer": "A"}\n{"input": "b", "answer": "B"}\n')
+    args = Namespace(
+        prompt_data=str(path),
+        input_key="input",
+        metadata_key="metadata",
+        label_key="answer",
+        n_samples_per_prompt=2,
+        rollout_shuffle=False,
+        rollout_seed=0,
+    )
+
+    groups = DiffusionPromptDataSource(args).get_samples(2)
+
+    assert [[s.label for s in g] for g in groups] == [["A", "A"], ["B", "B"]]

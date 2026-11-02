@@ -107,6 +107,11 @@ _UNREAD = {
         "custom_agent_function_path",
         "rollout_data_postprocess_path",
     ],
+    DataConfig: [
+        # --apply-chat-template-kwargs only acts with --apply-chat-template, and its parser default is not the model's.
+        *("apply_chat_template", "chat_template_path"),
+        *("multimodal_keys", "tool_key"),
+    ],
     RolloutRelatedRolloutOnlyConfig: [
         "max_seq_len",
         "rollout_max_prompt_len",
