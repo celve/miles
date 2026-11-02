@@ -64,3 +64,9 @@ class DiffusionConfig(BaseConfig):
     diffusion_lora_target_modules: A[
         list[str] | None, Arg(type_parser=str, nargs="+", help="LoRA target modules; the family default when unset.")
     ] = None
+
+    # EMA of the trained adapter, kept by algorithms that train against it and sample with it (--loss-type nft)
+    diffusion_ema_decay_init: A[float, Arg(help="EMA decay for the first --diffusion-ema-decay-flat-steps.")] = 0.001
+    diffusion_ema_decay_ramp: A[float, Arg(help="EMA decay added per optimizer step after the flat steps.")] = 0.001
+    diffusion_ema_decay_max: A[float, Arg(help="Cap of the ramped EMA decay.")] = 0.5
+    diffusion_ema_decay_flat_steps: A[int, Arg(help="Optimizer steps that keep --diffusion-ema-decay-init.")] = 0

@@ -15,6 +15,8 @@ class DiffusionAlgorithm(abc.ABC):
     unsupported: list[tuple[str, Callable[[Namespace], bool]]] = []
     # Flags the algorithm never reads; each must keep its default.
     unread_flags: tuple[str, ...] = ()
+    # Whether the trainer keeps an EMA of the adapter, which the engines then sample with.
+    uses_ema: bool = False
 
     @abc.abstractmethod
     def rollout_request(self, sde_steps: list[int] | None, returned_latents: list[int] | None) -> dict[str, Any]:
@@ -25,5 +27,6 @@ class DiffusionAlgorithm(abc.ABC):
         """One image's train pairs, in the order the tile schedule takes them."""
 
     @abc.abstractmethod
-    def loss(self, actor, pairs: list[dict], *, metrics) -> torch.Tensor:
-        """Summed loss of one micro-batch; the actor normalizes by the optimizer step's pair count."""
+    def loss(self, actor, pairs: list[dict], *, rollout_id: int, microbatch_id: int, metrics) -> torch.Tensor:
+        """Summed loss of one micro-batch, the rollout's `microbatch_id`-th on this rank; the actor normalizes by the
+        optimizer step's pair count."""
