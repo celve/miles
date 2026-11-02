@@ -5,6 +5,7 @@ FSDP, colocated single-GPU engines and the synchronous loop. Everything else is 
 starts, rather than failing inside one.
 """
 
+from miles.backends.fsdp_utils.arguments import FSDPArgs
 from miles.backends.sglang_utils.sglang_api_client import WorkerType
 from miles.diffusion.train.pipeline_config import get_train_pipeline_config, resolve_model_family
 from miles.utils.args.configs.algo import AlgoConfig
@@ -114,6 +115,22 @@ _UNREAD = {
         "buffer_filter_path",
     ],
 }
+_UNREAD_DEFAULTS = {
+    **{
+        name: config.model_fields[name].get_default(call_default_factory=True)
+        for config, names in _UNREAD.items()
+        for name in names
+    },
+    # The text FSDP trainer's precision, attention and kernel options; the DiT takes its own.
+    **{
+        name: vars(FSDPArgs())[name]
+        for name in (
+            *("fp16", "bf16", "keep_fp32_master", "attn_implementation"),
+            *("kernel_backend", "kernel_mapping_path", "kernel_strict"),
+        )
+    },
+}
+_PRECISION_FLAGS = {"--fp16", "--bf16", "--keep-fp32-master"}
 
 
 def validate_diffusion_args(args) -> None:
@@ -121,13 +138,13 @@ def validate_diffusion_args(args) -> None:
     if unsupported:
         raise ValueError("--model-kind diffusion does not support: " + "; ".join(unsupported))
     unread = [
-        f"--{name.replace('_', '-')}"
-        for config, names in _UNREAD.items()
-        for name in names
-        if vars(args)[name] != config.model_fields[name].get_default(call_default_factory=True)
+        f"--{name.replace('_', '-')}" for name, default in _UNREAD_DEFAULTS.items() if vars(args)[name] != default
     ]
     if unread:
-        raise ValueError("--model-kind diffusion trains Flow-GRPO on images and never reads: " + ", ".join(unread))
+        hint = "; set precision with --diffusion-forward-dtype" if _PRECISION_FLAGS & set(unread) else ""
+        raise ValueError(
+            "--model-kind diffusion trains Flow-GRPO on images and never reads: " + ", ".join(unread) + hint
+        )
     _derive_hooks(args)
     if args.diffusion_lora_rank <= 0 or args.diffusion_num_sde_steps <= 0:
         raise ValueError("--diffusion-lora-rank and --diffusion-num-sde-steps must be positive")

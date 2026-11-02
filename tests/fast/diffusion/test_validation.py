@@ -5,6 +5,7 @@ import pytest
 
 from tests.fast.fixtures.args_fixtures import _RESOLVED_AFTER_PARSING, parser_defaults
 
+from miles.backends.fsdp_utils.arguments import FSDPArgs
 from miles.backends.sglang_utils.sglang_api_client import WorkerType
 from miles.diffusion.arguments import (
     _HOOKS,
@@ -32,7 +33,7 @@ def _supported(**overrides):
         rm_type="ocr",
         eps_clip=1e-4,
     )
-    return Namespace(**(defaults | recipe | overrides))
+    return Namespace(**(defaults | vars(FSDPArgs()) | recipe | overrides))
 
 
 def test_the_recipe_layout_passes_and_resolves_the_family_defaults():
@@ -199,11 +200,18 @@ def test_a_parsed_diffusion_run_derives_its_batch_size_from_steps_per_rollout():
         (dict(rollout_temperature=0.7), "--rollout-temperature"),
         (dict(rollout_max_response_len=64), "--rollout-max-response-len"),
         (dict(custom_generate_function_path="my.generate"), "--custom-generate-function-path"),
+        (dict(fp16=True), "--fp16.*--diffusion-forward-dtype"),
+        (dict(attn_implementation="sdpa"), "--attn-implementation"),
     ],
 )
 def test_a_text_flag_the_diffusion_path_never_reads_is_rejected(override, flag):
     with pytest.raises(ValueError, match=f"never reads: .*{flag}"):
         validate_diffusion_args(_supported(**override))
+
+
+def test_a_parsed_fp16_run_is_pointed_at_the_diffusion_dtype():
+    with pytest.raises(ValueError, match="--fp16.*--diffusion-forward-dtype"):
+        _parse_diffusion_run("--global-batch-size", "64", "--fp16")
 
 
 def test_the_shared_loop_save_sentinel_stays_accepted():
