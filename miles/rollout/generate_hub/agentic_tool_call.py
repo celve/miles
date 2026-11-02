@@ -44,6 +44,8 @@ from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
 
 from miles.dashboard.hooks import push_agent_reports
 from miles.rollout.agentic.agent_function import AGENT_FUNCTION_MODES, InfraAbort, call_agent_function
+from miles.rollout.agentic.credentials import provider_env_names
+from miles.rollout.agentic.remote import AgentWorkerEndpoint, forwarded_env
 from miles.rollout.base_types import GenerateFnInput, GenerateFnOutput
 from miles.rollout.generate_utils.openai_endpoint_utils import OpenAIEndpointTracer
 from miles.rollout.session.v2.metrics import SESSION_ROLLOUT_METRICS_KEY
@@ -52,6 +54,9 @@ from miles.utils.lifecycle import TrajectoryIdentity
 from miles.utils.types import Sample
 
 logger = logging.getLogger(__name__)
+
+# what Harbor's agent function, the CUA recipe and the sandbox providers read; secrets never go by value
+_DEFAULT_WORKER_ENV = ("HARBOR_*", "AGENT_*", "LITE_*", *provider_env_names())
 
 
 async def generate(input: GenerateFnInput) -> GenerateFnOutput:
@@ -73,6 +78,7 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
     assert (
         custom_agent_function is not None
     ), f"Custom agent function {input.args.custom_agent_function_path} not found"
+    worker, worker_env = _worker_placement(input.args)
 
     max_seq_len = getattr(input.args, "max_seq_len", None)
 
@@ -101,6 +107,8 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
         agent_metadata = await call_agent_function(
             custom_agent_function,
             mode=input.args.custom_agent_function_mode,
+            worker=worker,
+            extra_env=worker_env,
             on_child_reports=lambda reports: push_agent_reports(reports, evaluation=input.evaluation),
             base_url=tracer.agent_base_url,
             prompt=input.sample.prompt,
@@ -205,6 +213,16 @@ def _aborted_output(
     return GenerateFnOutput(samples=[sample] if use_v2 else sample)
 
 
+def _worker_placement(args) -> tuple[AgentWorkerEndpoint | None, dict[str, str] | None]:
+    if args.custom_agent_function_mode != "worker":
+        return None, None
+    if not args.custom_agent_function_worker_url:
+        raise ValueError("--custom-agent-function-mode worker needs --custom-agent-function-worker-url")
+    return AgentWorkerEndpoint(url=args.custom_agent_function_worker_url), forwarded_env(
+        args.custom_agent_function_worker_env
+    )
+
+
 def _add_arguments(parser: argparse.ArgumentParser):
     parser.add_argument("--custom-agent-function-path", type=str)
     parser.add_argument(
@@ -212,7 +230,22 @@ def _add_arguments(parser: argparse.ArgumentParser):
         choices=AGENT_FUNCTION_MODES,
         default="subproc",
         help="Where each agent call runs: subproc, a child process of its own so one episode's "
-        "blocking step or crash cannot stall the others; or inline, on the rollout's event loop.",
+        "blocking step or crash cannot stall the others; inline, on the rollout's event loop; or worker, "
+        "a subproc child on an agent worker (python -m miles.rollout.agentic.worker) at "
+        "--custom-agent-function-worker-url, so the agents' CPU work leaves this host.",
+    )
+    parser.add_argument(
+        "--custom-agent-function-worker-url",
+        type=str,
+        default=None,
+        help="The agent worker's URL for --custom-agent-function-mode worker.",
+    )
+    parser.add_argument(
+        "--custom-agent-function-worker-env",
+        nargs="*",
+        default=list(_DEFAULT_WORKER_ENV),
+        help="Env var names (fnmatch patterns) sent with each worker call for its agent process, so this run's "
+        "runtime env stays where they are set. Paths among them must exist on the worker.",
     )
     parser.add_argument(
         "--max-seq-len",

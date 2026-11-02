@@ -29,6 +29,7 @@ def agentic_train_args(
     session_server_port: int = 30000,
     session_server_external_host: str = "",
     session_images: bool = False,
+    agent_worker_url: str = "",
 ) -> str:
     """The agentic wiring every Harbor launcher passes to train.py.
 
@@ -38,6 +39,12 @@ def agentic_train_args(
     """
     external_host_arg = (
         f"--session-server-external-host {session_server_external_host} " if session_server_external_host else ""
+    )
+    # the agents run on an agent worker there, which must reach the session servers at the external host
+    worker_args = (
+        f"--custom-agent-function-mode worker --custom-agent-function-worker-url {agent_worker_url} "
+        if agent_worker_url
+        else ""
     )
     # The bare flag selects v1, and session images exist only on v2.
     session_server_args = (
@@ -54,6 +61,7 @@ def agentic_train_args(
         f"--session-server-port {session_server_port} "
         f"--session-server-workers {session_server_workers} "
         f"{external_host_arg}"
+        f"{worker_args}"
     )
 
 
@@ -92,7 +100,13 @@ def harbor_env_vars(args) -> dict[str, str]:
     if args.harbor_env_kwargs:
         env["HARBOR_ENV_KWARGS"] = args.harbor_env_kwargs
     if spec := PROVIDER_CREDENTIALS.get(env_type):
-        provision_provider(env, spec, arg_path=getattr(args, spec["arg_attr"], "") or "")
+        provision_provider(
+            env,
+            spec,
+            arg_path=getattr(args, spec["arg_attr"], "") or "",
+            # an agent worker creates the sandboxes: the key and SDK are its, the endpoint still comes from here
+            remote=bool(getattr(args, "agent_worker_url", "")),
+        )
     else:
         # Any other Harbor backend still passes straight through; there is just
         # no credential wiring known here, so the worker environment must carry

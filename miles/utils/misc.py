@@ -7,6 +7,7 @@ from typing import Any, Generic, TypeVar
 
 import ray
 
+from miles.rollout.agentic.remote import cancel_inflight_calls
 from miles.utils.function_registry import load_function
 from miles.utils.http_utils import MILES_HOST_IP_ENV, is_port_available
 
@@ -61,6 +62,9 @@ async def call_agent_abort_hook(args) -> None:
     sibling ``abort`` callable in the same module as the configured agent function
     and call it. Backends that don't expose one are left to drain as before.
     """
+    # calls on an agent worker are cancelled here, as a cancelled subproc call's child would be
+    if cancelled := await cancel_inflight_calls():
+        logger.info(f"Cancelled {cancelled} agent call(s) running on agent workers")
     agent_function_path = getattr(args, "custom_agent_function_path", None)
     if not agent_function_path:
         return

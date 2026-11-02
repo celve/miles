@@ -110,6 +110,27 @@ Harbor's `computer-1` screenshot agent trains with Qwen3-VL through
 `scripts/run_qwen3_vl_4b_harbor_cua.py --rollout-path session`, which passes
 `--use-session-server v2 --use-session-images --tito-model qwen3_vl`.
 
+## 5. Optional: run the trials on a CPU box
+
+Host-process harnesses (`computer-1`, `terminus-2`) and their verifiers use the rollout host's CPUs, one Python
+process per trial. To move that work off the GPU box, run an agent worker on a CPU machine:
+
+```bash
+python -m miles.rollout.agentic.worker --host 0.0.0.0 --port 11100 --keep-env HARBOR_TASKS_DIR E2B_API_KEY_FILE
+```
+
+Then launch with `--agent-worker-url http://<cpu-box>:11100`, which passes `--custom-agent-function-mode worker`.
+Each trial still runs this example's agent function through the `subproc` path, now as a child of the worker. Its
+reports and verdict come back to the rollout, and cancelling the rollout's call cancels the trial.
+
+- **Environment.** The run's `HARBOR_*`, `AGENT_*` and `LITE_*` env vars travel with each call
+  (`--custom-agent-function-worker-env`). Name the ones whose value differs on the worker host, such as the task dir
+  and key file paths, in the worker's `--keep-env`.
+- **Imports.** The worker host needs this checkout and the agent and verifier modules on its `PYTHONPATH`. It needs no
+  torch, sglang or ray.
+- **Network.** It must reach the session servers at `--session-server-external-host`.
+- **Templates.** Warm them from the worker host, since the GPU host no longer needs the provider key.
+
 ## Validation
 
 This README's command has been run end to end: 8×H200, real training mode with

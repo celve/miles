@@ -120,6 +120,10 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     # Set for OSWorld-Verified: the runner service (osworld_service.py) on the machine with
     # /dev/kvm runs each trial, and its agent calls the recorder at the advertised address.
     osworld_runner_url: str = ""
+    # --rollout-path session only: run every trial on an agent worker there (python -m miles.rollout.agentic.worker),
+    # which reaches the session servers at session_server_external_host
+    agent_worker_url: str = ""
+    session_server_external_host: str = ""
     recorder_host: str = "127.0.0.1"
     recorder_advertise_host: str = ""
     history_n: int = 4
@@ -168,6 +172,14 @@ def prepare(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
         f"--tasks-dir {args.harbor_tasks_dir} --data-dir {args.data_dir} "
         f"--train-per-family {args.train_per_family} --eval-per-family {args.eval_per_family}"
     )
+    if args.agent_worker_url:
+        # warming creates sandboxes, which needs the provider key the agent worker holds and this host need not
+        print(
+            f"harbor: trials run on the agent worker at {args.agent_worker_url}; warm templates from its host with "
+            "`python -m examples.experimental.harbor_cua.warm_templates`",
+            flush=True,
+        )
+        return
     # Serial, and before any rollout: Harbor has no retry around a template build, so
     # concurrent trials on an unbuilt template lose a whole GRPO group to a 409.
     # Quoted: HARBOR_ENV_KWARGS is JSON and a provider key path can contain spaces, so
@@ -209,7 +221,11 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
     if args.rollout_path == "session":
         cua_args = (
             agentic_train_args(
-                tito_model="qwen3_vl", session_server_workers=args.session_server_workers, session_images=True
+                tito_model="qwen3_vl",
+                session_server_workers=args.session_server_workers,
+                session_images=True,
+                session_server_external_host=args.session_server_external_host,
+                agent_worker_url=args.agent_worker_url,
             )
             # The session server's per-sample cap, where the generate path caps by --rollout-max-context-len.
             + "--max-seq-len 32768 "
@@ -409,7 +425,9 @@ def _require_vlm_cache_clearing(args: ScriptArgs, harbor_env: dict[str, str]) ->
     cache_mb = int(worker_env.get("SGLANG_VLM_CACHE_SIZE_MB", "0"))
     if cache_mb <= 0:
         return
-    mm_schedule = _worker_sglang_mm_schedule(_pythonpath_with_sources(args.megatron_path, worker_env.get("PYTHONPATH")))
+    mm_schedule = _worker_sglang_mm_schedule(
+        _pythonpath_with_sources(args.megatron_path, worker_env.get("PYTHONPATH"))
+    )
     if mm_schedule is not None and mm_schedule.exists() and "def clear_mm_embedding_cache(" in mm_schedule.read_text():
         return
     raise typer.BadParameter(
@@ -433,6 +451,10 @@ def main(args: ScriptArgs):
         )
     if args.media_refs and args.rollout_path != "session":
         raise typer.BadParameter("--media-refs is implemented for --rollout-path session only")
+    if args.agent_worker_url and args.rollout_path != "session":
+        raise typer.BadParameter(
+            "--agent-worker-url runs the session path's agent function; use --rollout-path session"
+        )
     args.agent_model_name = args.served_model_name
     harbor_env = harbor_env_vars(args)
     _require_vlm_cache_clearing(args, harbor_env)
