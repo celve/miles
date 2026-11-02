@@ -202,6 +202,8 @@ def test_a_parsed_diffusion_run_derives_its_batch_size_from_steps_per_rollout():
         (dict(custom_generate_function_path="my.generate"), "--custom-generate-function-path"),
         (dict(fp16=True), "--fp16.*--diffusion-forward-dtype"),
         (dict(attn_implementation="sdpa"), "--attn-implementation"),
+        (dict(apply_chat_template=True), "--apply-chat-template"),
+        (dict(multimodal_keys={"image": "img"}), "--multimodal-keys"),
     ],
 )
 def test_a_text_flag_the_diffusion_path_never_reads_is_rejected(override, flag):
