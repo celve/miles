@@ -1557,6 +1557,10 @@ def miles_validate_args(args):
                 f"// num_steps_per_rollout {args.num_steps_per_rollout}"
             )
         args.global_batch_size = global_batch_size
+    if args.model_kind == "diffusion":
+        from miles.diffusion.arguments import validate_diffusion_batch_size
+
+        validate_diffusion_batch_size(args)
 
     # Multi-LoRA adapters carry their own n_samples_per_prompt; the per-group
     # normalization path already skips std for singleton groups.

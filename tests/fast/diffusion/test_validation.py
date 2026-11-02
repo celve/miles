@@ -6,7 +6,12 @@ import pytest
 from tests.fast.fixtures.args_fixtures import _RESOLVED_AFTER_PARSING, parser_defaults
 
 from miles.backends.sglang_utils.sglang_api_client import WorkerType
-from miles.diffusion.arguments import _HOOKS, validate_diffusion_args, validate_diffusion_sglang_config
+from miles.diffusion.arguments import (
+    _HOOKS,
+    validate_diffusion_args,
+    validate_diffusion_batch_size,
+    validate_diffusion_sglang_config,
+)
 from miles.utils.args.configs.diffusion import DiffusionConfig
 
 
@@ -166,3 +171,21 @@ def test_a_model_path_that_differs_from_the_checkpoint_freezes_the_model_and_is_
 def test_a_text_engine_group_is_rejected_in_a_diffusion_run():
     with pytest.raises(ValueError, match="engine_kind text"):
         validate_diffusion_sglang_config(SimpleNamespace(models=[_model("m", [_group(), _group(engine_kind="text")])]))
+
+
+def test_a_parsed_diffusion_run_derives_its_batch_size_from_steps_per_rollout():
+    from tests.fast.fixtures.args_fixtures import parse_fsdp_test_config
+
+    config = parse_fsdp_test_config(
+        *("--model-kind", "diffusion", "--colocate", "--use-miles-router", "--rm-type", "ocr", "--eps-clip", "1e-4"),
+        *("--hf-checkpoint", "/models/stable-diffusion-3.5-medium", "--actor-num-gpus-per-node", "2"),
+        *("--rollout-batch-size", "8", "--n-samples-per-prompt", "16", "--num-steps-per-rollout", "2"),
+    )
+
+    assert config.global_batch_size == 64
+
+
+@pytest.mark.parametrize("global_batch_size,message", [(None, "num-steps-per-rollout"), (48, "must divide")])
+def test_the_batch_size_must_be_set_and_divide_the_rollout(global_batch_size, message):
+    with pytest.raises(ValueError, match=message):
+        validate_diffusion_batch_size(_supported(global_batch_size=global_batch_size))
