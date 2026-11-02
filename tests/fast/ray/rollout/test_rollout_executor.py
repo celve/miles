@@ -255,8 +255,9 @@ class TestSetEvalFleetInfo:
         assert second.generate_state is None
 
 
-    async def test_a_legacy_eval_function_is_refused_when_the_fleet_is_set(self) -> None:
+    async def test_a_legacy_eval_function_is_refused_when_the_fleet_is_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A legacy fn reads the router from args, which the eval fleet's generate state never reaches."""
+        monkeypatch.setattr(rollout_executor_module, "RolloutExecutorEvalFleet", lambda *args, **kwargs: object())
 
         def legacy_rollout_fn(args, rollout_id, data_source, evaluation=False):
             return {}
@@ -264,6 +265,7 @@ class TestSetEvalFleetInfo:
         executor = RolloutExecutor.__new__(RolloutExecutor)
         executor.args = Namespace(eval_function_path="cua_lite:generate_rollout")
         executor._eval_fleet = None
+        executor._inference_controller_provider = None
         executor.eval_generate_rollout = LegacyRolloutFnAdapter(
             RolloutFnConstructorInput(args=executor.args, data_source=None), legacy_rollout_fn
         )
