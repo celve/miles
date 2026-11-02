@@ -251,7 +251,8 @@ async def test_training_keeps_every_sibling(stub, state, episode):
 @pytest.mark.parametrize("first", ["train", "eval"])
 async def test_training_and_the_eval_engines_each_get_their_own_recorder(monkeypatch, first):
     """--eval-num-gpus retargets eval's args at another router inside the same rollout process."""
-    routers = {"train": args(), "eval": args(sglang_router_ip="10.0.0.2", sglang_router_port=32000)}
+    routers = {"train": args(), "eval": args()}
+    routers["eval"].sglang_router_ip, routers["eval"].sglang_router_port = "10.0.0.2", 32000
 
     class Recorder:
         def __init__(self, upstream, **_kwargs):
