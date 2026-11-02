@@ -4,7 +4,7 @@ import argparse
 import logging
 from argparse import Namespace
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import pydantic
 import yaml
@@ -41,12 +41,15 @@ class _RawServerGroupConfig(FrozenStrictBaseModel):
         overrides: Optional dict of SGLang ``ServerArgs`` field overrides.
                    These are applied on top of the base CLI ``--sglang-*``
                    arguments in ``_compute_server_args``.
+        engine_kind: ``text`` (sglang) or ``diffusion`` (sglang.multimodal_gen).
+                     Defaults to the run's ``--model-kind``.
     """
 
     worker_type: WorkerType
     num_gpus: int
     num_gpus_per_engine: int | None = None
     overrides: dict = {}
+    engine_kind: Literal["text", "diffusion"] | None = None
 
 
 class _RawModelConfig(FrozenStrictBaseModel):
@@ -157,6 +160,7 @@ class ServerGroupConfig(FrozenStrictBaseModel):
     num_gpus_per_engine: int = pydantic.Field(gt=0)
     overrides: dict = pydantic.Field(default_factory=dict)
     needs_offload: bool
+    engine_kind: Literal["text", "diffusion"] = "text"
 
     @property
     def model_path(self) -> str:
@@ -201,6 +205,7 @@ class ServerGroupConfig(FrozenStrictBaseModel):
             num_gpus_per_engine=num_gpus_per_engine,
             overrides=overrides,
             needs_offload=needs_offload,
+            engine_kind=x if (x := raw.engine_kind) is not None else args.model_kind,
         )
         scaling = ServerGroupScalingConfig(
             num_gpus=raw.num_gpus, gpu_offset=gpu_offset, engine_offset=offset_cursor.engine

@@ -323,6 +323,8 @@ def make_sglang_config_yaml(
         lines.append(f"        num_gpus: {g['num_gpus']}")
         if "num_gpus_per_engine" in g:
             lines.append(f"        num_gpus_per_engine: {g['num_gpus_per_engine']}")
+        if "engine_kind" in g:
+            lines.append(f"        engine_kind: {g['engine_kind']}")
     return "\n".join(lines) + "\n"
 
 

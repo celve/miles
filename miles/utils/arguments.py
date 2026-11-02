@@ -305,7 +305,8 @@ def parse_args_and_get_parser(
         args.rank = 0  # Primary process rank for wandb initialization
         args.world_size = args.actor_num_nodes * args.actor_num_gpus_per_node
 
-        if args.hf_checkpoint:
+        # A diffusers pipeline directory has no transformers config to read layers from.
+        if args.hf_checkpoint and args.model_kind != "diffusion":
             args.num_layers = resolve_fsdp_num_layers(load_hf_config(args.hf_checkpoint))
         else:
             args.num_layers = None
@@ -376,6 +377,7 @@ def parse_args_and_get_parser(
 
     sglang_validate_args(args)
 
+    # CPU-offloaded FSDP params already leave the GPU free during rollout; offload_train would move them again.
     if backend == "fsdp" and args.optimizer_cpu_offload:
         args.offload_train = False
 
@@ -388,6 +390,12 @@ def parse_args_and_get_parser(
     backend_values = {name: value for name, value in vars(args).items() if name in training_backend_arg_names}
     _validate_argument_ownership(args, parser=parser, training_backend_arg_names=training_backend_arg_names)
     sglang, sglang_scaling = SglangConfig.parse_args(args)
+    if args.model_kind == "diffusion":
+        from miles.diffusion.arguments import validate_diffusion_sglang_config
+
+        validate_diffusion_sglang_config(sglang)
+    elif any(group.engine_kind == "diffusion" for model in sglang.models for group in model.server_groups):
+        raise ValueError("engine_kind diffusion server groups need --model-kind diffusion, which trains a DiT")
     raw_megatron = resolve_megatron_config(args, base_args=backend_values if backend == "megatron" else {})
     check_output_store_args(args, sglang=sglang, megatron=raw_megatron)
     values = {name: value for name, value in vars(args).items() if name in AllConfig.model_fields} | {
@@ -879,6 +887,13 @@ def miles_validate_args(args):
     if mode == "broadcast_packed" and (args.train_backend != "megatron" or args.colocate):
         raise ValueError("broadcast_packed requires Megatron non-colocated weight transfer")
     validate_dashboard_args(args)
+    if args.rm_type == "ocr" and args.model_kind != "diffusion":
+        raise ValueError("--rm-type ocr scores generated images, so it needs --model-kind diffusion")
+    if args.model_kind == "diffusion":
+        # Local import: the diffusion package pulls in optional dependencies text runs never install.
+        from miles.diffusion.arguments import validate_diffusion_args
+
+        validate_diffusion_args(args)
 
     args.ft_components = _resolve_ft_components(args)
     assert "rollout" not in args.ft_components or supports_partial_target_weight_update(args), (
@@ -1552,6 +1567,10 @@ def miles_validate_args(args):
                 f"// num_steps_per_rollout {args.num_steps_per_rollout}"
             )
         args.global_batch_size = global_batch_size
+    if args.model_kind == "diffusion":
+        from miles.diffusion.arguments import validate_diffusion_batch_size
+
+        validate_diffusion_batch_size(args)
 
     # Multi-LoRA adapters carry their own n_samples_per_prompt; the per-group
     # normalization path already skips std for singleton groups.

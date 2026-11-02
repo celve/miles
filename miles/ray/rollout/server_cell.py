@@ -3,13 +3,14 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from sglang.srt.constants import GPU_MEMORY_TYPE_WEIGHTS
 
 from miles.backends.sglang_utils.sglang_api_client import SGLangApiClient, WorkerType, probe_server_healthy
 from miles.backends.sglang_utils.sglang_engine import build_server_url
 from miles.backends.sglang_utils.sglang_router_api_client import SGLangRouterApiClient
+from miles.diffusion.api_client import DiffusionApiClient
 from miles.ray.rollout.cell_state import (
     CellAddrInfo,
     CellState,
@@ -54,6 +55,7 @@ class ServerCellMetadata(FrozenStrictBaseModel):
     needs_offload: bool
     update_weights: bool
     workers_hash: str
+    engine_kind: Literal["text", "diffusion"] = "text"
 
 
 @dataclass
@@ -169,7 +171,11 @@ class ServerCell:
 
     @property
     def api_client(self) -> SGLangApiClient:
-        return SGLangApiClient(server_url=self.server_url, api_key=self.meta.sglang_api_key)
+        return self._api_client_class(server_url=self.server_url, api_key=self.meta.sglang_api_key)
+
+    @property
+    def _api_client_class(self) -> type[SGLangApiClient]:
+        return DiffusionApiClient if self.meta.engine_kind == "diffusion" else SGLangApiClient
 
     async def init(self) -> None:
         assert isinstance(self._state, StateUninitialized), f"{self._state=}"
@@ -209,7 +215,7 @@ class ServerCell:
             )
 
         if self.meta.needs_offload:
-            api_client = SGLangApiClient(server_url=addr_info.server_url)
+            api_client = self._api_client_class(server_url=addr_info.server_url)
             await api_client.release_memory_occupation()
             await api_client.resume_memory_occupation(tags=[GPU_MEMORY_TYPE_WEIGHTS])
 

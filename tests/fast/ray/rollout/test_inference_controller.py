@@ -56,6 +56,7 @@ def _make_cell_info(
             sglang_api_key=None,
             needs_offload=False,
             update_weights=True,
+            engine_kind="text",
         ),
     )
 
@@ -72,6 +73,7 @@ def _make_cell_meta(info: CellInfo) -> ServerCellMetadata:
         needs_offload=info.meta["needs_offload"],
         update_weights=info.meta["update_weights"],
         workers_hash=info.workers_hash,
+        engine_kind=info.meta["engine_kind"],
     )
 
 

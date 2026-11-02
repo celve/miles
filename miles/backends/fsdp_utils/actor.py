@@ -130,16 +130,7 @@ class FSDPTrainRayActor(TorchNativeTrainRayActor):
         if args.backend.gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
 
-        if args.backend.optimizer == "adam":
-            self.optimizer = torch.optim.AdamW(
-                self.model.parameters(),
-                lr=args.backend.lr,
-                betas=(args.backend.adam_beta1, args.backend.adam_beta2),
-                eps=args.backend.adam_eps,
-                weight_decay=args.backend.weight_decay,
-            )
-        else:
-            raise ValueError(f"Unsupported optimizer: {args.backend.optimizer}. Supported options: 'adam'")
+        self.optimizer = build_optimizer(args, self.model.parameters())
 
         # Initialize LR scheduler
         self.lr_scheduler = get_lr_scheduler(args, self.optimizer)
@@ -274,35 +265,7 @@ class FSDPTrainRayActor(TorchNativeTrainRayActor):
             return cpu_init_weights
 
     def _fsdp2_load_full_state_dict(self, model, full_state, device_mesh, cpu_offload):
-        """Load the full state dict into the FSDP2 model, broadcasting rank-0 weights to all ranks
-        (so only rank 0 reads from disk).
-
-        Ref: verl/utils/fsdp_utils.py::fsdp2_load_full_state_dict
-        """
-        from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
-
-        # Rank 0: move with weights, others: allocate empty tensors on device
-        if dist.get_rank() == 0:
-            model = model.to(device=torch.cuda.current_device(), non_blocking=True)
-        else:
-            # to_empty creates tensors on device without initializing memory
-            model = model.to_empty(device=torch.cuda.current_device())
-
-        is_cpu_offload = cpu_offload is not None
-        options = StateDictOptions(full_state_dict=True, cpu_offload=is_cpu_offload, broadcast_from_rank0=True)
-
-        set_model_state_dict(model, full_state, options=options)
-
-        # set_model_state_dict will not broadcast buffers, so we need to broadcast them manually.
-        for _name, buf in model.named_buffers():
-            dist.broadcast(buf, src=0)
-
-        if is_cpu_offload:
-            model.to("cpu", non_blocking=True)
-            for buf in model.buffers():
-                buf.data = buf.data.to(torch.cuda.current_device())
-
-        return model
+        return fsdp2_load_full_state_dict(model, full_state, cpu_offload=cpu_offload is not None)
 
     def _save_checkpoint(self, rollout_id: int) -> None:
         checkpoint.save(self, rollout_id)
@@ -440,13 +403,67 @@ class FSDPTrainRayActor(TorchNativeTrainRayActor):
         return model_args
 
 
+def build_optimizer(args, params) -> torch.optim.Optimizer:
+    if args.backend.optimizer != "adam":
+        raise ValueError(f"Unsupported optimizer: {args.backend.optimizer}. Supported options: 'adam'")
+    return torch.optim.AdamW(
+        params,
+        lr=args.backend.lr,
+        betas=(args.backend.adam_beta1, args.backend.adam_beta2),
+        eps=args.backend.adam_eps,
+        weight_decay=args.backend.weight_decay,
+    )
+
+
+def fsdp2_load_full_state_dict(model, full_state, *, cpu_offload: bool):
+    """Load the full state dict into the FSDP2 model, broadcasting rank-0 weights to all ranks
+    (so only rank 0 reads from disk).
+
+    Ref: verl/utils/fsdp_utils.py::fsdp2_load_full_state_dict
+    """
+    from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
+
+    # Rank 0: move with weights, others: allocate empty tensors on device
+    if dist.get_rank() == 0:
+        model = model.to(device=torch.cuda.current_device(), non_blocking=True)
+    else:
+        # to_empty creates tensors on device without initializing memory
+        model = model.to_empty(device=torch.cuda.current_device())
+
+    options = StateDictOptions(full_state_dict=True, cpu_offload=cpu_offload, broadcast_from_rank0=True)
+
+    set_model_state_dict(model, full_state, options=options)
+
+    # set_model_state_dict will not broadcast buffers, so we need to broadcast them manually.
+    for _name, buf in model.named_buffers():
+        dist.broadcast(buf, src=0)
+
+    if cpu_offload:
+        model.to("cpu", non_blocking=True)
+        for buf in model.buffers():
+            buf.data = buf.data.to(torch.cuda.current_device())
+
+    return model
+
+
 @torch.no_grad()
-def apply_fsdp2(model, mesh=None, cpu_offload=False, *, args, param_dtype=None, reduce_dtype=None):
+def apply_fsdp2(
+    model,
+    mesh=None,
+    cpu_offload=False,
+    *,
+    args,
+    param_dtype=None,
+    reduce_dtype=None,
+    block_classes=None,
+    cast_forward_inputs=True,
+):
     """Apply FSDP2 (fully_shard) to the model.
 
     ``cpu_offload`` offloads params/grads/optimizer to CPU (the optimizer step runs on CPU).
     ``param_dtype``/``reduce_dtype`` are the MixedPrecisionPolicy dtypes; None falls back to the
     args-based default (bf16 / fp32, or fp16 param when args.backend.fp16).
+    ``block_classes`` names the classes sharded one by one, ``model._no_split_modules`` when None.
 
     Ref: https://github.com/volcengine/verl/blob/main/verl/utils/fsdp_utils.py
     """
@@ -454,7 +471,7 @@ def apply_fsdp2(model, mesh=None, cpu_offload=False, *, args, param_dtype=None, 
 
     offload_policy = CPUOffloadPolicy() if cpu_offload else None
 
-    layer_cls_to_wrap = model._no_split_modules
+    layer_cls_to_wrap = model._no_split_modules if block_classes is None else block_classes
     assert len(layer_cls_to_wrap) > 0 and next(iter(layer_cls_to_wrap)) is not None
 
     modules = [
@@ -475,6 +492,7 @@ def apply_fsdp2(model, mesh=None, cpu_offload=False, *, args, param_dtype=None, 
         "mp_policy": MixedPrecisionPolicy(
             param_dtype=param_dtype,
             reduce_dtype=reduce_dtype,
+            cast_forward_inputs=cast_forward_inputs,
         ),
         "offload_policy": offload_policy,
         "mesh": mesh,

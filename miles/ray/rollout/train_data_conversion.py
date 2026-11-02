@@ -24,6 +24,9 @@ from miles.utils.types import Sample
 
 logger = logging.getLogger(__name__)
 
+# The diffusion converter's per-image rows; their DP split lives with the converter.
+DIFFUSION_TRAIN_PAIRS_KEY = "diffusion_train_pairs"
+
 ROLLOUT_DATA_TENSOR_DTYPES = {
     "tokens": "int32",
     "target_tokens": "int32",
@@ -404,6 +407,10 @@ def split_train_data_by_dp(
     When the training backend can consume a rollout-side schedule, the shards
     also carry the precomputed micro-batch layout; otherwise this falls back to
     the legacy split (the training side schedules locally)."""
+    if DIFFUSION_TRAIN_PAIRS_KEY in data:
+        from miles.diffusion.conversion import split_train_data_by_dp as split_diffusion_train_data_by_dp
+
+        return split_diffusion_train_data_by_dp(data, dp_size=train_parallel_config.dp_size)
     if can_precompute_dp_schedule(args, data, train_parallel_config):
         shards = split_train_data_by_dp_scheduled_raw(args, data, train_parallel_config=train_parallel_config)
     else:

@@ -20,6 +20,7 @@ def _resolve(path: str, *, rollout_num_gpus: int, hf_checkpoint: str = "/path/to
     from tests.fast.fixtures.sglang_config_fixtures import resolve_sglang_config_and_scaling
 
     args = Namespace(
+        model_kind="text",
         sglang_config=path,
         prefill_num_servers=None,
         rollout_num_gpus=rollout_num_gpus,
@@ -101,6 +102,7 @@ class TestGetModelUrl:
         from miles.rollout.sglang_rollout import get_model_url
 
         args = Namespace(
+            model_kind="text",
             sglang_router_ip="10.0.0.1",
             sglang_router_port=3000,
             sglang_model_routers={
@@ -119,6 +121,7 @@ class TestGetModelUrl:
         from miles.rollout.sglang_rollout import get_model_url
 
         args = Namespace(
+            model_kind="text",
             sglang_router_ip="10.0.0.1",
             sglang_router_port=3000,
             sglang_model_routers={"actor": ("10.0.0.1", 3000)},
@@ -132,6 +135,7 @@ class TestGetModelUrl:
         from miles.rollout.sglang_rollout import get_model_url
 
         args = Namespace(
+            model_kind="text",
             sglang_router_ip="10.0.0.1",
             sglang_router_port=3000,
             sglang_model_routers=None,
