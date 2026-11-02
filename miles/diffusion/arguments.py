@@ -62,6 +62,11 @@ _UNSUPPORTED = [
         lambda a: a.eps_clip == AlgoConfig.model_fields["eps_clip"].default,
     ),
     (
+        "token-based batching (--use-dynamic-batch-size, --use-dynamic-global-batch-size); images are tiled by "
+        "--diffusion-micro-batch-size-sample/-tstep into --global-batch-size steps",
+        lambda a: a.use_dynamic_batch_size or a.use_dynamic_global_batch_size,
+    ),
+    (
         "asymmetric or dual-clip PPO (--eps-clip-high, --eps-clip-c); --eps-clip sets the symmetric ratio clip",
         lambda a: a.eps_clip_high is not None or a.eps_clip_c is not None,
     ),
