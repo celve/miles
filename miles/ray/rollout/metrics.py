@@ -111,7 +111,7 @@ def _compute_metrics_from_samples(args, samples):
     log_dict |= _compute_training_sample_metrics(args, samples)
     log_dict |= _compute_episode_response_length_metrics(samples)
     log_dict |= dict_add_prefix(compute_statistics(response_lengths), "response_len/")
-    log_dict |= _compute_zero_std_metrics(args, samples)
+    log_dict |= compute_zero_std_metrics(args, samples)
     log_dict |= _compute_spec_metrics(args, samples)
     log_dict |= _compute_prefix_cache_metrics(args, samples)
     log_dict |= _compute_reward_cat_metrics(args, samples)
@@ -308,7 +308,7 @@ def _compute_perf_metrics_from_samples(args, samples, rollout_time):
     return log_dict
 
 
-def _compute_zero_std_metrics(args, all_samples: list[Sample]):
+def compute_zero_std_metrics(args, all_samples: list[Sample]):
     # only compute in GRPO-like algorithms where one prompt has multiple responses
     if args.advantage_estimator == "ppo":
         return {}

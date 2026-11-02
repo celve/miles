@@ -11,7 +11,7 @@ from miles.ray.rollout.metrics import (
     _compute_perf_metrics_from_samples,
     _compute_spec_metrics,
     _compute_training_sample_metrics,
-    _compute_zero_std_metrics,
+    compute_zero_std_metrics,
     log_eval_rollout_data,
     log_rollout_data,
 )
@@ -146,7 +146,7 @@ class TestComputeZeroStdMetrics:
         zero, one = reward_type(0), reward_type(1)
         samples = make_samples_grouped(3, 2, rewards=[zero, zero, one, one, zero, one])
 
-        out = _compute_zero_std_metrics(args, samples)
+        out = compute_zero_std_metrics(args, samples)
 
         assert out[f"zero_std/count_{round(zero, 1)}"] == 1
         assert out[f"zero_std/count_{round(one, 1)}"] == 1
@@ -160,7 +160,7 @@ class TestComputeZeroStdMetrics:
         args = make_args(advantage_estimator="grpo", reward_key=None)
         samples = make_samples_grouped(2, 2, rewards=[reward, reward, 0.0, 1.0])
 
-        assert _compute_zero_std_metrics(args, samples)["zero_std/percentage"] == pytest.approx(1 / 2)
+        assert compute_zero_std_metrics(args, samples)["zero_std/percentage"] == pytest.approx(1 / 2)
 
     def test_mixed_numeric_types_and_unequal_group_sizes_count_groups_equally(self):
         args = make_args(advantage_estimator="grpo", reward_key=None)
@@ -173,7 +173,7 @@ class TestComputeZeroStdMetrics:
             make_sample(group_index=2, reward=1.0),
         ]
 
-        out = _compute_zero_std_metrics(args, samples)
+        out = compute_zero_std_metrics(args, samples)
 
         assert out["zero_std/all_zero_percentage"] == pytest.approx(1 / 3)
         assert out["zero_std/all_one_percentage"] == pytest.approx(1 / 3)
@@ -183,7 +183,7 @@ class TestComputeZeroStdMetrics:
         args = make_args(advantage_estimator="grpo", reward_key=None)
         samples = make_samples_grouped(1, 2, rewards=[reward, reward])
 
-        out = _compute_zero_std_metrics(args, samples)
+        out = compute_zero_std_metrics(args, samples)
 
         assert out[f"zero_std/count_{round(reward, 1)}"] == 1
         assert out["zero_std/all_zero_percentage"] == 0.0
@@ -193,7 +193,7 @@ class TestComputeZeroStdMetrics:
         args = make_args(advantage_estimator="grpo", reward_key=None)
         samples = make_samples_grouped(1, 2, rewards=[-0.0, 0.0])
 
-        out = _compute_zero_std_metrics(args, samples)
+        out = compute_zero_std_metrics(args, samples)
 
         assert out["zero_std/count_-0.0"] == 1
         assert out["zero_std/all_zero_percentage"] == 1.0
@@ -201,7 +201,7 @@ class TestComputeZeroStdMetrics:
 
     def test_returns_empty_for_ppo_regardless_of_reward_distribution(self):
         args = make_args(advantage_estimator="ppo")
-        out = _compute_zero_std_metrics(args, make_samples_grouped(2, 4, rewards=[1.0] * 8))
+        out = compute_zero_std_metrics(args, make_samples_grouped(2, 4, rewards=[1.0] * 8))
         assert out == {}
 
     def test_grpo_mixed_rewards_yield_zero_percentages_and_no_buckets(self):
@@ -209,7 +209,7 @@ class TestComputeZeroStdMetrics:
         no bucket counts; the all_zero/all_one percentages are 0."""
         args = make_args(advantage_estimator="grpo", reward_key=None)
         samples = make_samples_grouped(2, 4, rewards=[0.0, 0.5, 1.0, 0.7, 0.2, 0.8, 0.3, 0.6])
-        out = _compute_zero_std_metrics(args, samples)
+        out = compute_zero_std_metrics(args, samples)
         assert out == {
             "zero_std/all_zero_percentage": 0.0,
             "zero_std/all_one_percentage": 0.0,
@@ -221,7 +221,7 @@ class TestComputeZeroStdMetrics:
         all_zero/all_one percentages over total groups."""
         args = make_args(advantage_estimator="grpo", reward_key=None)
         samples = make_samples_grouped(3, 4, rewards=[1.0] * 4 + [0.0] * 4 + [0.0, 1.0, 0.0, 1.0])
-        out = _compute_zero_std_metrics(args, samples)
+        out = compute_zero_std_metrics(args, samples)
         assert out["zero_std/count_1.0"] == 1
         assert out["zero_std/count_0.0"] == 1
         assert out["zero_std/all_zero_percentage"] == pytest.approx(1 / 3)
@@ -232,14 +232,14 @@ class TestComputeZeroStdMetrics:
         all_zero/all_one percentages stay 0 because they only count 0.0 and 1.0."""
         args = make_args(advantage_estimator="grpo", reward_key=None)
         samples = make_samples_grouped(2, 4, rewards=[0.5] * 8)
-        out = _compute_zero_std_metrics(args, samples)
+        out = compute_zero_std_metrics(args, samples)
         assert out["zero_std/count_0.5"] == 2
         assert out["zero_std/all_zero_percentage"] == 0.0
         assert out["zero_std/all_one_percentage"] == 0.0
 
     def test_empty_samples_does_not_crash(self):
         args = make_args(advantage_estimator="grpo", reward_key=None)
-        out = _compute_zero_std_metrics(args, [])
+        out = compute_zero_std_metrics(args, [])
         # No groups → no all_zero/all_one keys (the function guards on total_groups>0).
         assert "zero_std/all_zero_percentage" not in out
         assert "zero_std/all_one_percentage" not in out
