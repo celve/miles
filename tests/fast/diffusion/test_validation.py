@@ -102,12 +102,13 @@ def test_optimizer_cpu_offload_is_supported():
     validate_diffusion_args(_supported(optimizer_cpu_offload=True))
 
 
-def test_model_kind_sets_the_four_hooks():
+def test_model_kind_sets_its_hooks_and_leaves_rollout_logging_to_miles():
     args = _supported()
 
     validate_diffusion_args(args)
 
     assert {name: vars(args)[name] for name in _HOOKS} == _HOOKS
+    assert args.custom_rollout_log_function_path is None
 
 
 def test_the_diffusion_flags_hold_no_copy_of_the_ppo_clip_flags():

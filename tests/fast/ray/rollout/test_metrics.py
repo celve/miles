@@ -861,3 +861,30 @@ class TestDatasetMetrics:
         out = _compute_metrics_from_samples(args, [make_sample(index=0, metadata={"dataset_name": row_dataset_name})])
 
         assert not any(key.startswith("dataset/") for key in out)
+
+
+class TestImageSampleMetrics:
+    @staticmethod
+    def _image_samples():
+        samples = make_samples_grouped(2, 2, rewards=[1.0, 0.0, 1.0, 1.0])
+        for sample in samples:
+            sample.tokens, sample.response, sample.response_length, sample.diffusion = [], "", 0, object()
+        return samples
+
+    def test_image_samples_get_the_reward_panels_without_token_metrics(self):
+        args = make_args(advantage_estimator="grpo", ci_test=False)
+
+        metrics = _compute_metrics_from_samples(args, self._image_samples())
+
+        assert metrics["num_training_samples"] == 4 and metrics["episode_raw_reward"] == 0.75
+        assert metrics["zero_std/count_1.0"] == 1
+        assert not any(key.startswith(("response_len/", "episode_response_length/")) for key in metrics)
+        assert "repetition_frac" not in metrics and "prefix_cache_hit_rate" not in metrics
+
+    def test_image_samples_get_no_token_throughput(self):
+        args = make_args()
+        args.inference_runtime_mut_state.gpu_count = 2
+
+        metrics = _compute_perf_metrics_from_samples(args, self._image_samples(), rollout_time=2)
+
+        assert metrics == {"rollout_time": 2}

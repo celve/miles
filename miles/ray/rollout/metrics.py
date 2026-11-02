@@ -106,18 +106,27 @@ def log_rollout_data(
     tracking.log(args, log_dict, step_key=step_key)
 
 
+def _carries_tokens(samples: list[Sample]) -> bool:
+    # Image samples (Sample.diffusion) have no tokens, so every token metric of theirs would read 0.
+    return any(sample.diffusion is None for sample in samples)
+
+
 def _compute_metrics_from_samples(args, samples):
     response_lengths = [sample.effective_response_length for sample in samples]
+    has_tokens = _carries_tokens(samples)
 
     log_dict = {}
     log_dict |= _compute_training_sample_metrics(args, samples)
-    log_dict |= _compute_episode_response_length_metrics(samples)
-    log_dict |= dict_add_prefix(compute_statistics(response_lengths), "response_len/")
+    if has_tokens:
+        log_dict |= _compute_episode_response_length_metrics(samples)
+        log_dict |= dict_add_prefix(compute_statistics(response_lengths), "response_len/")
     log_dict |= compute_zero_std_metrics(args, samples)
-    log_dict |= _compute_spec_metrics(args, samples)
-    log_dict |= _compute_prefix_cache_metrics(args, samples)
+    if has_tokens:
+        log_dict |= _compute_spec_metrics(args, samples)
+        log_dict |= _compute_prefix_cache_metrics(args, samples)
     log_dict |= _compute_reward_cat_metrics(args, samples)
-    log_dict["repetition_frac"] = np.mean([int(has_repetition(s.response)) for s in samples]).item()
+    if has_tokens:
+        log_dict["repetition_frac"] = np.mean([int(has_repetition(s.response)) for s in samples]).item()
     log_dict["truncated_ratio"] = np.mean([int(s.status == Sample.Status.TRUNCATED) for s in samples]).item()
 
     log_dict |= _compute_weight_version_span_metrics(
@@ -304,8 +313,9 @@ def _compute_perf_metrics_from_samples(args, samples, rollout_time):
             rollout_time - mean_non_generation_time
         )
 
-    token_perf([sample.response_length for sample in samples], non_generation_time, key="")
-    token_perf([sample.effective_response_length for sample in samples], non_generation_time, key="effective_")
+    if _carries_tokens(samples):
+        token_perf([sample.response_length for sample in samples], non_generation_time, key="")
+        token_perf([sample.effective_response_length for sample in samples], non_generation_time, key="effective_")
 
     return log_dict
 

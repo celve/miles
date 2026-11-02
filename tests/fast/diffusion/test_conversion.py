@@ -143,32 +143,17 @@ def test_disabled_normalization_trains_on_the_raw_rewards():
     assert _advantages(data) == [1.0, 0.25]
 
 
-def test_rollout_metrics_use_miles_step_and_zero_std_helpers(logged):
-    samples = _rewarded([1.0, 1.0, 0.0, 1.0])
-    for sample in samples:
-        sample.group_index = sample.index // 2
-
-    conversion.log_rollout_data(3, _fn_args(wandb_always_use_train_step=True), samples, {}, rollout_time=1.5)
-
-    (metrics,) = logged
-    assert metrics["rollout/step"] == 3 * 2 * 2 // 2
-    assert metrics["rollout/zero_std/count_1.0"] == 1 and metrics["rollout/zero_std/all_one_percentage"] == 0.5
-    assert metrics["perf/rollout_time"] == 1.5
-
-
 def stateful_rewards(args, samples):
     POST_PROCESS_CALLS.append(len(samples))
     raw = [sample.reward for sample in samples]
     return raw, [len(POST_PROCESS_CALLS) * r for r in raw]
 
 
-def test_the_executor_order_logs_the_rewards_it_trains_on_from_one_hook_call(logged):
+def test_the_converter_logs_the_rewards_it_trains_on_from_one_hook_call(logged):
     POST_PROCESS_CALLS.clear()
     args = _fn_args(custom_reward_post_process_path=CustomFunctionConfig(path=f"{__name__}.stateful_rewards"))
     samples = _rewarded([1.0, 0.0])
 
-    # The executor logs a rollout, then converts it (RolloutExecutor._generate_rollout_data, then get).
-    conversion.log_rollout_data(3, args, samples, {}, rollout_time=1.0)
     data = convert_samples_to_train_data(args, samples)
 
     assert POST_PROCESS_CALLS == [2]

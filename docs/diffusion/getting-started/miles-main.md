@@ -12,7 +12,7 @@ python scripts/run_sd35_medium_flow_grpo_ocr.py --num-rollout 600
 ```
 
 `--model-kind diffusion` selects the diffusion path inside Miles' own driver and control plane, and sets the rollout
-function, data source, converter and rollout log hooks:
+function, data source and converter hooks; Miles' default rollout and perf panels log the rest, without token metrics:
 
 | Piece | Where |
 | --- | --- |

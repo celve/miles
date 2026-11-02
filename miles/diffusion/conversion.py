@@ -1,6 +1,7 @@
 """Flow-GRPO train data: GRPO advantages and one (x_t, x_t+1) train pair per SDE step of each image.
 
-Registered through `--custom-convert-samples-to-train-data-path` and `--custom-rollout-log-function-path`.
+Registered through `--custom-convert-samples-to-train-data-path`; it also logs the rollout's reward metrics, while
+Miles' default rollout and perf panels log the rest.
 """
 
 import logging
@@ -9,10 +10,9 @@ from typing import Any
 import torch
 
 from miles.diffusion.metrics import log_metrics
-from miles.ray.rollout.metrics import compute_zero_std_metrics
 from miles.utils.args.custom_view import compute_custom_function_config
 from miles.utils.function_registry import load_function
-from miles.utils.metric_utils import compute_rollout_step, dict_add_prefix, namespace_metrics
+from miles.utils.metric_utils import compute_rollout_step, namespace_metrics
 from miles.utils.types import Sample
 
 logger = logging.getLogger(__name__)
@@ -102,21 +102,6 @@ def _latent_positions(traj) -> dict[int, int]:
     if traj.latent_step_indices is None:
         return {step: step for step in range(int(traj.latents.shape[0]))}
     return {int(step): pos for pos, step in enumerate(traj.latent_step_indices.tolist())}
-
-
-def log_rollout_data(rollout_id: int, args, samples: list[Sample], rollout_extra_metrics, rollout_time: float) -> bool:
-    """Rollout metrics that need no post-processed reward; the converter logs those (`_log_reward_metrics`)."""
-    _log_rollout_step(
-        args,
-        rollout_id,
-        {
-            **(rollout_extra_metrics or {}),
-            **dict_add_prefix(compute_zero_std_metrics(args, samples), "rollout/"),
-            "perf/rollout_time": rollout_time,
-        },
-    )
-    # The default text-rollout metrics read token fields these samples do not have.
-    return True
 
 
 def _log_reward_metrics(args, samples: list[Sample], *, raw_rewards: list[float], advantages: list[float]) -> None:
