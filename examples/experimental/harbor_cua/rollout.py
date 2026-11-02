@@ -40,7 +40,8 @@ logger = logging.getLogger(__name__)
 
 SANDBOX_LIMIT_NAME = "harbor_cua_sandbox"
 
-_recorder: CallRecorder | None = None
+# Keyed by router: training and the dedicated eval engines (--eval-num-gpus) generate from the same process.
+_recorders: dict[str, CallRecorder] = {}
 _recorder_lock = asyncio.Lock()
 
 
@@ -173,15 +174,15 @@ async def _resolve_upstream(args, options: HarborCuaOptions) -> str:
 
 
 async def _shared_recorder(args, options: HarborCuaOptions) -> CallRecorder:
-    """One recorder per rollout process, on loopback unless a remote runner's agent must reach it.
+    """One recorder per router in the rollout process, on loopback unless a remote runner's agent must reach it.
 
     ``computer-1`` makes its model calls from this process rather than from the
     sandbox, so loopback suffices for it; an OSWorld agent calls from the runner's
     machine.
     """
-    global _recorder
+    router = options.router_url(args)
     async with _recorder_lock:
-        if _recorder is None:
+        if router not in _recorders:
             upstream = await _resolve_upstream(args, options)
             recorder = CallRecorder(
                 upstream=upstream,
@@ -193,8 +194,8 @@ async def _shared_recorder(args, options: HarborCuaOptions) -> CallRecorder:
             logger.info(
                 "harbor cua recorder listening on %s:%d for %s", options.recorder_host, recorder.port, upstream
             )
-            _recorder = recorder
-        return _recorder
+            _recorders[router] = recorder
+        return _recorders[router]
 
 
 def _rollout_id(sample: Sample) -> int:

@@ -23,13 +23,6 @@ class LegacyRolloutFnAdapter(BaseRolloutFn):
         self.fn = fn
 
     def __call__(self, input: RolloutFnInput) -> RolloutFnOutput:
-        if getattr(input, "generate_state", None) is not None:
-            # A legacy fn takes only args, whose router is training's, so it would score the training weights as the snapshot.
-            raise ValueError(
-                f"{getattr(self.fn, '__qualname__', self.fn)} is a legacy rollout function and cannot generate on the "
-                "dedicated eval engines (--eval-num-gpus); make it a BaseRolloutFn that generates against "
-                "input.generate_state, or evaluate on the training engines without --eval-num-gpus."
-            )
         output = self.fn(self.args, input.rollout_id, self.data_source, evaluation=input.evaluation)
 
         # compatibility for legacy version

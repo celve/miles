@@ -177,6 +177,11 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
         return self.eval_num_gpus if self.backend == "megatron" and self.mode == "train" else 0
 
     @property
+    def save_interval(self) -> int:
+        """Snapshot eval reads the --save-hf checkpoints, so it needs a save at every eval point."""
+        return self.eval_interval if self.snapshot_eval_gpus else 5
+
+    @property
     def freezes_vision(self) -> bool:
         if self.backend != "megatron" or self.freeze_vision_model == "off":
             return False
@@ -375,7 +380,7 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
         f"--actor-num-gpus-per-node {args.num_gpus_per_node} "
         "--colocate "
         f"--save {args.output_dir}/ckpt "
-        "--save-interval 5 "
+        f"--save-interval {args.save_interval} "
         f"--dump-details {args.output_dir}/dump "
         # An HF copy of each saved checkpoint, so a trained policy can be served, evaluated
         # and diffed against the base weights without a conversion step.

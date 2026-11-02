@@ -163,22 +163,6 @@ class TestRolloutFnCheckpointing:
             assert fn.save(1) is None
             assert fn.load(None) is None
 
-    def test_legacy_function_refuses_the_eval_engines_state(self, constructor_input):
-        """--eval-num-gpus hands eval a state aimed at the eval router, which a legacy fn's args never see."""
-        calls = []
-
-        def legacy_rollout_fn(args, rollout_id, data_source, evaluation=False):
-            calls.append(rollout_id)
-            return {"ds": {"acc": 0.5}}
-
-        with function_registry.temporary("test:legacy_eval_fleet", legacy_rollout_fn):
-            fn = load_rollout_function(constructor_input, "test:legacy_eval_fleet")
-
-            with pytest.raises(ValueError, match="--eval-num-gpus"):
-                call_rollout_function(fn, RolloutFnEvalInput(rollout_id=3, generate_state=MagicMock()))
-            assert calls == []
-            assert call_rollout_function(fn, RolloutFnEvalInput(rollout_id=3)).data == {"ds": {"acc": 0.5}}
-
     def test_legacy_adapter_exposes_the_constructor_input(self, constructor_input):
         """The base class promises constructor_input, so the framework's own subclasses must set it too."""
 

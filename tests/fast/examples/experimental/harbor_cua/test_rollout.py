@@ -246,3 +246,30 @@ async def test_training_keeps_every_sibling(stub, state, episode):
 
     assert len(output.samples) == 2
     assert output.samples[0].metadata["evaluation_siblings_dropped"] == 0
+
+
+@pytest.mark.parametrize("first", ["train", "eval"])
+async def test_training_and_the_eval_engines_each_get_their_own_recorder(monkeypatch, first):
+    """--eval-num-gpus retargets eval's args at another router inside the same rollout process."""
+    routers = {"train": args(), "eval": args(sglang_router_ip="10.0.0.2", sglang_router_port=32000)}
+
+    class Recorder:
+        def __init__(self, upstream, **_kwargs):
+            self.upstream = upstream
+
+        async def start(self):
+            pass
+
+    async def resolve_upstream(a, _options):
+        return f"engine-behind-{a.sglang_router_ip}:{a.sglang_router_port}"
+
+    monkeypatch.setattr(harbor_cua, "_recorders", {})
+    monkeypatch.setattr(harbor_cua, "CallRecorder", Recorder)
+    monkeypatch.setattr(harbor_cua, "_resolve_upstream", resolve_upstream)
+    order = [first, "eval" if first == "train" else "train"]
+
+    got = {name: await harbor_cua._shared_recorder(routers[name], harbor_cua.HarborCuaOptions()) for name in order}
+
+    assert got["train"].upstream == "engine-behind-127.0.0.1:31000"
+    assert got["eval"].upstream == "engine-behind-10.0.0.2:32000"
+    assert await harbor_cua._shared_recorder(routers["train"], harbor_cua.HarborCuaOptions()) is got["train"]
