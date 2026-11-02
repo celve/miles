@@ -255,6 +255,8 @@ async def test_training_and_the_eval_engines_each_get_their_own_recorder(monkeyp
     routers["eval"].sglang_router_ip, routers["eval"].sglang_router_port = "10.0.0.2", 32000
 
     class Recorder:
+        port = 1234
+
         def __init__(self, upstream, **_kwargs):
             self.upstream = upstream
 
