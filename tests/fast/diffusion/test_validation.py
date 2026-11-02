@@ -188,6 +188,27 @@ def test_a_parsed_diffusion_run_derives_its_batch_size_from_steps_per_rollout():
     assert _parse_diffusion_run("--num-steps-per-rollout", "2").global_batch_size == 64
 
 
+@pytest.mark.parametrize(
+    "override,flag",
+    [
+        (dict(loss_type="custom_loss"), "--loss-type"),
+        (dict(custom_loss_function_path="my.loss"), "--custom-loss-function-path"),
+        (dict(entropy_coef=0.01), "--entropy-coef"),
+        (dict(use_tis=True), "--use-tis"),
+        (dict(rollout_temperature=0.7), "--rollout-temperature"),
+        (dict(rollout_max_response_len=64), "--rollout-max-response-len"),
+        (dict(custom_generate_function_path="my.generate"), "--custom-generate-function-path"),
+    ],
+)
+def test_a_text_flag_the_diffusion_path_never_reads_is_rejected(override, flag):
+    with pytest.raises(ValueError, match=f"never reads: .*{flag}"):
+        validate_diffusion_args(_supported(**override))
+
+
+def test_the_parsed_recipe_flags_pass_the_unread_flag_check():
+    assert _parse_diffusion_run("--global-batch-size", "64").global_batch_size == 64
+
+
 def test_a_step_count_that_does_not_divide_the_images_is_rejected():
     with pytest.raises(ValueError, match="num-steps-per-rollout must divide"):
         _parse_diffusion_run("--num-steps-per-rollout", "48")
