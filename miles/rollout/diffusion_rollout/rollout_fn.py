@@ -1,4 +1,4 @@
-"""Flow-GRPO rollout: SDE-sampled images from sglang.multimodal_gen through the Miles router, scored by `rm_hub`."""
+"""Diffusion rollout: images from sglang.multimodal_gen through the Miles router, scored by `rm_hub`."""
 
 import asyncio
 import logging
@@ -18,6 +18,7 @@ from miles.rollout.diffusion_rollout.response import parse_rollout_response
 from miles.rollout.inference_rollout.inference_rollout_train import get_worker_urls
 from miles.rollout.rm_hub import batched_async_rm
 from miles.rollout.rm_hub.ocr import OcrRewardPool
+from miles.utils.diffusion.algorithms import get_algorithm
 from miles.utils.function_registry import load_function
 from miles.utils.types import Sample
 
@@ -34,6 +35,7 @@ class DiffusionRolloutFn(BaseRolloutFn):
         self.data_source = input.data_source
         self.url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/rollout/generate"
         self.step_strategy = load_function(args.diffusion_step_strategy_path)
+        self.algorithm = get_algorithm(args.loss_type)
         self.sampling_params = build_sampling_params(args)
         self.semaphore: asyncio.Semaphore | None = None
         # rm_hub runs --custom-rm-path ahead of --rm-type, so the OCR pool exists only when OCR actually scores.
@@ -71,13 +73,11 @@ class DiffusionRolloutFn(BaseRolloutFn):
 
     async def _generate_microgroup(self, microgroup: list[Sample], *, seed: int) -> list[Sample]:
         num_steps = self.sampling_params["num_inference_steps"]
-        sde_steps, _returned_latents = self.step_strategy(self.args, microgroup[0], num_steps, seed)
+        sde_steps, returned_latents = self.step_strategy(self.args, microgroup[0], num_steps, seed)
         payload = {
             **self.sampling_params,
             "seed": seed,
-            # The trainer slices the full trajectory itself, so the engine returns every latent.
-            "rollout_sde_step_indices": sde_steps,
-            "rollout_return_step_indices": None,
+            **self.algorithm.rollout_request(sde_steps, returned_latents),
             "prompt": microgroup[0].prompt,
             "num_outputs_per_prompt": len(microgroup),
         }

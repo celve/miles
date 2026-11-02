@@ -72,6 +72,8 @@ def test_the_recipe_layout_passes_and_resolves_the_family_defaults():
         (dict(debug_rollout_only=True), "debug"),
         (dict(ci_test=True), "ci-test"),
         (dict(eps_clip=0.2), "explicitly"),
+        (dict(loss_type="custom_loss"), "--loss-type other than the diffusion algorithms"),
+        (dict(loss_type="sft_loss"), "--loss-type other than the diffusion algorithms"),
         (dict(use_dynamic_batch_size=True), "token-based batching"),
         (dict(use_dynamic_global_batch_size=True), "token-based batching"),
         (dict(micro_batch_size=8), "--micro-batch-size"),
@@ -192,7 +194,6 @@ def test_a_parsed_diffusion_run_derives_its_batch_size_from_steps_per_rollout():
 @pytest.mark.parametrize(
     "override,flag",
     [
-        (dict(loss_type="custom_loss"), "--loss-type"),
         (dict(custom_loss_function_path="my.loss"), "--custom-loss-function-path"),
         (dict(entropy_coef=0.01), "--entropy-coef"),
         (dict(use_tis=True), "--use-tis"),

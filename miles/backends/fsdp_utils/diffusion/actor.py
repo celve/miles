@@ -1,4 +1,4 @@
-"""FSDP2 trainer of `--model-kind diffusion` runs: Flow-GRPO on a diffusers DiT with a LoRA adapter."""
+"""FSDP2 trainer of `--model-kind diffusion` runs: the `--loss-type` algorithm on a diffusers DiT with a LoRA adapter."""
 
 import logging
 
@@ -10,7 +10,6 @@ from torch.distributed.tensor import DTensor
 
 from miles.backends.fsdp_utils import checkpoint
 from miles.backends.fsdp_utils.actor import build_optimizer
-from miles.backends.fsdp_utils.diffusion.losses.flow_grpo import collate_pairs, flow_grpo_loss
 from miles.backends.fsdp_utils.diffusion.metric_buffer import MetricBuffer
 from miles.backends.fsdp_utils.diffusion.model import DTYPES, load_fsdp_dit
 from miles.backends.fsdp_utils.diffusion.pipeline_config import get_train_pipeline_config
@@ -24,6 +23,7 @@ from miles.backends.training_utils.types import TrainStepOutcome, TrainStepOutpu
 from miles.backends.training_utils.weight_update.updater import WeightUpdater
 from miles.utils import object_store
 from miles.utils.context_utils import with_defer
+from miles.utils.diffusion.algorithms import get_algorithm
 from miles.utils.diffusion.metrics import log_metrics
 from miles.utils.object_store import StoreObjectRef
 from miles.utils.profile_utils import TrainProfiler
@@ -66,6 +66,7 @@ class DiffusionFSDPTrainRayActor(TorchNativeTrainRayActor):
         self.prof = TrainProfiler(args)
         self.forward_dtype = DTYPES[args.diffusion_forward_dtype]
         self.pipeline_config = get_train_pipeline_config(args.diffusion_model_family)
+        self.algorithm = get_algorithm(args.loss_type)
         self.model = load_fsdp_dit(args, config=self.pipeline_config, mesh=get_parallel_state().get_mesh("fsdp"))
         self.optimizer = build_optimizer(args, (p for p in self.model.parameters() if p.requires_grad))
         # fp16 policy gradients underflow unscaled; the sharded scaler agrees on found_inf across ranks.
@@ -125,7 +126,7 @@ class DiffusionFSDPTrainRayActor(TorchNativeTrainRayActor):
         metrics = MetricBuffer(group=state.intra_dp.group, device=torch.device("cuda", torch.cuda.current_device()))
         num_pairs = sum(len(pairs) for pairs in micro_batches)
         for pairs in micro_batches:
-            loss_sum = self._forward_loss(pairs, metrics=metrics)
+            loss_sum = self.algorithm.loss(self, pairs, metrics=metrics)
             self.scaler.scale(loss_sum / float(num_pairs)).backward()
 
         self.scaler.unscale_(self.optimizer)
@@ -150,43 +151,25 @@ class DiffusionFSDPTrainRayActor(TorchNativeTrainRayActor):
             logger.info(f"[train step {self.global_step}] rollout={rollout_id} {reduced}")
             log_metrics(self.args, reduced, step_key="train/step")
 
-    def _forward_loss(self, pairs: list[dict], *, metrics: MetricBuffer) -> torch.Tensor:
-        args = self.args
-        use_cfg = args.diffusion_guidance_scale > 1.0
-        batch = collate_pairs(
-            pairs,
-            config=self.pipeline_config,
-            use_cfg=use_cfg,
-            adv_clip_max=args.diffusion_adv_clip_max,
-            device=torch.device("cuda", torch.cuda.current_device()),
-        )
-        new_pred = self._noise_pred(batch)
-        ref_pred = None
-        if args.diffusion_kl_beta > 0:
-            with torch.no_grad(), self.model.disable_adapter():
-                ref_pred = self._noise_pred(batch)
-                # PEFT re-enables adapter grads on exit; reshard first so that lands on the shards.
-                _reshard(self.model)
-        return flow_grpo_loss(
-            batch,
-            new_pred=new_pred,
-            ref_pred=ref_pred,
-            noise_level=args.diffusion_noise_level,
-            clip_range=args.eps_clip,
-            kl_beta=args.diffusion_kl_beta,
-            metrics=metrics,
-        )
-
-    def _noise_pred(self, batch) -> torch.Tensor:
+    def noise_pred(self, latents, timesteps, pos_cond: dict, neg_cond: dict | None) -> torch.Tensor:
         with torch.autocast("cuda", dtype=self.forward_dtype, enabled=self.forward_dtype != torch.float32):
             return self.pipeline_config.compute_noise_pred(
                 model=self.model,
-                latents=batch.latents,
-                timesteps=batch.timesteps,
-                pos_cond=batch.pos_cond,
-                neg_cond=batch.neg_cond,
+                latents=latents,
+                timesteps=timesteps,
+                pos_cond=pos_cond,
+                neg_cond=neg_cond,
                 guidance_scale=self.args.diffusion_guidance_scale,
             )
+
+    @torch.no_grad()
+    def lora_base_noise_pred(self, latents, timesteps, pos_cond: dict, neg_cond: dict | None) -> torch.Tensor:
+        """The KL reference: the same forward with the adapter disabled."""
+        with self.model.disable_adapter():
+            pred = self.noise_pred(latents, timesteps, pos_cond, neg_cond)
+            # PEFT re-enables adapter grads on exit; reshard first so that lands on the shards.
+            _reshard(self.model)
+        return pred
 
     def _build_diffusion_weight_updater(self) -> WeightUpdater:
         self._published_weight_version = 0

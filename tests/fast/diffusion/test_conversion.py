@@ -5,13 +5,10 @@ import torch
 
 from miles.ray.rollout.train_data_conversion import split_train_data_by_dp
 from miles.rollout.diffusion_rollout import conversion
-from miles.rollout.diffusion_rollout.conversion import (
-    build_train_pairs,
-    compute_grpo_advantages,
-    convert_samples_to_train_data,
-)
+from miles.rollout.diffusion_rollout.conversion import compute_grpo_advantages, convert_samples_to_train_data
 from miles.utils.args.custom_function import CustomFunctionConfig
 from miles.utils.args.custom_view import ImmutableNamespace
+from miles.utils.diffusion.algorithms.flow_grpo import FlowGRPO
 from miles.utils.diffusion.types import DenoisingEnv, DiffusionRollout, DiTTrajectory
 from miles.utils.types import Sample
 
@@ -27,6 +24,7 @@ class _Args:
     wandb_always_use_train_step = False
     rollout_batch_size = 2
     global_batch_size = 2
+    loss_type = "policy_loss"
 
 
 def _fn_args(**overrides):
@@ -68,7 +66,7 @@ def logged(monkeypatch):
 
 
 def test_one_pair_per_sde_step_pairs_x_t_with_x_t_plus_1():
-    pairs = build_train_pairs(_sample(0, reward=1.0, steps=[0, 2]), advantage=0.5)
+    pairs = FlowGRPO().build_train_pairs(_fn_args(), _sample(0, reward=1.0, steps=[0, 2]), advantage=0.5)
 
     assert [(p["latent"].item(), p["next_latent"].item()) for p in pairs] == [(0.0, 1.0), (2.0, 3.0)]
     assert [(p["sigma"].item(), p["next_sigma"].item()) for p in pairs] == [(1.0, 0.75), (0.5, 0.0)]
@@ -80,7 +78,7 @@ def test_a_windowed_trajectory_is_indexed_by_its_echoed_step_numbers():
     sample = _sample(0, reward=1.0, steps=[1], latent_step_indices=torch.tensor([1, 2]), num_latents=2)
     sample.diffusion.rollout_log_probs = torch.tensor([7.0, 8.0, 9.0])
 
-    (pair,) = build_train_pairs(sample, advantage=0.0)
+    (pair,) = FlowGRPO().build_train_pairs(_fn_args(), sample, advantage=0.0)
 
     assert (pair["latent"].item(), pair["next_latent"].item(), pair["log_prob_old"].item()) == (0.0, 1.0, 8.0)
 
