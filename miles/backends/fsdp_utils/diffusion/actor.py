@@ -1,6 +1,8 @@
 """FSDP2 trainer of `--model-kind diffusion` runs: the `--loss-type` algorithm on a diffusers DiT with a LoRA adapter."""
 
 import logging
+from contextlib import nullcontext
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
@@ -10,6 +12,7 @@ from torch.distributed.tensor import DTensor
 
 from miles.backends.fsdp_utils import checkpoint
 from miles.backends.fsdp_utils.actor import build_optimizer
+from miles.backends.fsdp_utils.diffusion.ema import EMAOptimizer, load_ema, save_ema
 from miles.backends.fsdp_utils.diffusion.metric_buffer import MetricBuffer
 from miles.backends.fsdp_utils.diffusion.model import DTYPES, load_fsdp_dit
 from miles.backends.fsdp_utils.diffusion.pipeline_config import get_train_pipeline_config
@@ -74,9 +77,23 @@ class DiffusionFSDPTrainRayActor(TorchNativeTrainRayActor):
         self.lr_scheduler = get_lr_scheduler(args, self.optimizer)
         self.global_step = 0
         self.micro_step = 0
+        self.ema = (
+            EMAOptimizer(
+                self.model,
+                decay=args.diffusion_ema_decay_init,
+                uprate=args.diffusion_ema_decay_ramp,
+                uphold=args.diffusion_ema_decay_max,
+                flat_steps=args.diffusion_ema_decay_flat_steps,
+            )
+            if self.algorithm.uses_ema
+            else None
+        )
         checkpoint_payload = checkpoint.load(self)
+        if self.ema is not None and checkpoint_payload is not None:
+            load_ema(self.ema, self.model, _checkpoint_dir(args.backend.load, checkpoint_payload["iteration"]))
         self.model_parts = [self.model]
-        self.optimizers = [self.optimizer]
+        # The EMA is optimizer state, so the base sleep/wake moves it with Adam's.
+        self.optimizers = [self.optimizer] + ([self.ema] if self.ema is not None else [])
         self.weight_updater = self._build_diffusion_weight_updater()
         checkpoint.finalize_load(self, checkpoint_payload)
 
@@ -114,19 +131,25 @@ class DiffusionFSDPTrainRayActor(TorchNativeTrainRayActor):
             tstep_microbatch=args.diffusion_micro_batch_size_tstep,
         )
         with timer("actor_train"):
+            microbatch_id = 0
             for micro_batches in steps:
-                self._optimizer_step(rollout_id, micro_batches)
+                self._optimizer_step(rollout_id, micro_batches, first_microbatch_id=microbatch_id)
+                microbatch_id += len(micro_batches)
+        if self.ema is not None:
+            self.ema.step(self.global_step)
         # Gradients are dead until the next step's zero_grad; dropping them keeps them out of the offload.
         self.optimizer.zero_grad(set_to_none=True)
         self.prof.step(rollout_id=rollout_id)
 
-    def _optimizer_step(self, rollout_id: int, micro_batches: list[list[dict]]) -> None:
+    def _optimizer_step(self, rollout_id: int, micro_batches: list[list[dict]], *, first_microbatch_id: int) -> None:
         self.optimizer.zero_grad(set_to_none=True)
         state = get_parallel_state()
         metrics = MetricBuffer(group=state.intra_dp.group, device=torch.device("cuda", torch.cuda.current_device()))
         num_pairs = sum(len(pairs) for pairs in micro_batches)
-        for pairs in micro_batches:
-            loss_sum = self.algorithm.loss(self, pairs, metrics=metrics)
+        for index, pairs in enumerate(micro_batches):
+            loss_sum = self.algorithm.loss(
+                self, pairs, rollout_id=rollout_id, microbatch_id=first_microbatch_id + index, metrics=metrics
+            )
             self.scaler.scale(loss_sum / float(num_pairs)).backward()
 
         self.scaler.unscale_(self.optimizer)
@@ -171,6 +194,15 @@ class DiffusionFSDPTrainRayActor(TorchNativeTrainRayActor):
             _reshard(self.model)
         return pred
 
+    @property
+    def dp_rank(self) -> int:
+        return get_parallel_state().intra_dp.rank
+
+    def update_weights(self, info, debug_weight_update_id: str, rollout_id: int | None):
+        # The engines sample with the EMA when the algorithm keeps one.
+        with self.ema.use_weights(self.model) if self.ema is not None else nullcontext():
+            return super().update_weights(info, debug_weight_update_id, rollout_id)
+
     def _build_diffusion_weight_updater(self) -> WeightUpdater:
         self._published_weight_version = 0
         return WeightUpdater(
@@ -188,6 +220,13 @@ class DiffusionFSDPTrainRayActor(TorchNativeTrainRayActor):
 
     def _save_checkpoint(self, rollout_id: int) -> None:
         checkpoint.save(self, iteration=rollout_id)
+        if self.ema is not None:
+            save_ema(self.ema, self.model, _checkpoint_dir(self.args.backend.save, rollout_id + 1))
+
+
+def _checkpoint_dir(root: str, step_id: int) -> Path:
+    """`miles.backends.fsdp_utils.checkpoint`'s layout: `save` writes rollout r's state under step r + 1."""
+    return Path(root).expanduser() / f"iter_{step_id:07d}"
 
 
 def _enable_deterministic_training() -> None:

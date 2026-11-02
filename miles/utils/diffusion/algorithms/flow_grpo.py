@@ -19,6 +19,12 @@ class FlowGRPO(DiffusionAlgorithm):
             lambda a: a.eps_clip == AlgoConfig.model_fields["eps_clip"].default,
         ),
     ]
+    unread_flags = (
+        "diffusion_ema_decay_init",
+        "diffusion_ema_decay_ramp",
+        "diffusion_ema_decay_max",
+        "diffusion_ema_decay_flat_steps",
+    )
 
     def rollout_request(self, sde_steps: list[int] | None, returned_latents: list[int] | None) -> dict[str, Any]:
         # The trainer slices the full trajectory itself, so the engine returns every latent.
@@ -51,7 +57,7 @@ class FlowGRPO(DiffusionAlgorithm):
             for step in steps
         ]
 
-    def loss(self, actor, pairs: list[dict], *, metrics) -> torch.Tensor:
+    def loss(self, actor, pairs: list[dict], *, rollout_id: int, microbatch_id: int, metrics) -> torch.Tensor:
         args = actor.args
         batch = collate_pairs(
             pairs,
