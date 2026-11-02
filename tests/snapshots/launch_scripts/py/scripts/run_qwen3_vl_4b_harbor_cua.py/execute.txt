@@ -6,7 +6,7 @@ pkill -9 sglang; sleep 3; ray stop
 export PYTHONUNBUFFERED=1 && ray start
   --head
   --node-ip-address 127.0.0.1
-  --num-gpus 2
+  --num-gpus 3
   --disable-usage-stats
 
 ### 2
@@ -56,7 +56,9 @@ export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && ray job submit
   --eval-interval 5
   --n-samples-per-eval-prompt 4
   --eval-max-response-len 4096
-  --eval-top-p 1 
+  --eval-top-p 1
+  --eval-num-gpus 1
+  --eval-server-concurrency 32 
   --advantage-estimator grpo
   --kl-loss-coef 0.00
   --kl-loss-type low_var_kl
@@ -72,7 +74,7 @@ export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && ray job submit
   --adam-beta1 0.9
   --adam-beta2 0.98 
   --use-dynamic-batch-size
-  --max-tokens-per-gpu 16384 
+  --max-tokens-per-gpu 12288 
   --train-backend megatron
   --load /root/shared_data/ckpt
   --tensor-model-parallel-size 2
@@ -85,7 +87,8 @@ export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && ray job submit
   --attention-softmax-in-fp32
   --attention-backend flash
   --megatron-to-hf-mode bridge
-  --distributed-timeout-minutes 60 
+  --distributed-timeout-minutes 60
+  --skip-actor-forward-only 
   --rollout-num-gpus-per-engine 1
   --sglang-mem-fraction-static 0.6
   --sglang-decode-log-interval 1000
