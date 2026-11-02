@@ -1,8 +1,8 @@
 """Startup validation and derived defaults of `--model-kind diffusion` runs.
 
-The diffusion path supports one layout: a single SD3-family model, Flow-GRPO with the OCR reward, a LoRA adapter on
-FSDP, colocated single-GPU engines and the synchronous loop. Everything else is rejected here, before any worker
-starts, rather than failing inside one.
+The diffusion path supports one layout: a single SD3-family model, Flow-GRPO or DiffusionNFT (`--loss-type`) with
+the OCR reward, a LoRA adapter on FSDP, colocated single-GPU engines and the synchronous loop. Everything else is
+rejected here, before any worker starts, rather than failing inside one.
 """
 
 from miles.backends.fsdp_utils.arguments import FSDPArgs
