@@ -13,6 +13,7 @@ from miles.backends.torchtitan_utils.optimizer_state_on_disk import setup_adam_s
 from miles.backends.torchtitan_utils.parallel import create_titan_parallel_state, parallelism_context_from_config
 from miles.backends.torchtitan_utils.routing_replay import install as install_routing_replay
 from miles.backends.torchtitan_utils.trainer import TitanTrainer
+from miles.backends.training_utils.data.rollout import get_steps_per_rollout
 from miles.backends.training_utils.parallel import get_parallel_state, set_parallel_state
 from miles.backends.training_utils.replay.routing_replay import enable as enable_routing_replay
 from miles.backends.training_utils.torch_native.actor import TorchNativeTrainRayActor
@@ -22,6 +23,7 @@ from miles.utils.args.runtime import TrainerConfig
 from miles.utils.context_utils import with_defer
 from miles.utils.disk_backed_tensor import optimizer_state_dir_root
 from miles.utils.distributed_utils import get_gloo_group
+from miles.utils.dp_schedule import TrainParallelConfig
 from miles.utils.ft_utils.indep_dp import IndepDPInfo
 from miles.utils.lora.utils import is_lora_enabled
 from miles.utils.memory_utils import clear_memory, print_memory
@@ -33,12 +35,13 @@ from miles.utils.workers.rpc.common.wire_types import Pickled
 logger = logging.getLogger(__name__)
 
 
-def _steps_per_rollout(args: TrainerConfig) -> int:
-    return max(args.rollout_batch_size * args.n_samples_per_prompt // args.global_batch_size, 1)
-
-
 class TorchtitanTrainRayActor(TorchNativeTrainRayActor):
     backend_name = "torchtitan"
+
+    @property
+    def train_parallel_config(self) -> TrainParallelConfig:
+        parallel_state = get_parallel_state()
+        return parallel_state.train_parallel_config(supports_precomputed_schedule=parallel_state.pp.size == 1)
 
     @with_defer(lambda: Timer().start("train_wait"))
     def init(
@@ -66,7 +69,7 @@ class TorchtitanTrainRayActor(TorchNativeTrainRayActor):
         config = build_trainer_config(
             args,
             hf_assets_path=args.hf_checkpoint,
-            lr_total_steps=args.num_rollout * _steps_per_rollout(args),
+            lr_total_steps=args.num_rollout * get_steps_per_rollout(args),
             dump_subdir="actor",
             with_lora=is_lora_enabled(args),
         )
@@ -102,7 +105,7 @@ class TorchtitanTrainRayActor(TorchNativeTrainRayActor):
         self.trainer.engine.load_checkpoint()
         if args.stream_optimizer_state_to_disk:
             setup_adam_state_on_disk(self.optimizers, state_dir_root=optimizer_state_dir_root(args))
-        start_rollout_id = self.trainer.step // _steps_per_rollout(args)
+        start_rollout_id = self.trainer.step // get_steps_per_rollout(args)
 
         if with_ref:
             self.ref_runner = self._build_ref_runner(args)
