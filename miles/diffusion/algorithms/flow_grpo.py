@@ -18,8 +18,16 @@ class FlowGRPO(DiffusionAlgorithm):
             "Miles' text PPO clip default (--eps-clip 0.2); pass the ratio clip explicitly, e.g. --eps-clip 1e-4",
             lambda a: a.eps_clip == AlgoConfig.model_fields["eps_clip"].default,
         ),
+        (
+            "ODE rollouts under Flow-GRPO, which trains on SDE steps; use --loss-type nft",
+            lambda a: a.diffusion_sde_type != "sde",
+        ),
     ]
     unread_flags = (
+        "diffusion_nft_beta",
+        "diffusion_nft_adaptive_weight",
+        "diffusion_nft_timestep_strategy_path",
+        "diffusion_nft_num_dropped_timesteps",
         "diffusion_ema_decay_init",
         "diffusion_ema_decay_ramp",
         "diffusion_ema_decay_max",

@@ -1,8 +1,11 @@
+import argparse
+
 from miles.utils.args.schema import A, Arg, BaseConfig
 
 
 class DiffusionConfig(BaseConfig):
-    """Flags of `--model-kind diffusion` runs: Flow-GRPO on a diffusers DiT served by sglang.multimodal_gen."""
+    """Flags of `--model-kind diffusion` runs: Flow-GRPO or DiffusionNFT on a diffusers DiT served by
+    sglang.multimodal_gen."""
 
     model_kind: A[
         str,
@@ -19,9 +22,10 @@ class DiffusionConfig(BaseConfig):
     diffusion_negative_prompt: A[str | None, Arg(help="Negative prompt for classifier-free guidance.")] = None
     diffusion_height: A[int, Arg(help="Rollout image height.")] = 512
     diffusion_width: A[int, Arg(help="Rollout image width.")] = 512
-    diffusion_sde_type: A[str, Arg(choices=["sde"], help="Stochastic sampler the engine runs on the SDE steps.")] = (
-        "sde"
-    )
+    diffusion_sde_type: A[
+        str,
+        Arg(choices=["sde", "ode"], help="Sampler the engine runs: `sde` for Flow-GRPO, `ode` for --loss-type nft."),
+    ] = "sde"
     diffusion_noise_level: A[float, Arg(help="SDE noise level, used in rollout and in the trainer's log-prob.")] = 0.7
     diffusion_quality: A[
         str, Arg(help="sglang.multimodal_gen `quality` sampling knob; `exact` keeps the engine batch-invariant.")
@@ -70,3 +74,22 @@ class DiffusionConfig(BaseConfig):
     diffusion_ema_decay_ramp: A[float, Arg(help="EMA decay added per optimizer step after the flat steps.")] = 0.001
     diffusion_ema_decay_max: A[float, Arg(help="Cap of the ramped EMA decay.")] = 0.5
     diffusion_ema_decay_flat_steps: A[int, Arg(help="Optimizer steps that keep --diffusion-ema-decay-init.")] = 0
+
+    # DiffusionNFT (--loss-type nft)
+    diffusion_nft_beta: A[
+        float, Arg(help="NFT: how far the positive policy moves from the EMA, beta * v_new + (1 - beta) * v_old.")
+    ] = 1.0
+    diffusion_nft_adaptive_weight: A[
+        bool,
+        Arg(
+            action=argparse.BooleanOptionalAction,
+            help="NFT: divide each branch's x0 error by its own detached mean error.",
+        ),
+    ] = True
+    diffusion_nft_timestep_strategy_path: A[
+        str,
+        Arg(
+            help="NFT: function `(args, num_steps, generator) -> steps` choosing each image's train sigmas, in order."
+        ),
+    ] = "miles.diffusion.algorithms.nft.drop_random_steps"
+    diffusion_nft_num_dropped_timesteps: A[int, Arg(help="NFT: sampling steps each image leaves out of training.")] = 0

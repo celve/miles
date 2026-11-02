@@ -2,9 +2,10 @@
 
 from miles.diffusion.algorithms.base import DiffusionAlgorithm
 from miles.diffusion.algorithms.flow_grpo import FlowGRPO
+from miles.diffusion.algorithms.nft import DiffusionNFT
 
 # Miles' default `policy_loss` is Flow-GRPO, the diffusion policy-gradient objective.
-ALGORITHMS: dict[str, type[DiffusionAlgorithm]] = {"policy_loss": FlowGRPO}
+ALGORITHMS: dict[str, type[DiffusionAlgorithm]] = {"policy_loss": FlowGRPO, "nft": DiffusionNFT}
 
 
 def get_algorithm(loss_type: str) -> DiffusionAlgorithm:

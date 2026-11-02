@@ -1,4 +1,4 @@
-"""Per-optimizer-step scalar metrics of the Flow-GRPO loop, reduced over DP item-weighted."""
+"""Per-optimizer-step scalar metrics of the diffusion train loop, reduced over DP item-weighted."""
 
 from enum import Enum, auto
 
@@ -23,6 +23,14 @@ SCHEMA = {
     "log_prob_new_idx_0": MetricReduce.MEAN,
     "log_prob_old_idx_0": MetricReduce.MEAN,
     "log_prob_mean_abs_diff": MetricReduce.MEAN,
+    "nft_loss": MetricReduce.MEAN,
+    "nft_loss_per_pair": MetricReduce.MEAN,
+    "nft_r_mean": MetricReduce.MEAN,
+    "nft_pos_loss": MetricReduce.MEAN,
+    "nft_neg_loss": MetricReduce.MEAN,
+    "nft_adv_mean": MetricReduce.MEAN,
+    "nft_t_mean": MetricReduce.MEAN,
+    "nft_num_timesteps": MetricReduce.MEAN,
     "grad_norm": MetricReduce.REPLICATED,
 }
 
