@@ -23,6 +23,7 @@ from miles.utils.args.runtime import TrainerConfig
 from miles.utils.context_utils import with_defer
 from miles.utils.disk_backed_tensor import optimizer_state_dir_root
 from miles.utils.distributed_utils import get_gloo_group
+from miles.utils.dp_schedule import TrainParallelConfig
 from miles.utils.ft_utils.indep_dp import IndepDPInfo
 from miles.utils.lora.utils import is_lora_enabled
 from miles.utils.memory_utils import clear_memory, print_memory
@@ -36,6 +37,11 @@ logger = logging.getLogger(__name__)
 
 class TorchtitanTrainRayActor(TorchNativeTrainRayActor):
     backend_name = "torchtitan"
+
+    @property
+    def train_parallel_config(self) -> TrainParallelConfig:
+        parallel_state = get_parallel_state()
+        return parallel_state.train_parallel_config(supports_precomputed_schedule=parallel_state.pp.size == 1)
 
     @with_defer(lambda: Timer().start("train_wait"))
     def init(

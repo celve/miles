@@ -91,7 +91,7 @@ class TorchNativeTrainRayActor(TrainRayActor):
 
     @property
     def train_parallel_config(self) -> TrainParallelConfig:
-        return get_parallel_state().train_parallel_config(supports_precomputed_schedule=False)
+        return get_parallel_state().train_parallel_config(supports_precomputed_schedule=True)
 
     def _build_weight_updater(self, model, iterator_factory: Callable) -> WeightUpdater:
         self._published_weight_version = 0
