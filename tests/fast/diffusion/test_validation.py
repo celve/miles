@@ -66,6 +66,8 @@ def test_the_recipe_layout_passes_and_resolves_the_family_defaults():
         (dict(debug_rollout_only=True), "debug"),
         (dict(ci_test=True), "ci-test"),
         (dict(eps_clip=0.2), "explicitly"),
+        (dict(use_dynamic_batch_size=True), "token-based batching"),
+        (dict(use_dynamic_global_batch_size=True), "token-based batching"),
         (dict(eps_clip_high=0.3), "asymmetric"),
         (dict(eps_clip_c=3.0), "dual-clip"),
         (dict(save_debug_rollout_data="/dump/{rollout_id}.pt"), "debug dumps"),
