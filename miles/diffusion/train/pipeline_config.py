@@ -39,6 +39,7 @@ class TrainPipelineConfig(abc.ABC):
     model_family: str
     name_patterns: tuple[str, ...] = ()
     lora_target_modules: list[str] = []
+    num_train_timesteps: int = 1000
 
     def compute_noise_pred(
         self,
@@ -58,6 +59,10 @@ class TrainPipelineConfig(abc.ABC):
         if neg_cond is None:
             return forward(pos_cond)
         return self.cfg_combine(forward(pos_cond), forward(neg_cond), guidance_scale)
+
+    def process_sigma_as_timesteps_input(self, sigmas: torch.Tensor) -> torch.Tensor:
+        """A sigma in [0, 1] as this family's DiT takes its timestep input."""
+        return sigmas * float(self.num_train_timesteps)
 
     @abc.abstractmethod
     def prepare_cond_kwargs(self, cond: CondKwargs | None, device: torch.device) -> dict:

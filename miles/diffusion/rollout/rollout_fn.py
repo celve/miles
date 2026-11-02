@@ -87,7 +87,7 @@ class DiffusionRolloutFn(BaseRolloutFn):
         for index, (sample, rollout) in enumerate(zip(microgroup, rollouts, strict=True)):
             # The engine expands one seed to [seed, seed + n); record each image's own.
             rollout.seed = seed + index
-            rollout.sde_step_indices = list(sde_steps)
+            rollout.sde_step_indices = list(sde_steps or [])
             sample.diffusion = rollout
             sample.status = Sample.Status.COMPLETED
 
@@ -126,7 +126,8 @@ def build_sampling_params(args: Namespace) -> dict[str, Any]:
         "rollout": True,
         "rollout_sde_type": args.diffusion_sde_type,
         "rollout_noise_level": args.diffusion_noise_level,
-        "rollout_log_prob_no_const": False,
+        # The engine refuses full log-probs of ODE steps, which carry no noise to score.
+        "rollout_log_prob_no_const": args.diffusion_sde_type == "ode",
         "rollout_debug_mode": False,
         "rollout_video_dtype": "keep",
         "rollout_return_denoising_env": True,
