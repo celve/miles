@@ -78,4 +78,3 @@ async def test_rewards_come_from_rm_hub_per_microgroup_or_per_group(monkeypatch,
     assert reward_calls == calls
     assert [sample.reward for sample in group] == [float(len('write "abc"'))] * 4
     assert fn.reward_pool.scored == [(4, 4, 3)] * 4
-

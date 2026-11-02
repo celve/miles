@@ -3,8 +3,8 @@
 import copy
 import json
 import random
-from typing import Any
 from pathlib import Path
+from typing import Any
 
 from miles.rollout.data_source import DataSource
 from miles.utils.simple_checkpointer import load_simple_checkpoint, save_simple_checkpoint

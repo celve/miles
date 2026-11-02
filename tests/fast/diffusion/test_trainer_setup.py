@@ -26,7 +26,9 @@ def test_the_dit_is_sharded_by_miles_apply_fsdp2_without_casting_inputs(monkeypa
     monkeypatch.setattr(dit_model, "_sync_dtypes_from_rank0", lambda model: None)
     loaded = []
     monkeypatch.setattr(
-        dit_model, "fsdp2_load_full_state_dict", lambda model, state, *, cpu_offload: loaded.append(cpu_offload) or model
+        dit_model,
+        "fsdp2_load_full_state_dict",
+        lambda model, state, *, cpu_offload: loaded.append(cpu_offload) or model,
     )
     args = SimpleNamespace(
         hf_checkpoint="/ckpt",
