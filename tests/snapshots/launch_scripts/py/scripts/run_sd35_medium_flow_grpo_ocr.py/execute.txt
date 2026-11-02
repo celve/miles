@@ -21,6 +21,7 @@ export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && ray job submit
   --model-kind diffusion 
   --prompt-data /root/datasets/miles-diffusion-datasets/flowgrpo_ocr/train.jsonl
   --input-key input
+  --no-rollout-shuffle
   --rollout-batch-size 8
   --n-samples-per-prompt 16
   --num-rollout 600
