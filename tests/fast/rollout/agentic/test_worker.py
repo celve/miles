@@ -176,6 +176,44 @@ def test_a_rollout_abort_cancels_the_calls_running_on_workers(serve, tmp_path):
     assert _wait_for(cleaned_up)
 
 
+def test_a_rollout_abort_leaves_the_eval_engines_calls_running(serve, tmp_path):
+    """--eval-num-gpus evaluates beside training in one process; training's oversampling abort must spare eval."""
+    endpoint = serve()
+    files = {name: (tmp_path / f"{name}.pid", tmp_path / f"{name}.cleaned_up") for name in ("train", "eval")}
+
+    def start(name, port):
+        pid_file, cleaned_up = files[name]
+        return asyncio.create_task(
+            call_agent_function(
+                stubs.wait_until_cancelled,
+                mode="worker",
+                worker=endpoint,
+                abort_scope=f"127.0.0.1:{port}",
+                pid_file=str(pid_file),
+                cleaned_up=str(cleaned_up),
+            )
+        )
+
+    async def abort_training():
+        train, evaluation = start("train", 30000), start("eval", 31000)
+        while not all(pid.exists() for pid, _ in files.values()):
+            await asyncio.sleep(0.1)
+        await call_agent_abort_hook(
+            SimpleNamespace(custom_agent_function_path=None, sglang_router_ip="127.0.0.1", sglang_router_port=30000)
+        )
+        with pytest.raises(InfraAbort):
+            await asyncio.wait_for(train, timeout=60)
+        await asyncio.sleep(2)
+        still_running = not evaluation.done()
+        await call_agent_abort_hook(SimpleNamespace(custom_agent_function_path=None), every_scope=True)
+        with pytest.raises(InfraAbort):
+            await asyncio.wait_for(evaluation, timeout=60)
+        return still_running
+
+    assert asyncio.run(abort_training())
+    assert _wait_for(files["train"][1]) and _wait_for(files["eval"][1])
+
+
 def test_the_rollout_abort_entrypoint_cancels_a_trial_waiting_on_its_environment(serve, tmp_path, monkeypatch):
     """The oversampling abort awaits pending groups after the hook: the worker call must end, not run to its cap."""
     from miles.rollout.inference_rollout import inference_rollout_train

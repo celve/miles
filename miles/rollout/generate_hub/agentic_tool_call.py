@@ -46,7 +46,7 @@ from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
 from miles.dashboard.hooks import push_agent_reports
 from miles.rollout.agentic.agent_function import AGENT_FUNCTION_MODES, InfraAbort, call_agent_function
 from miles.rollout.agentic.credentials import provider_env_names
-from miles.rollout.agentic.remote import AgentWorkerEndpoint, forwarded_env
+from miles.rollout.agentic.remote import AgentWorkerEndpoint, forwarded_env, rollout_abort_scope
 from miles.rollout.agentic.sandbox_worker import SandboxWorkerConfig
 from miles.rollout.base_types import GenerateFnInput, GenerateFnOutput
 from miles.rollout.generate_utils.openai_endpoint_utils import OpenAIEndpointTracer
@@ -112,6 +112,7 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
             worker=worker,
             sandbox=sandbox,
             extra_env=worker_env,
+            abort_scope=rollout_abort_scope(input.args),
             on_child_reports=lambda reports: push_agent_reports(reports, evaluation=input.evaluation),
             base_url=tracer.agent_base_url,
             prompt=input.sample.prompt,
