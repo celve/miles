@@ -18,6 +18,13 @@ async def generate_one_to_three(input: GenerateFnInput) -> GenerateFnOutput:
     return GenerateFnOutput(samples=_split(sample, num_pieces=1 + sample.index % 3))
 
 
+async def generate_two(input: GenerateFnInput) -> GenerateFnOutput:
+    sample = await sglang_rollout.generate(
+        input.args, input.sample, input.sampling_params, evaluation=input.evaluation
+    )
+    return GenerateFnOutput(samples=_split(sample, num_pieces=2))
+
+
 def _split(sample: Sample, *, num_pieces: int) -> list[Sample]:
     assert isinstance(sample, Sample)
 
