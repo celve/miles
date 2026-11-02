@@ -1,0 +1,108 @@
+"""DiffusionNFT on SD3.5-medium with the OCR reward: LoRA r32 trained against its EMA, which the engines sample with,
+on 2 GPUs colocated (FSDP DP=2 and two sglang.multimodal_gen engines time-sharing the same GPUs).
+
+Ported from radixark/miles_diffusion at ecb1363e (scripts/run_diffusion_nft_sd3_pickscore.py, whose 2-GPU smoke mode
+trains on OCR), at its full batch: 8 prompts x 8 images, one optimizer step per rollout. Setup is the Flow-GRPO
+recipe's (`prepare` installs PaddleOCR and fetches the model and prompts).
+
+Args:
+    --num-rollout: rollouts to train.
+    --model-path, --save-interval, --extra-args: as in run_sd35_medium_flow_grpo_ocr.py.
+
+    python scripts/run_sd35_medium_nft_ocr.py --num-rollout 100
+"""
+
+import typer
+from scripts.run_sd35_medium_flow_grpo_ocr import DATASET_SUBSET, ScriptArgs, prepare
+
+from miles.utils.external_utils import command_utils
+
+
+def execute(args: ScriptArgs) -> None:
+    U = args.create_backend()
+    save_dir = f"{args.output_dir}/{args.run_id}/checkpoints"
+
+    ckpt_args = f"--hf-checkpoint {args.resolved_model_path} --model-kind diffusion "
+    if args.save_interval:
+        ckpt_args += f"--save {save_dir} --save-interval {args.save_interval} "
+
+    rollout_args = (
+        f"--prompt-data {args.dataset_dir}/{DATASET_SUBSET}/train.jsonl "
+        "--input-key input "
+        # File order, as miles_diffusion reads its prompts; Miles' own default shuffles them.
+        "--no-rollout-shuffle "
+        "--rollout-batch-size 8 "
+        "--n-samples-per-prompt 8 "
+        f"--num-rollout {args.num_rollout} "
+        "--num-steps-per-rollout 1 "
+        "--diffusion-microgroup-size 8 "
+        "--diffusion-num-steps 10 "
+        "--diffusion-guidance-scale 1.0 "
+        "--diffusion-noise-level 0.0 "
+        "--diffusion-sde-type ode "
+        "--diffusion-step-strategy-path miles.diffusion.rollout.step_strategy.ode_and_return_last "
+        "--diffusion-height 512 "
+        "--diffusion-width 512 "
+    )
+
+    nft_args = (
+        "--loss-type nft "
+        "--diffusion-nft-beta 1.0 "
+        "--diffusion-nft-num-dropped-timesteps 1 "
+        "--advantage-estimator grpo "
+        "--rm-type ocr "
+        "--diffusion-globalize-reward-std "
+        "--diffusion-ema-decay-init 0.001 "
+        "--diffusion-ema-decay-ramp 0.001 "
+        "--diffusion-ema-decay-max 0.5 "
+        "--diffusion-ema-decay-flat-steps 0 "
+    )
+
+    optimizer_args = "--lr 3e-4 --adam-beta2 0.999 --weight-decay 1e-4 --clip-grad 1.0 "
+
+    lora_args = "--diffusion-lora-rank 32 --diffusion-lora-alpha 64 --diffusion-lora-init gaussian "
+
+    sglang_args = (
+        "--use-miles-router "
+        "--sglang-server-concurrency 8 "
+        "--diffusion-dit-precision fp16 "
+        "--update-weight-buffer-size 2147483648 "
+    )
+
+    train_args = (
+        "--train-backend fsdp "
+        "--diffusion-forward-dtype fp16 "
+        "--gradient-checkpointing "
+        # 4 images x their 9 timesteps per micro-batch, so each image's pairs share one forward.
+        "--diffusion-micro-batch-size-sample 4 "
+        "--diffusion-micro-batch-size-tstep 9 "
+        "--deterministic-mode "
+    )
+
+    misc_args = (
+        "--actor-num-nodes 1 "
+        "--actor-num-gpus-per-node 2 "
+        "--rollout-num-gpus-per-engine 1 "
+        "--num-gpus-per-node 2 "
+        "--colocate "
+    )
+
+    U.execute_train(
+        train_args=(
+            f"{ckpt_args} {rollout_args} {nft_args} {optimizer_args} {lora_args} {sglang_args} "
+            f"{train_args} {misc_args} {args.extra_args}"
+        ),
+        num_gpus_per_node=2,
+        megatron_model_type=None,
+        extra_env_vars={"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"},
+    )
+
+
+@command_utils.dataclass_cli
+def main(args: ScriptArgs) -> None:
+    prepare(args)
+    execute(args)
+
+
+if __name__ == "__main__":
+    typer.run(main)
