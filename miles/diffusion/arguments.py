@@ -16,7 +16,6 @@ _HOOKS = {
     "rollout_function_path": "miles.diffusion.rollout.rollout_fn.DiffusionRolloutFn",
     "data_source_path": "miles.diffusion.rollout.data_source.DiffusionPromptDataSource",
     "custom_convert_samples_to_train_data_path": "miles.diffusion.conversion.convert_samples_to_train_data",
-    "custom_rollout_log_function_path": "miles.diffusion.conversion.log_rollout_data",
 }
 
 # (what is unsupported, whether this run asks for it)
