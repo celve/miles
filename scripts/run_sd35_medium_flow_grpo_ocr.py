@@ -81,6 +81,8 @@ def execute(args: ScriptArgs) -> None:
     rollout_args = (
         f"--prompt-data {args.dataset_dir}/{DATASET_SUBSET}/train.jsonl "
         "--input-key input "
+        # File order, as miles_diffusion reads its prompts; Miles' own default shuffles them.
+        "--no-rollout-shuffle "
         "--rollout-batch-size 8 "
         "--n-samples-per-prompt 16 "
         f"--num-rollout {args.num_rollout} "
