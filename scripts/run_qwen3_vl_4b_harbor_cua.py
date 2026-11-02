@@ -137,6 +137,7 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     rollout_path: Literal["generate", "session"] = "generate"
     session_server_workers: int = 4
     max_tokens_per_gpu: int = 12288
+    skip_actor_forward_only: bool = True
     eval_num_gpus: int = 1
     eval_server_concurrency: int = 32
     freeze_vision_model: Literal["auto", "on", "off"] = "auto"
@@ -349,7 +350,7 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
         "--megatron-to-hf-mode bridge "
         "--distributed-timeout-minutes 60 "
         # Exact: the training forward's log-probs stand in for a separate forward-only pass.
-        "--skip-actor-forward-only "
+        + ("--skip-actor-forward-only " if args.skip_actor_forward_only else "")
         + ("--freeze-vision-model " if args.freezes_vision else "")
     )
 
