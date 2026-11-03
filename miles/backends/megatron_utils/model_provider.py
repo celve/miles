@@ -17,8 +17,7 @@ from megatron.core.transformer.spec_utils import import_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.training.arguments import core_transformer_config_from_args
 
-from miles.backends.megatron_utils.te_fa4_window import install_fa4_causal_window_patch
-from miles.backends.megatron_utils.te_fused_adam_batches import install_fused_adam_batches_patch
+from miles.backends.megatron_utils.te_patches import install_te_training_patches
 from miles.backends.training_utils.model_companion import ModelCompanionInstallationUtils
 from miles.utils.audit_utils.witness.module import install_witness
 from miles.utils.function_registry import load_function
@@ -152,8 +151,7 @@ def get_model_provider_func(
     args: argparse.Namespace,
     role: Literal["actor", "critic"] = "actor",
 ):
-    install_fa4_causal_window_patch()
-    install_fused_adam_batches_patch()
+    install_te_training_patches()
     # Support custom model provider path (similar to --custom-rm-path for reward models)
     if getattr(args, "custom_model_provider_path", None):
 
