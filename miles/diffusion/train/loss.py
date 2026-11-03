@@ -63,6 +63,7 @@ def flow_grpo_loss(
     clip_range: float,
     kl_beta: float,
     metrics: MetricBuffer,
+    component: str | None = None,
 ) -> torch.Tensor:
     """Summed loss of the micro-batch; the caller normalizes by the optimizer step's pair count."""
     sigmas = dict(sigmas=batch.sigmas, next_sigmas=batch.next_sigmas, sigma_max=batch.sigma_max)
@@ -88,6 +89,12 @@ def flow_grpo_loss(
         loss_sum = loss_sum + kl_beta * kl_sum
 
     _record_metrics(metrics, batch, log_prob_new, ratio, per_pair_loss, loss_sum, kl_sum, clip_range=clip_range)
+    if component is not None:
+        metrics.emit_mean(
+            f"log_prob_mean_abs_diff_{component}",
+            total=torch.abs(log_prob_new - batch.log_prob_old).sum(),
+            count=len(batch),
+        )
     return loss_sum
 
 

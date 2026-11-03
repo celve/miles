@@ -89,6 +89,7 @@ class FlowGRPO(DiffusionAlgorithm):
             clip_range=args.eps_clip,
             kl_beta=args.diffusion_kl_beta,
             metrics=metrics,
+            component=component if len(actor.pipeline_config.components) > 1 else None,
         )
 
 
