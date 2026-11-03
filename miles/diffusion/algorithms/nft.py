@@ -52,6 +52,7 @@ class DiffusionNFT(DiffusionAlgorithm):
         "eps_clip",
         "diffusion_num_sde_steps",
         "diffusion_sde_window_range",
+        "diffusion_sde_candidate_steps",
         "diffusion_negative_prompt",
     )
 

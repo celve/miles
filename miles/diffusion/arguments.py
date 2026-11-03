@@ -8,6 +8,7 @@ rejected here, before any worker starts, rather than failing inside one.
 from miles.backends.fsdp_utils.arguments import FSDPArgs
 from miles.backends.sglang_utils.sglang_api_client import WorkerType
 from miles.diffusion.algorithms import ALGORITHMS
+from miles.diffusion.rollout import step_strategy
 from miles.diffusion.train.pipeline_config import get_train_pipeline_config, resolve_model_family
 from miles.utils.args.configs.algo import AlgoConfig
 from miles.utils.args.configs.backend_fields import TrainerBackendTraitConfig
@@ -175,6 +176,7 @@ def validate_diffusion_args(args) -> None:
             f"--model-kind diffusion with --loss-type {args.loss_type} never reads: " + ", ".join(unread) + hint
         )
     _derive_hooks(args)
+    _check_step_strategy_flags(args)
     if args.rm_type != "pickscore":
         if unread_pickscore := [flag for flag in _PICKSCORE_FLAGS if vars(args)[flag] != _default(flag)]:
             raise ValueError(
@@ -213,6 +215,16 @@ def validate_diffusion_batch_size(args) -> None:
         raise ValueError("--num-steps-per-rollout must divide --rollout-batch-size x --n-samples-per-prompt")
     if num_images % args.global_batch_size:
         raise ValueError("--global-batch-size must divide --rollout-batch-size x --n-samples-per-prompt")
+
+
+def _check_step_strategy_flags(args) -> None:
+    """A built-in step strategy reads only some of the step flags; a custom one may read any."""
+    module, _, name = args.diffusion_step_strategy_path.rpartition(".")
+    if module != step_strategy.__name__ or name not in step_strategy.FLAGS_READ:
+        return
+    flags = [flag for flag in step_strategy.STEP_FLAGS if flag not in step_strategy.FLAGS_READ[name]]
+    if unread := [f"--{flag.replace('_', '-')}" for flag in flags if vars(args)[flag] != _default(flag)]:
+        raise ValueError(f"the {name} step strategy never reads: " + ", ".join(unread))
 
 
 def _derive_hooks(args) -> None:

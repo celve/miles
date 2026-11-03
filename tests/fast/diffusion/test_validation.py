@@ -378,6 +378,36 @@ def test_the_wan22_recipe_passes_and_trains_both_experts():
         validate_diffusion_args(_wan(diffusion_guidance_scale_2=None))
 
 
+@pytest.mark.parametrize(
+    "override,flag",
+    [
+        (dict(diffusion_sde_candidate_steps="1,2,3"), "--diffusion-sde-candidate-steps"),
+        (
+            dict(
+                diffusion_step_strategy_path="miles.diffusion.rollout.step_strategy.epoch_global_random_choice",
+                diffusion_sde_candidate_steps="1,2,3",
+                diffusion_sde_window_range="7,9",
+            ),
+            "--diffusion-sde-window-range",
+        ),
+    ],
+)
+def test_a_step_flag_the_built_in_strategy_never_reads_is_rejected(override, flag):
+    with pytest.raises(ValueError, match=f"never reads: {flag}"):
+        validate_diffusion_args(_supported(**override))
+
+
+def test_a_custom_step_strategy_may_read_any_step_flag():
+    validate_diffusion_args(
+        _supported(diffusion_step_strategy_path="my_pkg.strategy", diffusion_sde_candidate_steps="1,2,3")
+    )
+
+
+def test_nft_never_reads_the_candidate_steps():
+    with pytest.raises(ValueError, match="--diffusion-sde-candidate-steps"):
+        validate_diffusion_args(_nft(diffusion_sde_candidate_steps="1,2,3"))
+
+
 def test_the_ocr_reward_is_rejected_on_video():
     with pytest.raises(ValueError, match="only the first frame"):
         validate_diffusion_args(_supported(diffusion_output_num_frames=5))
