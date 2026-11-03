@@ -44,6 +44,9 @@ class DiffusionConfig(BaseConfig):
         Arg(help="Function `(args, sample, num_steps, seed) -> (sde_steps, returned_latents)` choosing SDE steps."),
     ] = "miles.diffusion.rollout.step_strategy.sde_window"
     diffusion_num_sde_steps: A[int, Arg(help="SDE steps per image; each becomes one train pair.")] = 10
+    diffusion_sde_candidate_steps: A[
+        str | None, Arg(help="'1,2,3': the steps epoch_global_random_choice draws a rollout's SDE steps from.")
+    ] = None
     diffusion_sde_window_range: A[
         str | None, Arg(help="'lo,hi' range the SDE window is drawn from; the whole schedule when unset.")
     ] = None
