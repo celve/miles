@@ -42,6 +42,8 @@ class TrainPipelineConfig(abc.ABC):
     num_train_timesteps: int = 1000
     # The pipeline's denoiser components the trainer loads, trains and syncs, in this order.
     components: tuple[str, ...] = ("transformer",)
+    # fnmatch patterns of module names whose weights the forward reads in fp32, as the engine computes them.
+    fp32_module_patterns: tuple[str, ...] = ()
 
     def component_for_timestep(self, timestep: float) -> str:
         """The component that denoises at this scheduler timestep."""
