@@ -304,16 +304,35 @@ def test_an_nft_flag_flow_grpo_never_reads_is_rejected(override, flag):
         validate_diffusion_args(_supported(**override))
 
 
-def test_an_ema_algorithm_is_rejected_for_a_family_of_several_components(monkeypatch):
-    class TwoExperts(SD3TrainPipelineConfig):
-        model_family = "two_experts"
-        components = ("transformer", "transformer_2")
+class _TwoExperts(SD3TrainPipelineConfig):
+    model_family = "two_experts"
+    name_patterns = ("two-experts",)
+    components = ("transformer", "transformer_2")
+    guidance_scale_2_component = "transformer_2"
 
-    monkeypatch.setitem(pipeline_config._REGISTRY, "two_experts", TwoExperts)
 
-    validate_diffusion_args(_supported(diffusion_model_family="two_experts"))
+@pytest.fixture
+def two_experts(monkeypatch):
+    monkeypatch.setitem(pipeline_config._REGISTRY, "two_experts", _TwoExperts)
+    return dict(diffusion_model_family="two_experts", diffusion_guidance_scale_2=3.0)
+
+
+def test_an_ema_algorithm_is_rejected_for_a_family_of_several_components(two_experts):
+    validate_diffusion_args(_supported(**two_experts))
     with pytest.raises(ValueError, match="EMA of one adapter"):
-        validate_diffusion_args(_nft(diffusion_model_family="two_experts"))
+        validate_diffusion_args(_nft(**two_experts))
+
+
+def test_the_second_guidance_scale_is_required_exactly_by_a_family_that_guides_with_it(two_experts):
+    with pytest.raises(ValueError, match="so pass it"):
+        validate_diffusion_args(_supported(**(two_experts | dict(diffusion_guidance_scale_2=None))))
+    with pytest.raises(ValueError, match="no second guidance scale"):
+        validate_diffusion_args(_supported(diffusion_guidance_scale_2=3.0))
+
+
+def test_the_ocr_reward_is_rejected_on_video():
+    with pytest.raises(ValueError, match="only the first frame"):
+        validate_diffusion_args(_supported(diffusion_output_num_frames=5))
 
 
 def test_flow_grpo_rejects_ode_rollouts():

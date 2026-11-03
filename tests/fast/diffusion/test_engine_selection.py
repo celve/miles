@@ -19,14 +19,15 @@ def _args(**overrides):
         diffusion_lora_target_modules=["attn.to_q"],
         diffusion_dit_precision="fp16",
         diffusion_forward_dtype="fp16",
+        diffusion_flow_shift=None,
     )
     return SimpleNamespace(**(values | overrides))
 
 
-def _launch(overrides):
+def _launch(overrides, **args):
     argv = shlex.split(
         compute_diffusion_engine_launch_cmd(
-            _args(),
+            _args(**args),
             interpreter_prefix=["python"],
             base_gpu_id=1,
             num_gpus_per_engine=1,
@@ -53,6 +54,11 @@ def test_the_server_groups_overrides_and_model_path_win():
 
     assert server_args["model_path"] == "/models/from-sglang-config"
     assert server_args["dit_precision"] == "bf16"
+
+
+def test_the_flow_shift_reaches_the_engine_only_when_set():
+    assert "flow_shift" not in _launch({})[1]
+    assert _launch({}, diffusion_flow_shift=3.0)[1]["flow_shift"] == 3.0
 
 
 def _engine_spec_for(tmp_path, model_kind, **group):
@@ -118,12 +124,12 @@ class _ServerArgs:
         return cls(**kwargs)
 
 
-def _run_engine_main(monkeypatch, server_args):
+def _run_engine_main(monkeypatch, server_args, server_args_cls=_ServerArgs):
     launched = []
     launch_module = ModuleType("sglang.multimodal_gen.runtime.launch_server")
     launch_module.launch_server = launched.append
     args_module = ModuleType("sglang.multimodal_gen.runtime.server_args")
-    args_module.ServerArgs = _ServerArgs
+    args_module.ServerArgs = server_args_cls
     monkeypatch.setitem(sys.modules, launch_module.__name__, launch_module)
     monkeypatch.setitem(sys.modules, args_module.__name__, args_module)
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3")
@@ -141,3 +147,15 @@ def test_only_the_key_miles_injects_into_every_group_is_filtered(monkeypatch):
     launched = _run_engine_main(monkeypatch, {"model_path": "/m", "enable_memory_saver": False})
 
     assert launched == [_ServerArgs(model_path="/m")]
+
+
+class _KwargsServerArgs(_ServerArgs):
+    @classmethod
+    def from_kwargs(cls, **kwargs):
+        return kwargs
+
+
+def test_the_flow_shift_passes_to_multimodal_gen_as_a_pipeline_config_arg(monkeypatch):
+    launched = _run_engine_main(monkeypatch, {"model_path": "/m", "flow_shift": 3.0}, _KwargsServerArgs)
+
+    assert launched == [{"model_path": "/m", "flow_shift": 3.0}]

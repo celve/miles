@@ -11,6 +11,7 @@ from safetensors.torch import save
 from miles.diffusion.rollout.data_source import DiffusionPromptDataSource
 from miles.diffusion.rollout.ocr import image_to_rgb_uint8, ocr_reward, ocr_target_text
 from miles.diffusion.rollout.response import parse_rollout_response
+from miles.diffusion.rollout.rollout_fn import build_sampling_params
 from miles.diffusion.rollout.step_strategy import sde_window
 from miles.ray.rollout.rollout_executor import RolloutExecutor
 from miles.utils.simple_checkpointer import save_simple_checkpoint
@@ -191,3 +192,32 @@ def test_a_label_key_carries_each_rows_label_to_its_samples(tmp_path):
     groups = DiffusionPromptDataSource(args).get_samples(2)
 
     assert [[s.label for s in g] for g in groups] == [["A", "A"], ["B", "B"]]
+
+
+def _request_args(**overrides):
+    values = dict(
+        diffusion_width=480,
+        diffusion_height=480,
+        diffusion_num_steps=10,
+        diffusion_guidance_scale=4.0,
+        diffusion_sde_type="sde",
+        diffusion_noise_level=0.9,
+        diffusion_quality="exact",
+        diffusion_negative_prompt=None,
+        diffusion_output_num_frames=1,
+        diffusion_guidance_scale_2=None,
+    )
+    return Namespace(**(values | overrides))
+
+
+def test_an_image_request_keeps_one_frame_and_one_guidance_scale():
+    params = build_sampling_params(_request_args())
+
+    assert params["num_frames"] == 1 and params["extra_sampling_params"] == {"quality": "exact"}
+
+
+def test_a_video_request_carries_its_frames_and_the_second_guidance_scale():
+    params = build_sampling_params(_request_args(diffusion_output_num_frames=5, diffusion_guidance_scale_2=3.0))
+
+    assert params["num_frames"] == 5
+    assert params["extra_sampling_params"] == {"quality": "exact", "guidance_scale_2": 3.0}

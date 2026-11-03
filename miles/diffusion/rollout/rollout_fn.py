@@ -130,9 +130,11 @@ def build_sampling_params(args: Namespace) -> dict[str, Any]:
         "rollout_video_dtype": "keep",
         "rollout_return_denoising_env": True,
         "rollout_return_dit_trajectory": True,
-        "num_frames": 1,
+        "num_frames": args.diffusion_output_num_frames,
         "extra_sampling_params": {"quality": args.diffusion_quality},
     }
+    if args.diffusion_guidance_scale_2 is not None:
+        params["extra_sampling_params"]["guidance_scale_2"] = args.diffusion_guidance_scale_2
     if args.diffusion_negative_prompt is not None:
         params["negative_prompt"] = args.diffusion_negative_prompt
     return params

@@ -22,6 +22,15 @@ class DiffusionConfig(BaseConfig):
     diffusion_negative_prompt: A[str | None, Arg(help="Negative prompt for classifier-free guidance.")] = None
     diffusion_height: A[int, Arg(help="Rollout image height.")] = 512
     diffusion_width: A[int, Arg(help="Rollout image width.")] = 512
+    diffusion_output_num_frames: A[int, Arg(help="Frames per rollout sample; 1 for an image, more for a video.")] = 1
+    diffusion_flow_shift: A[
+        float | None,
+        Arg(help="The engine scheduler's flow shift (server arg `flow_shift`); the model's own if unset."),
+    ] = None
+    diffusion_guidance_scale_2: A[
+        float | None,
+        Arg(help="Guidance scale of the component a two-expert family (Wan2.2) denoises low-noise steps with."),
+    ] = None
     diffusion_sde_type: A[
         str,
         Arg(choices=["sde", "ode"], help="Sampler the engine runs: `sde` for Flow-GRPO, `ode` for --loss-type nft."),

@@ -44,6 +44,14 @@ class TrainPipelineConfig(abc.ABC):
     components: tuple[str, ...] = ("transformer",)
     # fnmatch patterns of module names whose weights the forward reads in fp32, as the engine computes them.
     fp32_module_patterns: tuple[str, ...] = ()
+    # The component the engine guides with --diffusion-guidance-scale-2 instead of --diffusion-guidance-scale.
+    guidance_scale_2_component: str | None = None
+
+    def guidance_scale(self, component: str, args) -> float:
+        """The CFG scale the engine denoises this component's steps with."""
+        if component == self.guidance_scale_2_component:
+            return args.diffusion_guidance_scale_2
+        return args.diffusion_guidance_scale
 
     def component_for_timestep(self, timestep: float) -> str:
         """The component that denoises at this scheduler timestep."""
