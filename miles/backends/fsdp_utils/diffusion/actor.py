@@ -153,7 +153,11 @@ class DiffusionFSDPTrainRayActor(TorchNativeTrainRayActor):
     def _optimizer_step(self, rollout_id: int, micro_batches: list[list[dict]], *, first_microbatch_id: int) -> None:
         self.optimizer.zero_grad(set_to_none=True)
         state = get_parallel_state()
-        metrics = MetricBuffer(group=state.intra_dp.group, device=torch.device("cuda", torch.cuda.current_device()))
+        metrics = MetricBuffer(
+            group=state.intra_dp.group,
+            device=torch.device("cuda", torch.cuda.current_device()),
+            components=self.pipeline_config.components,
+        )
         num_pairs = sum(len(pairs) for pairs in micro_batches)
         for index, pairs in enumerate(micro_batches):
             loss_sum = self.loss_function(
