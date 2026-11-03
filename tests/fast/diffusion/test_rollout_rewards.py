@@ -96,3 +96,25 @@ async def test_a_custom_reward_replaces_ocr_without_receiving_the_ocr_pool(monke
 
     assert fn.reward_pool is None
     assert [sample.reward for sample in group] == [0.5] * 4
+
+
+class _FakePickScorePool:
+    def __init__(self, args):
+        self.calls = []
+
+    async def score(self, outputs, prompts):
+        self.calls.append(len(outputs))
+        return [0.25] * len(outputs)
+
+    def shutdown(self):
+        pass
+
+
+async def test_pickscore_scores_each_microgroup_in_one_batched_call(monkeypatch):
+    monkeypatch.setattr(rollout_fn, "PickScorePool", _FakePickScorePool)
+    fn, reward_calls = _rollout(monkeypatch, rm_type="pickscore")
+
+    group = await fn._generate_group(_group())
+
+    assert reward_calls == [2, 2] and fn.reward_pool.calls == [2, 2]
+    assert [sample.reward for sample in group] == [0.25] * 4

@@ -55,6 +55,20 @@ class DiffusionConfig(BaseConfig):
     ] = 8
     diffusion_dit_precision: A[str | None, Arg(help="Rollout DiT precision passed to the engine (fp16/bf16).")] = None
     diffusion_ocr_num_workers: A[int, Arg(help="CPU PaddleOCR reward actors.")] = 4
+    diffusion_pickscore_model_path: A[str | None, Arg(help="PickScore model (yuvalkirstain/PickScore_v1).")] = None
+    diffusion_pickscore_processor_path: A[
+        str | None, Arg(help="PickScore's CLIP processor (laion/CLIP-ViT-H-14-laion2B-s32B-b79K).")
+    ] = None
+    diffusion_pickscore_num_workers: A[int, Arg(help="PickScore reward actors.")] = 1
+    diffusion_pickscore_num_gpus_per_worker: A[
+        float, Arg(help="GPUs per PickScore actor, scheduled outside the train and rollout GPUs.")
+    ] = 1.0
+    diffusion_pickscore_batch_size: A[
+        int, Arg(help="Samples per PickScore actor call, and frames per PickScore forward.")
+    ] = 8
+    diffusion_pickscore_num_frames: A[
+        int | None, Arg(help="Evenly spaced frames PickScore scores per video, averaged; every frame when unset.")
+    ] = None
 
     # training
     diffusion_model_family: A[

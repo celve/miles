@@ -18,6 +18,7 @@ from miles.rollout.diffusion_rollout.response import parse_rollout_response
 from miles.rollout.inference_rollout.inference_rollout_train import get_worker_urls
 from miles.rollout.rm_hub import batched_async_rm
 from miles.rollout.rm_hub.ocr import OcrRewardPool
+from miles.rollout.rm_hub.pickscore import PickScorePool
 from miles.utils.diffusion.algorithms import get_algorithm
 from miles.utils.function_registry import load_function
 from miles.utils.types import Sample
@@ -38,10 +39,10 @@ class DiffusionRolloutFn(BaseRolloutFn):
         self.algorithm = get_algorithm(args.loss_type)
         self.sampling_params = build_sampling_params(args)
         self.semaphore: asyncio.Semaphore | None = None
-        # rm_hub runs --custom-rm-path ahead of --rm-type, so the OCR pool exists only when OCR actually scores.
-        uses_ocr = args.rm_type == "ocr" and args.custom_rm_path is None
-        self.reward_pool = OcrRewardPool(num_workers=args.diffusion_ocr_num_workers) if uses_ocr else None
-        self.reward_kwargs = {"ocr_pool": self.reward_pool} if self.reward_pool is not None else {}
+        # rm_hub runs --custom-rm-path ahead of --rm-type, so a built-in pool exists only when that reward scores.
+        self.reward_pool, self.reward_kwargs = (
+            (None, {}) if args.custom_rm_path is not None else _build_reward_pool(args)
+        )
         self.client = httpx.AsyncClient(limits=httpx.Limits(max_keepalive_connections=0), timeout=httpx.Timeout(None))
 
     async def __call__(self, input: RolloutFnInput) -> RolloutFnTrainOutput:
@@ -112,6 +113,17 @@ class DiffusionRolloutFn(BaseRolloutFn):
         await self.client.aclose()
         if self.reward_pool is not None:
             self.reward_pool.shutdown()
+
+
+def _build_reward_pool(args: Namespace) -> tuple[OcrRewardPool | PickScorePool | None, dict[str, Any]]:
+    """The built-in reward's scorers, owned by the rollout and handed to `rm_hub` through its kwargs."""
+    if args.rm_type == "ocr":
+        pool = OcrRewardPool(num_workers=args.diffusion_ocr_num_workers)
+        return pool, {"ocr_pool": pool}
+    if args.rm_type == "pickscore":
+        pool = PickScorePool(args)
+        return pool, {"pickscore_pool": pool}
+    return None, {}
 
 
 def build_sampling_params(args: Namespace) -> dict[str, Any]:

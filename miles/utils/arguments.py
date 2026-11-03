@@ -1110,8 +1110,8 @@ def miles_validate_args(args):
         raise ValueError("broadcast_packed requires Megatron non-colocated weight transfer")
     validate_dashboard_args(args)
     validate_miles_ext_kernels_args(args)
-    if args.rm_type == "ocr" and args.model_kind != "diffusion":
-        raise ValueError("--rm-type ocr scores generated images, so it needs --model-kind diffusion")
+    if args.rm_type in ("ocr", "pickscore") and args.model_kind != "diffusion":
+        raise ValueError(f"--rm-type {args.rm_type} scores generated images, so it needs --model-kind diffusion")
     if args.loss_type in ("flow_grpo", "nft") and args.model_kind != "diffusion":
         raise ValueError(f"--loss-type {args.loss_type} is a diffusion algorithm, so it needs --model-kind diffusion")
     if args.model_kind == "diffusion":

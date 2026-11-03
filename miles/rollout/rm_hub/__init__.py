@@ -115,6 +115,10 @@ async def async_rm(args, sample: Sample, **kwargs):
         from miles.rollout.rm_hub.ocr import ocr_rm
 
         return await ocr_rm(args, sample, **kwargs)
+    elif rm_type == "pickscore":
+        from miles.rollout.rm_hub.pickscore import pickscore_rm
+
+        return (await pickscore_rm(args, [sample], **kwargs))[0]
     elif rm_type == "random":
         return random.randint(0, 1)
     elif rm_type == "deterministic_random":
@@ -153,6 +157,11 @@ async def batched_async_rm(
         rm_function = load_function(args.custom_rm_path)
         fn_args = compute_custom_function_config(args, args.custom_rm_path)
         return await rm_function(fn_args, samples, **kwargs)
+    if args.rm_type == "pickscore":
+        # Local import, as for ocr; PickScore batches across samples, which its numerics depend on.
+        from miles.rollout.rm_hub.pickscore import pickscore_rm
+
+        return await pickscore_rm(args, samples, **kwargs)
     tasks = [async_rm(args, sample, **kwargs) for sample in samples]
     rewards = await asyncio.gather(*tasks)
     return rewards
