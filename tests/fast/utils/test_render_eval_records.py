@@ -14,7 +14,7 @@ def _png(color) -> bytes:
     return buffer.getvalue()
 
 
-def _record(root, task, index, *, reward, steps):
+def _record(root, task, index, *, reward, steps, status="Submitted"):
     directory = start_episode(episode_dir(root, task, index), stack="harbor", task_id=task, sample_index=index)
     writer = EpisodeWriter(directory)
     writer.set_instruction(f"Solve {task} <now>")
@@ -22,7 +22,7 @@ def _record(root, task, index, *, reward, steps):
         writer.add_step(
             output=f"{task} reply {step}", screenshot=_png((step * 40, 0, 0)), action={"type": "click", "x": step}
         )
-    finish_episode(directory, reward=reward, status="Submitted")
+    finish_episode(directory, reward=reward, status=status)
 
 
 def _recordings(tmp_path):
@@ -110,3 +110,35 @@ def test_no_shared_task_is_an_error(tmp_path):
     )
 
     assert result.exit_code != 0
+
+
+def test_an_unscored_base_is_not_a_failure_contrast_can_pick(tmp_path):
+    base, checkpoint = tmp_path / "base" / "eval_0", tmp_path / "ckpt" / "eval_0"
+    _record(base, "lost", 0, reward=None, steps=0, status="SandboxLost")
+    _record(checkpoint, "lost", 0, reward=1.0, steps=1)
+    _record(base, "learned", 0, reward=0.0, steps=1)
+    _record(base, "learned", 1, reward=None, steps=0, status="SandboxLost")
+    _record(checkpoint, "learned", 0, reward=1.0, steps=1)
+    out = tmp_path / "page.html"
+
+    _render("--base", base, "--checkpoint", checkpoint, "--out", out, "--select", "contrast", "--pair", "contrast")
+
+    page = out.read_text()
+    assert "id='lost'" not in page and "id='learned'" in page
+    assert "<td>0/1 (1 unscored)</td><td>1/1</td>" in page
+    assert "badge fail" in page and "badge unscored" not in page
+
+
+def test_a_root_holding_several_eval_points_is_refused(tmp_path):
+    run = tmp_path / "run"
+    _record(run / "eval_0", "t", 0, reward=0.0, steps=1)
+    _record(run / "eval_49", "t", 0, reward=1.0, steps=1)
+    app = typer.Typer()
+    app.command()(main)
+
+    result = CliRunner().invoke(
+        app, ["--base", str(run), "--checkpoint", str(run / "eval_49"), "--out", str(tmp_path / "p.html")]
+    )
+
+    assert result.exit_code != 0
+    assert "several eval points" in result.output

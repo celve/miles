@@ -1,7 +1,9 @@
 """Render two ``--eval-record-dir`` recordings of the same tasks, base and checkpoint, side by side.
 
 Each root is a recording of one eval point (``<eval_record_dir>/eval_<rollout_id>``, or a directory
-above it); episodes pair by task and by their rank among that task's samples. The page is one
+above it holding only one); episodes pair by task and by their rank among that task's samples. An
+episode without a reward (discarded, or never finished) is shown as unscored and left out of pass
+rates and of ``--select contrast``. The page is one
 self-contained HTML file: per task, the instruction, both sides' pass rates, and every step's
 screenshot, model output and action in two aligned columns.
 
@@ -13,9 +15,9 @@ import base64
 import html
 import io
 import json
+import re
 from collections import defaultdict
 from dataclasses import dataclass
-from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
@@ -23,6 +25,11 @@ import typer
 from PIL import Image, ImageDraw
 
 from miles.utils.eval_record import RecordedEpisode, RecordedStep, iter_episodes
+
+try:
+    from enum import StrEnum
+except ImportError:
+    from backports.strenum import StrEnum
 
 
 class Select(StrEnum):
@@ -42,21 +49,48 @@ class TaskPair:
     checkpoint: list[RecordedEpisode]
 
 
+_EVAL_POINT = re.compile(r"eval_\d+")
+
+
+def _eval_point(episode: RecordedEpisode) -> Path | None:
+    return next((p for p in [episode.directory, *episode.directory.parents] if _EVAL_POINT.fullmatch(p.name)), None)
+
+
 def load_by_task(root: Path) -> dict[str, list[RecordedEpisode]]:
+    """Episodes by task; a root holding several eval points is refused, since each point is different weights."""
+    episodes = list(iter_episodes(root))
+    if len(points := {_eval_point(episode) for episode in episodes}) > 1:
+        names = ", ".join(sorted(str(point) for point in points))
+        raise typer.BadParameter(f"{root} holds several eval points ({names}); pass one of them")
     by_task: dict[str, list[RecordedEpisode]] = defaultdict(list)
-    for episode in iter_episodes(root):
+    for episode in episodes:
         by_task[episode.task_id].append(episode)
-    for episodes in by_task.values():
-        episodes.sort(key=lambda episode: episode.sample_index)
+    for task_episodes in by_task.values():
+        task_episodes.sort(key=lambda episode: episode.sample_index)
     return dict(by_task)
+
+
+def scored(episodes: list[RecordedEpisode]) -> list[RecordedEpisode]:
+    return [episode for episode in episodes if episode.reward is not None]
 
 
 def passed(episode: RecordedEpisode, threshold: float) -> bool:
     return episode.reward is not None and episode.reward >= threshold
 
 
-def pass_rate(episodes: list[RecordedEpisode], threshold: float) -> float:
-    return sum(passed(episode, threshold) for episode in episodes) / len(episodes) if episodes else 0.0
+def pass_rate(episodes: list[RecordedEpisode], threshold: float) -> float | None:
+    """Over the scored episodes only; None when none was scored."""
+    if not (counted := scored(episodes)):
+        return None
+    return sum(passed(episode, threshold) for episode in counted) / len(counted)
+
+
+def pass_count(episodes: list[RecordedEpisode], threshold: float) -> str:
+    counted = scored(episodes)
+    unscored = len(episodes) - len(counted)
+    return f"{sum(passed(e, threshold) for e in counted)}/{len(counted)}" + (
+        f" ({unscored} unscored)" if unscored else ""
+    )
 
 
 def select_tasks(
@@ -75,23 +109,30 @@ def select_tasks(
         shared = [task for task in shared if task in set(tasks)]
     pairs = [TaskPair(task, base[task], checkpoint[task]) for task in shared]
     if select is Select.contrast:
+        rates = {
+            pair.task_id: (pass_rate(pair.base, threshold), pass_rate(pair.checkpoint, threshold)) for pair in pairs
+        }
         pairs = [
             pair
             for pair in pairs
-            if pass_rate(pair.base, threshold) <= max_base_pass
-            and pass_rate(pair.checkpoint, threshold) >= min_checkpoint_pass
+            if None not in rates[pair.task_id]
+            and rates[pair.task_id][0] <= max_base_pass
+            and rates[pair.task_id][1] >= min_checkpoint_pass
         ]
-        pairs.sort(key=lambda pair: pass_rate(pair.base, threshold) - pass_rate(pair.checkpoint, threshold))
+        pairs.sort(key=lambda pair: rates[pair.task_id][0] - rates[pair.task_id][1])
     return pairs
 
 
 def pick_episodes(
     pair: TaskPair, *, mode: Pair, rank: int, threshold: float
 ) -> tuple[RecordedEpisode, RecordedEpisode]:
-    """``same`` shows the rank-th sample of each side; ``contrast`` a failed base and a passed checkpoint where they exist."""
+    """``same`` shows the rank-th sample of each side; ``contrast`` a scored failed base and a passed checkpoint."""
     if mode is Pair.contrast:
-        base = next((episode for episode in pair.base if not passed(episode, threshold)), pair.base[0])
-        checkpoint = next((episode for episode in pair.checkpoint if passed(episode, threshold)), pair.checkpoint[0])
+        base_scored, checkpoint_scored = scored(pair.base) or pair.base, scored(pair.checkpoint) or pair.checkpoint
+        base = next((episode for episode in base_scored if not passed(episode, threshold)), base_scored[0])
+        checkpoint = next(
+            (episode for episode in checkpoint_scored if passed(episode, threshold)), checkpoint_scored[0]
+        )
         return base, checkpoint
     return pair.base[min(rank, len(pair.base) - 1)], pair.checkpoint[min(rank, len(pair.checkpoint) - 1)]
 
@@ -125,13 +166,12 @@ def _step_cell(step: RecordedStep | None, width: int) -> str:
 
 
 def _side_header(label: str, episode: RecordedEpisode, episodes: list[RecordedEpisode], threshold: float) -> str:
-    verdict = "pass" if passed(episode, threshold) else "fail"
-    wins = sum(passed(other, threshold) for other in episodes)
+    verdict = "unscored" if episode.reward is None else "pass" if passed(episode, threshold) else "fail"
     return (
         f"<th><span class='label'>{html.escape(label)}</span> "
         f"<span class='badge {verdict}'>{verdict} · reward {episode.reward}</span>"
         f"<div class='sub'>sample {episode.sample_index} · {len(episode.steps)} steps · {html.escape(episode.status)}"
-        f" · task pass {wins}/{len(episodes)}</div></th>"
+        f" · task pass {pass_count(episodes, threshold)}</div></th>"
     )
 
 
@@ -185,7 +225,7 @@ td.empty {{ background: var(--panel); }}
 .error {{ color: var(--fail); font-size: 12px; }}
 .label {{ font-weight: 600; }} .sub {{ color: var(--muted); font-size: 12px; font-weight: normal; }}
 .badge {{ font-size: 12px; padding: 1px 6px; border-radius: 4px; color: #fff; }}
-.badge.pass {{ background: var(--pass); }} .badge.fail {{ background: var(--fail); }}
+.badge.pass {{ background: var(--pass); }} .badge.fail {{ background: var(--fail); }} .badge.unscored {{ background: var(--muted); }}
 pre {{ white-space: pre-wrap; word-break: break-word; font-size: 12px; }}
 a {{ color: inherit; }}
 </style></head><body>
@@ -267,8 +307,8 @@ def main(
         summary.append(
             (
                 task_pair.task_id,
-                f"{sum(passed(e, pass_threshold) for e in task_pair.base)}/{len(task_pair.base)}",
-                f"{sum(passed(e, pass_threshold) for e in task_pair.checkpoint)}/{len(task_pair.checkpoint)}",
+                pass_count(task_pair.base, pass_threshold),
+                pass_count(task_pair.checkpoint, pass_threshold),
             )
         )
         if gif_dir is not None:
