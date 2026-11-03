@@ -330,6 +330,31 @@ def test_the_second_guidance_scale_is_required_exactly_by_a_family_that_guides_w
         validate_diffusion_args(_supported(diffusion_guidance_scale_2=3.0))
 
 
+_PICKSCORE = dict(
+    rm_type="pickscore",
+    diffusion_pickscore_model_path="/models/PickScore_v1",
+    diffusion_pickscore_processor_path="/models/CLIP-ViT-H-14",
+)
+
+
+def test_the_pickscore_reward_needs_its_model_and_processor():
+    validate_diffusion_args(_supported(**_PICKSCORE))
+    with pytest.raises(ValueError, match="pickscore-model-path"):
+        validate_diffusion_args(_supported(**(_PICKSCORE | dict(diffusion_pickscore_model_path=None))))
+
+
+def test_a_pickscore_flag_without_the_pickscore_reward_is_rejected():
+    with pytest.raises(ValueError, match="--diffusion-pickscore-num-frames"):
+        validate_diffusion_args(_supported(diffusion_pickscore_num_frames=3))
+
+
+def test_a_text_run_rejects_the_pickscore_reward():
+    from tests.fast.fixtures.args_fixtures import parse_fsdp_test_config
+
+    with pytest.raises(ValueError, match="--rm-type pickscore"):
+        parse_fsdp_test_config("--rm-type", "pickscore")
+
+
 def test_the_ocr_reward_is_rejected_on_video():
     with pytest.raises(ValueError, match="only the first frame"):
         validate_diffusion_args(_supported(diffusion_output_num_frames=5))

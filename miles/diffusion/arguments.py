@@ -43,8 +43,13 @@ _UNSUPPORTED = [
     ("fully async or partial rollout", lambda a: a.fully_async or a.partial_rollout),
     ("dynamic sampling filters", lambda a: a.dynamic_sampling_filter_path is not None),
     (
-        "a reward other than --rm-type ocr or a --custom-rm-path",
-        lambda a: a.custom_rm_path is None and a.rm_type != "ocr",
+        "a reward other than --rm-type ocr, --rm-type pickscore or a --custom-rm-path",
+        lambda a: a.custom_rm_path is None and a.rm_type not in ("ocr", "pickscore"),
+    ),
+    (
+        "--rm-type pickscore without --diffusion-pickscore-model-path and --diffusion-pickscore-processor-path",
+        lambda a: a.rm_type == "pickscore"
+        and not (a.diffusion_pickscore_model_path and a.diffusion_pickscore_processor_path),
     ),
     (
         "the OCR reward on video (--diffusion-output-num-frames > 1); it reads only the first frame",
@@ -143,6 +148,7 @@ _UNREAD_DEFAULTS = {
     },
 }
 _PRECISION_FLAGS = {"--fp16", "--bf16", "--keep-fp32-master"}
+_PICKSCORE_FLAGS = sorted(name for name in DiffusionConfig.model_fields if name.startswith("diffusion_pickscore_"))
 
 
 def _default(name: str):
@@ -169,6 +175,12 @@ def validate_diffusion_args(args) -> None:
             f"--model-kind diffusion with --loss-type {args.loss_type} never reads: " + ", ".join(unread) + hint
         )
     _derive_hooks(args)
+    if args.rm_type != "pickscore":
+        if unread_pickscore := [flag for flag in _PICKSCORE_FLAGS if vars(args)[flag] != _default(flag)]:
+            raise ValueError(
+                "without --rm-type pickscore no PickScore pool is built, so these are never read: "
+                + ", ".join(f"--{flag.replace('_', '-')}" for flag in unread_pickscore)
+            )
     if args.diffusion_lora_rank <= 0 or args.diffusion_num_sde_steps <= 0:
         raise ValueError("--diffusion-lora-rank and --diffusion-num-sde-steps must be positive")
 
