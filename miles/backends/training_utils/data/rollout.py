@@ -35,6 +35,14 @@ def _rollout_logprob_dtype(args: Namespace) -> torch.dtype:
     return torch.float32
 
 
+def _media_dtype(args: Namespace) -> torch.dtype | None:
+    if args.backend.fp16:
+        return torch.float16
+    if args.backend.bf16:
+        return torch.bfloat16
+    return None
+
+
 def get_rollout_data(
     args: Namespace,
     rollout_data_ref: Box,
@@ -78,6 +86,7 @@ def get_rollout_data(
             rollout_data.pop("multimodal_inputs"),
             rollout_data["tokens"],
             device=current_platform.current_device(),
+            dtype=_media_dtype(args),
         )
     elif "multimodal_train_inputs" in rollout_data:
         # Move multimodal training tensors to the device in advance

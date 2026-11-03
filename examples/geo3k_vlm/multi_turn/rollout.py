@@ -14,7 +14,7 @@ from miles.rollout.base_types import GenerateFnInput, GenerateFnOutput
 from miles.rollout.generate_utils.generate_endpoint_utils import adopt_expanded_prompt_ids, token_space_request_fields
 from miles.utils.args.schema import A, Arg, BaseConfig
 from miles.utils.http_utils import post
-from miles.utils.media_refs import collect_media_refs, load_media_for_processor
+from miles.utils.media_refs import collect_media_refs, load_media_for_processor, run_media_dir
 from miles.utils.types import Sample
 
 DEFAULT_ENV_MODULE = "examples.geo3k_vlm.multi_turn.env_geo3k"
@@ -227,7 +227,7 @@ def _process_env_step(env: BaseInteractionEnv, response_text: str, tokenizer, pr
             sample_metadata,
             args.apply_chat_template,
             args.apply_chat_template_kwargs,
-            args.shared_media_dir,
+            run_media_dir(args),
         )
     )
 

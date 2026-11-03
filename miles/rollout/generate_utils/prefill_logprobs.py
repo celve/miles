@@ -49,6 +49,8 @@ def _build_prefill_scoring_payload(
         payload["lora_path"] = lora_path
 
     payload.update(rollout_media_payload(sample.multimodal_inputs))
+    if has_media(sample.multimodal_inputs) and args.multimodal_token_space_processing:
+        payload["mm_token_expansion_start_len"] = len(sample.tokens)
 
     return payload
 

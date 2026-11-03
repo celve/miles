@@ -22,6 +22,8 @@ from miles.backends.fsdp_utils.arguments import build_fsdp_parser
 from miles.backends.megatron_utils.megatron_config import MegatronConfig, get_megatron_arg_parser
 from miles.backends.sglang_utils.arguments import add_sglang_arguments, collect_eval_sglang_overrides
 from miles.backends.sglang_utils.arguments import validate_args as validate_sglang_args
+from miles.backends.sglang_utils.sglang_api_client import WorkerType
+from miles.backends.sglang_utils.sglang_config import ModelConfig, ServerGroupConfig, SglangConfig
 from miles.backends.torchtitan_utils.arguments import build_torchtitan_parser
 from miles.utils.args.configs.router import RouterConfig
 from miles.utils.args.trainer_utils import compute_trainer_ckpt_load_config
@@ -3998,7 +4000,28 @@ class TestMultimodalTokenSpaceProcessingArgs:
         "rl_on_policy_target": None,
         "true_on_policy_contract": None,
         "decrypted_config_file": None,
+        "model_path": "/ckpt",
+        "tokenizer_path": None,
+        "tokenizer_mode": "auto",
+        "tokenizer_backend": "huggingface",
+        "revision": None,
+        "model_config_parser": "auto",
+        "json_model_override_args": "{}",
+        "image_processor_backend": "auto",
+        "disable_fast_image_processor": False,
+        "mm_process_config": None,
     }
+
+    @staticmethod
+    def _args(**overrides):
+        return SimpleNamespace(
+            **{
+                "multimodal_token_space_processing": True,
+                "rollout_external_engine_addrs": None,
+                "custom_inference_engine_provider_path": None,
+                **overrides,
+            }
+        )
 
     @pytest.mark.parametrize(
         ("engine_overrides", "external_engines", "match"),
@@ -4011,13 +4034,34 @@ class TestMultimodalTokenSpaceProcessingArgs:
         ],
     )
     def test_settings_the_trainer_cannot_follow_are_rejected(self, engine_overrides, external_engines, match):
-        args = SimpleNamespace(multimodal_token_space_processing=True, rollout_external_engine_addrs=external_engines)
+        args = self._args(rollout_external_engine_addrs=external_engines)
         sglang = make_sglang_config(**{**self._SUPPORTED, **engine_overrides})
 
         with pytest.raises(ValueError, match=match):
             _check_multimodal_token_space_processing_args(args, sglang=sglang)
 
     def test_supported_settings_pass(self):
-        args = SimpleNamespace(multimodal_token_space_processing=True, rollout_external_engine_addrs=None)
+        _check_multimodal_token_space_processing_args(self._args(), sglang=make_sglang_config(**self._SUPPORTED))
 
-        _check_multimodal_token_space_processing_args(args, sglang=make_sglang_config(**self._SUPPORTED))
+    def test_a_custom_inference_engine_provider_is_rejected(self):
+        args = self._args(custom_inference_engine_provider_path="my.provider.fn")
+
+        with pytest.raises(ValueError, match="external engines"):
+            _check_multimodal_token_space_processing_args(args, sglang=make_sglang_config(**self._SUPPORTED))
+
+    @pytest.mark.parametrize(
+        "group_override",
+        [{"mm_process_config": {"image": {"do_rescale": False}}}, {"image_processor_backend": "pil"}],
+    )
+    def test_engine_groups_that_disagree_on_the_processor_are_rejected(self, group_override):
+        groups = [
+            ServerGroupConfig(worker_type=WorkerType.REGULAR, num_gpus_per_engine=1, needs_offload=False),
+            ServerGroupConfig(
+                worker_type=WorkerType.REGULAR, num_gpus_per_engine=1, needs_offload=False, overrides=group_override
+            ),
+        ]
+        model = ModelConfig(name="default", model_path=None, server_groups=groups, update_weights=True)
+        sglang = SglangConfig(models=[model], base_args=self._SUPPORTED)
+
+        with pytest.raises(ValueError, match=f"same processor settings: Field '{next(iter(group_override))}'"):
+            _check_multimodal_token_space_processing_args(self._args(), sglang=sglang)

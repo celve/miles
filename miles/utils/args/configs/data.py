@@ -99,7 +99,12 @@ class DataConfig(BaseConfig):
     ] = False
     shared_media_dir: A[
         str | None,
-        Arg(help="Directory shared with every SGLang engine; media that is not a file path yet is written here."),
+        Arg(
+            help=(
+                "Directory shared with every SGLang engine; media that is not a file path yet is written under "
+                "<dir>/<run_uuid>, which is removed when the run ends."
+            )
+        ),
     ] = None
     metadata_key: A[str, Arg(help="JSON dataset key")] = "metadata"
     tool_key: A[
