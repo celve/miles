@@ -355,6 +355,29 @@ def test_a_text_run_rejects_the_pickscore_reward():
         parse_fsdp_test_config("--rm-type", "pickscore")
 
 
+def _wan(**overrides):
+    recipe = dict(
+        hf_checkpoint="/models/Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+        diffusion_guidance_scale_2=3.0,
+        diffusion_output_num_frames=5,
+        diffusion_flow_shift=3.0,
+        diffusion_step_strategy_path="miles.diffusion.rollout.step_strategy.epoch_global_random_choice",
+        diffusion_sde_candidate_steps="1,2,3",
+        diffusion_num_sde_steps=1,
+    )
+    return _supported(**(_PICKSCORE | recipe | overrides))
+
+
+def test_the_wan22_recipe_passes_and_trains_both_experts():
+    args = _wan()
+
+    validate_diffusion_args(args)
+
+    assert args.diffusion_model_family == "wan2_2" and "attn2.to_q" in args.diffusion_lora_target_modules
+    with pytest.raises(ValueError, match="guides transformer_2"):
+        validate_diffusion_args(_wan(diffusion_guidance_scale_2=None))
+
+
 def test_the_ocr_reward_is_rejected_on_video():
     with pytest.raises(ValueError, match="only the first frame"):
         validate_diffusion_args(_supported(diffusion_output_num_frames=5))

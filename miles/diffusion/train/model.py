@@ -50,6 +50,7 @@ def load_fsdp_dit(
     )
     model = fsdp2_load_full_state_dict(model, full_state, cpu_offload=cpu_offload)
     del full_state
+    config.postprocess_model_after_materialize(model)
     # FSDP fixes each group's gradient dtype at lazy init from the params requiring grad; run it now,
     # before a first forward with the adapter disabled would see none.
     model._get_fsdp_state()._lazy_init()
