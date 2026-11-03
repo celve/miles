@@ -11,6 +11,14 @@ import torch
 
 from miles.utils.types import Sample
 
+# The step-selection flags each strategy here reads; startup rejects the others under it.
+FLAGS_READ = {
+    "sde_window": {"diffusion_num_sde_steps", "diffusion_sde_window_range"},
+    "epoch_global_random_choice": {"diffusion_num_sde_steps", "diffusion_sde_candidate_steps"},
+    "ode_and_return_last": set(),
+}
+STEP_FLAGS = ("diffusion_num_sde_steps", "diffusion_sde_window_range", "diffusion_sde_candidate_steps")
+
 
 def sde_window(args: Namespace, sample: Sample, num_steps: int, seed: int) -> tuple[list[int], list[int]]:
     """flow_grpo's random contiguous SDE window; the engine returns every latent the window's steps touch."""
