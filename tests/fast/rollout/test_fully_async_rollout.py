@@ -178,7 +178,7 @@ async def test_eval_without_fleet_pauses_producer(monkeypatch):
     eval_release = asyncio.Event()
     eval_results = {"fake_ds": {"rewards": [1.0], "truncated": [False], "samples": []}}
 
-    async def fake_run_eval_datasets(state, cache, *, kv_cache_namespace=None):
+    async def fake_run_eval_datasets(state, cache, *, rollout_id, kv_cache_namespace=None):
         assert state is fn.state  # shared-engine eval uses the train state
         eval_started.set()
         await eval_release.wait()
@@ -220,7 +220,7 @@ async def test_eval_runs_on_dedicated_fleet(monkeypatch):
     eval_results = {"fake_ds": {"rewards": [1.0], "truncated": [False], "samples": []}}
     seen_states = []
 
-    async def fake_run_eval_datasets(state, cache, *, kv_cache_namespace=None):
+    async def fake_run_eval_datasets(state, cache, *, rollout_id, kv_cache_namespace=None):
         seen_states.append(state)
         return eval_results
 
@@ -2109,7 +2109,7 @@ class TestLifecycle:
         source = FakeDataSource()
         fn = make_fn(monkeypatch, make_args(rollout_batch_size=1), source)
 
-        async def fake_run_eval_datasets(state, cache, *, kv_cache_namespace=None):
+        async def fake_run_eval_datasets(state, cache, *, rollout_id, kv_cache_namespace=None):
             return {}
 
         monkeypatch.setattr(fully_async, "run_eval_datasets", fake_run_eval_datasets)
@@ -2123,7 +2123,7 @@ class TestLifecycle:
         """A failed eval that left the producer paused would stall every later training step."""
         fn = make_fn(monkeypatch, make_args(rollout_batch_size=1), FakeDataSource())
 
-        async def failing_run_eval_datasets(state, cache, *, kv_cache_namespace=None):
+        async def failing_run_eval_datasets(state, cache, *, rollout_id, kv_cache_namespace=None):
             raise RuntimeError("eval exploded")
 
         monkeypatch.setattr(fully_async, "run_eval_datasets", failing_run_eval_datasets)
@@ -2138,7 +2138,7 @@ class TestLifecycle:
         fn = make_fn(monkeypatch, make_args(rollout_batch_size=1), FakeDataSource())
         caches = []
 
-        async def fake_run_eval_datasets(state, cache, *, kv_cache_namespace=None):
+        async def fake_run_eval_datasets(state, cache, *, rollout_id, kv_cache_namespace=None):
             caches.append(cache)
             return {}
 
@@ -2156,7 +2156,7 @@ class TestLifecycle:
         fn = make_fn(monkeypatch, args, FakeDataSource())
         resumed_during_eval = []
 
-        async def fake_run_eval_datasets(state, cache, *, kv_cache_namespace=None):
+        async def fake_run_eval_datasets(state, cache, *, rollout_id, kv_cache_namespace=None):
             resumed_during_eval.append(fn._producer_resumed.is_set())
             return {}
 

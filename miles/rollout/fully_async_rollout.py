@@ -128,6 +128,7 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
             results = await run_eval_datasets(
                 input.generate_state,
                 self._eval_prompt_dataset_cache,
+                rollout_id=input.rollout_id,
                 kv_cache_namespace=compute_kv_cache_namespace(self.args, input),
             )
             return RolloutFnEvalOutput(data=results)
@@ -138,6 +139,7 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
             results = await run_eval_datasets(
                 self.state,
                 self._eval_prompt_dataset_cache,
+                rollout_id=input.rollout_id,
                 kv_cache_namespace=compute_kv_cache_namespace(self.args, input),
             )
         finally:

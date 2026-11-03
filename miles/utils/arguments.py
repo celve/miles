@@ -1685,6 +1685,18 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--eval-record-dir",
+                type=str,
+                default=None,
+                help=(
+                    "Record every evaluated episode under `{eval_record_dir}/eval_{rollout_id}/`: its instruction, "
+                    "each step's screenshot, model output and parsed action, and its reward (miles.utils.eval_record). "
+                    "Miles's eval loop hands each eval sample its directory in metadata['eval_record_dir']; the "
+                    "Harbor computer-1 binding and examples/experimental/cua_lite/record.py write the episodes, and "
+                    "scripts/tools/render_eval_records.py renders two recordings side by side."
+                ),
+            )
+            parser.add_argument(
                 "--eval-keep-snapshots",
                 type=int,
                 default=2,
@@ -3850,6 +3862,11 @@ def miles_validate_args(args):
             f"--eval-sglang-* configures the dedicated eval fleet, which needs --eval-num-gpus > 0. "
             f"Got {sorted(overrides)} with --eval-num-gpus 0."
         )
+
+    # A sandbox worker's files go with its sandbox when the call ends.
+    assert not (
+        args.eval_record_dir is not None and getattr(args, "custom_agent_function_mode", None) == "sandbox"
+    ), "--eval-record-dir needs the agent function's files to outlive the call; use subproc, inline or worker mode."
 
     if args.save_interval is not None:
         assert args.save is not None, "'--save' is required when save_interval is set."

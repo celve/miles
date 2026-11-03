@@ -2371,6 +2371,20 @@ class TestSnapshotEvalValidation:
         with pytest.raises(AssertionError, match="--eval-num-gpus"):
             miles_validate_args(args)
 
+    def test_eval_record_dir_is_off_by_default(self):
+        assert self._parse([]).eval_record_dir is None
+
+    def test_eval_record_dir_refuses_sandbox_agent_workers(self, tmp_path):
+        """A sandbox worker's records go with its sandbox when the call ends."""
+        args = self._parse(["--eval-record-dir", str(tmp_path)])
+        args.custom_agent_function_mode = "sandbox"
+        with pytest.raises(AssertionError, match="--eval-record-dir"):
+            miles_validate_args(args)
+
+        args = self._parse(["--eval-record-dir", str(tmp_path)])
+        args.custom_agent_function_mode = "worker"
+        miles_validate_args(args)
+
     def test_train_only_leaves_no_rollout_gpus_even_under_colocate(self):
         """The colocate normalization puts the actor's GPU count on rollout_num_gpus, which
         would claim rollout engines for a job that starts none."""
@@ -3150,9 +3164,7 @@ def test_skip_actor_forward_only_flag_is_parsed(extra_args, expected):
 def test_skip_actor_forward_only_is_gated_during_miles_validation():
     parser = argparse.ArgumentParser()
     get_miles_extra_args_provider()(parser)
-    args = parser.parse_args(
-        ["--skip-actor-forward-only", "--num-rollout", "1"] + REQUIRED_ARGS
-    )
+    args = parser.parse_args(["--skip-actor-forward-only", "--num-rollout", "1"] + REQUIRED_ARGS)
     vars(args).update(
         hidden_dropout=0.1,
         attention_dropout=0.0,
