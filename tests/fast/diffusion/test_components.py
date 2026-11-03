@@ -12,6 +12,7 @@ from miles.backends.fsdp_utils.diffusion.pipeline_config import SD3TrainPipeline
 class _TwoExpertConfig(SD3TrainPipelineConfig):
     model_family = "two_expert"
     components = ("transformer", "transformer_2")
+    guidance_scale_2_component = "transformer_2"
 
     def component_for_timestep(self, timestep: float) -> str:
         return "transformer" if timestep >= 875 else "transformer_2"
@@ -30,14 +31,19 @@ def test_a_micro_batch_runs_the_component_of_its_timesteps():
         config.component_for_timesteps(torch.tensor([900.0, 500.0]))
 
 
-def test_the_trainer_forwards_the_requested_component():
+@pytest.mark.parametrize("component,model,scale", [("transformer", "high", 4.0), ("transformer_2", "low", 3.0)])
+def test_the_trainer_forwards_the_component_with_the_scale_the_engine_guided_it_with(
+    monkeypatch, component, model, scale
+):
     seen = []
+    config = _TwoExpertConfig()
+    monkeypatch.setattr(config, "compute_noise_pred", lambda **kwargs: seen.append(kwargs))
     actor = object.__new__(diffusion_actor.DiffusionFSDPTrainRayActor)
     actor.forward_dtype = torch.float32
-    actor.args = SimpleNamespace(diffusion_guidance_scale=4.0)
+    actor.args = SimpleNamespace(diffusion_guidance_scale=4.0, diffusion_guidance_scale_2=3.0)
     actor.models = {"transformer": "high", "transformer_2": "low"}
-    actor.pipeline_config = SimpleNamespace(compute_noise_pred=lambda **kwargs: seen.append(kwargs["model"]))
+    actor.pipeline_config = config
 
-    actor.noise_pred("transformer_2", None, None, {}, None)
+    actor.noise_pred(component, None, None, {}, None)
 
-    assert seen == ["low"]
+    assert [(kwargs["model"], kwargs["guidance_scale"]) for kwargs in seen] == [(model, scale)]

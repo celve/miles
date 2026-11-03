@@ -48,6 +48,10 @@ _UNSUPPORTED = [
         lambda a: a.custom_rm_path is None and a.rm_type != "ocr",
     ),
     (
+        "the OCR reward on video (--diffusion-output-num-frames > 1); it reads only the first frame",
+        lambda a: a.rm_type == "ocr" and a.diffusion_output_num_frames != 1,
+    ),
+    (
         "the output store or the Mooncake object store",
         lambda a: a.use_output_store or str(a.object_store_backend).lower().endswith("mooncake"),
     ),
@@ -182,6 +186,13 @@ def validate_diffusion_args(args) -> None:
     config = get_train_pipeline_config(args.diffusion_model_family)
     if args.diffusion_lora_target_modules is None:
         args.diffusion_lora_target_modules = config.lora_target_modules
+    if (args.diffusion_guidance_scale_2 is None) != (config.guidance_scale_2_component is None):
+        raise ValueError(
+            f"family {config.model_family} guides {config.guidance_scale_2_component} with "
+            "--diffusion-guidance-scale-2, which the engine otherwise replaces by its own default, so pass it"
+            if config.guidance_scale_2_component
+            else f"family {config.model_family} has no second guidance scale; drop --diffusion-guidance-scale-2"
+        )
     if algorithm.uses_ema and len(config.components) > 1:
         raise ValueError(
             f"--loss-type {args.loss_type} keeps an EMA of one adapter, but family {config.model_family} trains "

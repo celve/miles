@@ -191,7 +191,7 @@ class DiffusionFSDPTrainRayActor(TorchNativeTrainRayActor):
                 timesteps=timesteps,
                 pos_cond=pos_cond,
                 neg_cond=neg_cond,
-                guidance_scale=self.args.diffusion_guidance_scale,
+                guidance_scale=self.pipeline_config.guidance_scale(component, self.args),
             )
 
     @torch.no_grad()

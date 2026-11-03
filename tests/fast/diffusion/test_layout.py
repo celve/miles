@@ -40,6 +40,7 @@ class _EngineArgs:
     diffusion_lora_target_modules = ["attn.to_q"]
     diffusion_dit_precision = None
     diffusion_forward_dtype = "bf16"
+    diffusion_flow_shift = None
 
 
 def _recipe_prepare_imports():
