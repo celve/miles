@@ -33,7 +33,7 @@ _BASE = textwrap.dedent("""
         async def sample(self, env, max_steps=10_000, hooks=None):
             hooks = hooks or []
             result = SimpleNamespace(
-                episode_return=1.0 if env.task == "win" else 0.0,
+                episode_return=1.0 if env.task.endswith("@win") else 0.0,
                 terminated=True,
                 truncated=False,
                 lite_sample=SimpleNamespace(messages=[f"do {env.task}"]),
