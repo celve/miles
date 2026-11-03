@@ -17,6 +17,7 @@ from megatron.core.transformer.spec_utils import import_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.training.arguments import core_transformer_config_from_args
 
+from miles.backends.megatron_utils.te_fa4_window import install_fa4_causal_window_patch
 from miles.backends.training_utils.model_companion import ModelCompanionInstallationUtils
 from miles.utils.audit_utils.witness.module import install_witness
 from miles.utils.function_registry import load_function
@@ -103,9 +104,9 @@ def _apply_bridge_runtime_config(provider, args: argparse.Namespace) -> None:
         provider.moe_aux_loss_coeff = args.moe_aux_loss_coeff
 
     if getattr(args, "freeze_vision_model", False):
-        assert hasattr(provider, "freeze_vision_model"), (
-            f"--freeze-vision-model: {type(provider).__name__} has no vision tower to freeze"
-        )
+        assert hasattr(
+            provider, "freeze_vision_model"
+        ), f"--freeze-vision-model: {type(provider).__name__} has no vision tower to freeze"
         provider.freeze_vision_model = True
 
     # Imported here: test_bridge_mtp_detachment.py exec()s this function's AST in a bare namespace (no module names).
@@ -150,6 +151,7 @@ def get_model_provider_func(
     args: argparse.Namespace,
     role: Literal["actor", "critic"] = "actor",
 ):
+    install_fa4_causal_window_patch()
     # Support custom model provider path (similar to --custom-rm-path for reward models)
     if getattr(args, "custom_model_provider_path", None):
 
