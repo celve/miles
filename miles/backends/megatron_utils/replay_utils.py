@@ -1,9 +1,19 @@
 from megatron.core.transformer.transformer_block import get_num_layers_to_build
 from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
 
+from miles.utils.replay_base import Replay
+
 
 def register_replay_list_moe(replay_list, replay_data, *, models, **_kwargs):
     """Map replay streams to Megatron MoE layers using the local model layout."""
+    # A router built and then discarded during construction (Megatron-Bridge's Qwen3-VL text model replaces
+    # GPTModel's decoder) still holds a replay in replay_list, so record into the live routers' replays only.
+    live = [
+        replay
+        for model in models
+        for module in model.modules()
+        if isinstance(replay := getattr(module, "routing_replay", None), Replay)
+    ]
     layer_indices = []
     for vp_stage, model in enumerate(models):
         config = model.module.config
@@ -19,6 +29,9 @@ def register_replay_list_moe(replay_list, replay_data, *, models, **_kwargs):
                     continue
             layer_indices.append(layer_id)
 
-    for replay_idx, layer_idx in enumerate(layer_indices):
-        layer_data = replay_data[:, layer_idx]
-        replay_list[replay_idx].record(layer_data)
+    if len(live) != len(layer_indices):
+        raise ValueError(
+            f"{len(live)} routers hold a routing replay, but the local layout has {len(layer_indices)} MoE layers"
+        )
+    for replay, layer_idx in zip(live, layer_indices, strict=True):
+        replay.record(replay_data[:, layer_idx])
