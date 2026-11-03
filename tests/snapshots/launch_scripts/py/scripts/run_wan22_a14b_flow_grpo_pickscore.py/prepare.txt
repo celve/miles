@@ -1,0 +1,19 @@
+### 0
+hf download
+  --repo-type dataset rockdu/miles-diffusion-datasets
+  --include 'flowgrpo_pickscore/**'
+  --local-dir /root/datasets/miles-diffusion-datasets
+
+### 1
+hf download yuvalkirstain/PickScore_v1
+  --local-dir /root/models/PickScore_v1
+
+### 2
+hf download laion/CLIP-ViT-H-14-laion2B-s32B-b79K
+  --exclude '*.bin'
+  --exclude 'open_clip*'
+  --local-dir /root/models/CLIP-ViT-H-14-laion2B-s32B-b79K
+
+### 3
+hf download Wan-AI/Wan2.2-T2V-A14B-Diffusers
+  --local-dir /root/models/Wan2.2-T2V-A14B-Diffusers
