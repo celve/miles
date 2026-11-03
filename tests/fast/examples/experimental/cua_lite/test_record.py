@@ -12,8 +12,7 @@ from PIL import Image
 from miles.utils.eval_record import iter_episodes
 
 # The call chain of lite.train.rollout.core.engine and lite.agents.core.agent.base, cut to what the recorder sees.
-_ENGINE = textwrap.dedent(
-    """
+_ENGINE = textwrap.dedent("""
     import asyncio
     from lite.agents.core.agent.base import AdapterBasedAgent
 
@@ -26,10 +25,8 @@ _ENGINE = textwrap.dedent(
 
     async def _generate_rollout_async(args, rollout_id):
         return await asyncio.gather(*(generate_and_rm(args, s, {}) for s in args.samples))
-    """
-)
-_BASE = textwrap.dedent(
-    """
+    """)
+_BASE = textwrap.dedent("""
     import asyncio
 
     class AdapterBasedAgent:
@@ -55,8 +52,7 @@ _BASE = textwrap.dedent(
             for hook in hooks:
                 await asyncio.to_thread(hook.on_complete, result)
             return result
-    """
-)
+    """)
 
 
 def _module(name: str, source: str = "", **attrs) -> types.ModuleType:

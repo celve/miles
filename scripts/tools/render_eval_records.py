@@ -15,8 +15,9 @@ import io
 import json
 from collections import defaultdict
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
+from typing import Annotated
 
 import typer
 from PIL import Image, ImageDraw
@@ -24,12 +25,12 @@ from PIL import Image, ImageDraw
 from miles.utils.eval_record import RecordedEpisode, RecordedStep, iter_episodes
 
 
-class Select(str, Enum):
+class Select(StrEnum):
     all = "all"
     contrast = "contrast"
 
 
-class Pair(str, Enum):
+class Pair(StrEnum):
     same = "same"
     contrast = "contrast"
 
@@ -84,7 +85,9 @@ def select_tasks(
     return pairs
 
 
-def pick_episodes(pair: TaskPair, *, mode: Pair, rank: int, threshold: float) -> tuple[RecordedEpisode, RecordedEpisode]:
+def pick_episodes(
+    pair: TaskPair, *, mode: Pair, rank: int, threshold: float
+) -> tuple[RecordedEpisode, RecordedEpisode]:
     """``same`` shows the rank-th sample of each side; ``contrast`` a failed base and a passed checkpoint where they exist."""
     if mode is Pair.contrast:
         base = next((episode for episode in pair.base if not passed(episode, threshold)), pair.base[0])
@@ -194,7 +197,9 @@ a {{ color: inherit; }}
 """
 
 
-def write_gif(base: RecordedEpisode, checkpoint: RecordedEpisode, path: Path, *, width: int, labels: tuple[str, str]) -> None:
+def write_gif(
+    base: RecordedEpisode, checkpoint: RecordedEpisode, path: Path, *, width: int, labels: tuple[str, str]
+) -> None:
     """Both episodes stepping together, base on the left; the shorter one holds its last frame."""
     sides = [[_thumbnail(step.screenshot, width) for step in episode.steps] for episode in (base, checkpoint)]
     shots = [image for side in sides for image in side if image is not None]
@@ -217,28 +222,36 @@ def write_gif(base: RecordedEpisode, checkpoint: RecordedEpisode, path: Path, *,
 
 
 def main(
-    base: Path = typer.Option(..., help="Recording of the base model: an eval point's directory or above."),
-    checkpoint: Path = typer.Option(..., help="Recording of the trained checkpoint on the same tasks."),
-    out: Path = typer.Option(..., help="The HTML page to write."),
+    base: Annotated[Path, typer.Option(help="Recording of the base model: an eval point's directory or above.")],
+    checkpoint: Annotated[Path, typer.Option(help="Recording of the trained checkpoint on the same tasks.")],
+    out: Annotated[Path, typer.Option(help="The HTML page to write.")],
     base_label: str = "base",
     checkpoint_label: str = "checkpoint",
-    select: Select = typer.Option(Select.all, help="contrast: tasks base mostly failed and the checkpoint mostly passed."),
-    task: list[str] = typer.Option([], help="Only these task ids (repeatable)."),
-    pass_threshold: float = typer.Option(1.0, help="A reward at or above this counts as a pass."),
-    max_base_pass: float = typer.Option(0.0, help="contrast: the most of its samples base may have passed."),
-    min_checkpoint_pass: float = typer.Option(0.5, help="contrast: the fewest the checkpoint must have passed."),
-    pair: Pair = typer.Option(Pair.same, help="same: each side's --rank-th sample; contrast: a failed base, a passed checkpoint."),
+    select: Annotated[
+        Select, typer.Option(help="contrast: tasks base mostly failed and the checkpoint mostly passed.")
+    ] = Select.all,
+    task: Annotated[list[str] | None, typer.Option(help="Only these task ids (repeatable).")] = None,
+    pass_threshold: Annotated[float, typer.Option(help="A reward at or above this counts as a pass.")] = 1.0,
+    max_base_pass: Annotated[
+        float, typer.Option(help="contrast: the most of its samples base may have passed.")
+    ] = 0.0,
+    min_checkpoint_pass: Annotated[
+        float, typer.Option(help="contrast: the fewest the checkpoint must have passed.")
+    ] = 0.5,
+    pair: Annotated[
+        Pair, typer.Option(help="same: each side's --rank-th sample; contrast: a failed base, a passed checkpoint.")
+    ] = Pair.same,
     rank: int = 0,
     max_tasks: int = 20,
-    image_width: int = typer.Option(800, help="Screenshots are scaled down to this width and stored as JPEG."),
-    gif_dir: Path | None = typer.Option(None, help="Also write one side-by-side GIF per task here."),
+    image_width: Annotated[int, typer.Option(help="Screenshots are scaled down to this width, as JPEG.")] = 800,
+    gif_dir: Annotated[Path | None, typer.Option(help="Also write one side-by-side GIF per task here.")] = None,
 ) -> None:
     labels = (base_label, checkpoint_label)
     pairs = select_tasks(
         load_by_task(base),
         load_by_task(checkpoint),
         select=select,
-        tasks=task,
+        tasks=task or [],
         threshold=pass_threshold,
         max_base_pass=max_base_pass,
         min_checkpoint_pass=min_checkpoint_pass,
@@ -248,7 +261,9 @@ def main(
     sections, summary = [], []
     for task_pair in pairs:
         left, right = pick_episodes(task_pair, mode=pair, rank=rank, threshold=pass_threshold)
-        sections.append(render_task(task_pair, left, right, labels=labels, threshold=pass_threshold, width=image_width))
+        sections.append(
+            render_task(task_pair, left, right, labels=labels, threshold=pass_threshold, width=image_width)
+        )
         summary.append(
             (
                 task_pair.task_id,

@@ -3164,9 +3164,7 @@ def test_skip_actor_forward_only_flag_is_parsed(extra_args, expected):
 def test_skip_actor_forward_only_is_gated_during_miles_validation():
     parser = argparse.ArgumentParser()
     get_miles_extra_args_provider()(parser)
-    args = parser.parse_args(
-        ["--skip-actor-forward-only", "--num-rollout", "1"] + REQUIRED_ARGS
-    )
+    args = parser.parse_args(["--skip-actor-forward-only", "--num-rollout", "1"] + REQUIRED_ARGS)
     vars(args).update(
         hidden_dropout=0.1,
         attention_dropout=0.0,

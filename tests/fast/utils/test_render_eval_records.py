@@ -1,11 +1,11 @@
 import io
 
-from PIL import Image
-from typer.testing import CliRunner
 import typer
+from PIL import Image
+from scripts.tools.render_eval_records import main
+from typer.testing import CliRunner
 
 from miles.utils.eval_record import EpisodeWriter, episode_dir, finish_episode, start_episode
-from scripts.tools.render_eval_records import main
 
 
 def _png(color) -> bytes:
@@ -19,7 +19,9 @@ def _record(root, task, index, *, reward, steps):
     writer = EpisodeWriter(directory)
     writer.set_instruction(f"Solve {task} <now>")
     for step in range(steps):
-        writer.add_step(output=f"{task} reply {step}", screenshot=_png((step * 40, 0, 0)), action={"type": "click", "x": step})
+        writer.add_step(
+            output=f"{task} reply {step}", screenshot=_png((step * 40, 0, 0)), action={"type": "click", "x": step}
+        )
     finish_episode(directory, reward=reward, status="Submitted")
 
 
@@ -70,7 +72,18 @@ def test_contrast_keeps_tasks_base_failed_and_shows_a_passing_checkpoint_episode
 def test_a_gif_steps_both_episodes_together(tmp_path):
     base, checkpoint = _recordings(tmp_path)
 
-    _render("--base", base, "--checkpoint", checkpoint, "--out", tmp_path / "p.html", "--task", "learned", "--gif-dir", tmp_path / "gifs")
+    _render(
+        "--base",
+        base,
+        "--checkpoint",
+        checkpoint,
+        "--out",
+        tmp_path / "p.html",
+        "--task",
+        "learned",
+        "--gif-dir",
+        tmp_path / "gifs",
+    )
 
     gif = Image.open(tmp_path / "gifs" / "learned.gif")
     assert gif.n_frames == 3
@@ -82,6 +95,18 @@ def test_no_shared_task_is_an_error(tmp_path):
     app = typer.Typer()
     app.command()(main)
 
-    result = CliRunner().invoke(app, ["--base", str(base), "--checkpoint", str(checkpoint), "--out", str(tmp_path / "p.html"), "--task", "base_only"])
+    result = CliRunner().invoke(
+        app,
+        [
+            "--base",
+            str(base),
+            "--checkpoint",
+            str(checkpoint),
+            "--out",
+            str(tmp_path / "p.html"),
+            "--task",
+            "base_only",
+        ],
+    )
 
     assert result.exit_code != 0

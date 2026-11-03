@@ -688,7 +688,12 @@ def test_run_records_an_eval_episode_with_its_verdict(tasks_dir, fake_harbor, tm
     (trial,) = fake_harbor.created
     assert trial.config.agent.kwargs["record_dir"] == str(directory)
     episode = load_episode(directory)
-    assert (episode.stack, episode.task_id, episode.sample_index, episode.dataset) == ("harbor", "task-1", 5, "heldout")
+    assert (episode.stack, episode.task_id, episode.sample_index, episode.dataset) == (
+        "harbor",
+        "task-1",
+        5,
+        "heldout",
+    )
     assert (episode.reward, episode.status) == (1.0, "Submitted")
 
 

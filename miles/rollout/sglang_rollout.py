@@ -682,7 +682,9 @@ async def eval_rollout_single_dataset(
             sample_index += 1
             sample.metadata = dataset_cfg.inject_metadata(getattr(sample, "metadata", None))
             if args.eval_record_dir is not None:
-                sample.metadata["eval_record_dir"] = f"{eval_point_dir(args.eval_record_dir, rollout_id)}/{dataset_cfg.name}"
+                sample.metadata["eval_record_dir"] = (
+                    f"{eval_point_dir(args.eval_record_dir, rollout_id)}/{dataset_cfg.name}"
+                )
             sample.generate_function_path = getattr(dataset_cfg, "custom_generate_function_path", None)
             if policy_uses_routing_key(args):
                 sample.routing_key = str(uuid.uuid4())

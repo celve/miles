@@ -60,7 +60,12 @@ def test_the_task_id_becomes_one_safe_path_component(tmp_path):
 
 def test_every_episode_under_a_root_is_found(tmp_path):
     for task, index in [("a", 0), ("a", 1), ("b", 0)]:
-        start_episode(episode_dir(tmp_path / "eval_0" / "heldout", task, index), stack="cua-lite", task_id=task, sample_index=index)
+        start_episode(
+            episode_dir(tmp_path / "eval_0" / "heldout", task, index),
+            stack="cua-lite",
+            task_id=task,
+            sample_index=index,
+        )
 
     assert sorted((e.task_id, e.sample_index) for e in iter_episodes(tmp_path)) == [("a", 0), ("a", 1), ("b", 0)]
 

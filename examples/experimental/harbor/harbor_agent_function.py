@@ -437,7 +437,9 @@ def build_trial_config(
         agent_kwargs["max_seq_len"] = max_seq_len
     if record_dir is not None:
         if not binding.records_steps:
-            raise ValueError(f"--eval-record-dir records computer-1 episodes; the {agent_name} binding has no recorder")
+            raise ValueError(
+                f"--eval-record-dir records computer-1 episodes; the {agent_name} binding has no recorder"
+            )
         agent_kwargs["record_dir"] = str(record_dir)
     extra_agent_kwargs = _env_json_object("HARBOR_AGENT_KWARGS")
     if clash := sorted(set(extra_agent_kwargs) & set(agent_kwargs)):

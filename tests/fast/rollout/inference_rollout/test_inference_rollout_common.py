@@ -34,9 +34,7 @@ async def _echo_generate(input: GenerateFnInput) -> GenerateFnOutput:
 
 
 class TestInferenceRolloutFnKvCacheNamespace:
-    def _make_fn(
-        self, monkeypatch, generate_function=_echo_generate, *, partition: bool = True, eval_record_dir=None
-    ):
+    def _make_fn(self, monkeypatch, generate_function=_echo_generate, *, partition: bool = True, eval_record_dir=None):
         captured: dict[str, str | None] = {}
 
         async def fake_generate_rollout_async(state, rollout_id, get_samples, *, kv_cache_namespace=None):
