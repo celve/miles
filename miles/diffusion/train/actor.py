@@ -70,7 +70,14 @@ class DiffusionFSDPTrainRayActor(TorchNativeTrainRayActor):
         self.forward_dtype = DTYPES[args.diffusion_forward_dtype]
         self.pipeline_config = get_train_pipeline_config(args.diffusion_model_family)
         self.algorithm = get_algorithm(args.loss_type)
-        self.model = load_fsdp_dit(args, config=self.pipeline_config, mesh=get_parallel_state().get_mesh("fsdp"))
+        self.models = {
+            component: load_fsdp_dit(
+                args, config=self.pipeline_config, mesh=get_parallel_state().get_mesh("fsdp"), component=component
+            )
+            for component in self.pipeline_config.components
+        }
+        # A single component stays the root module, so its checkpoint keys and EMA keep their names.
+        self.model = next(iter(self.models.values())) if len(self.models) == 1 else torch.nn.ModuleDict(self.models)
         self.optimizer = build_optimizer(args, (p for p in self.model.parameters() if p.requires_grad))
         # fp16 policy gradients underflow unscaled; the sharded scaler agrees on found_inf across ranks.
         self.scaler = ShardedGradScaler(enabled=self.forward_dtype == torch.float16)
@@ -91,7 +98,7 @@ class DiffusionFSDPTrainRayActor(TorchNativeTrainRayActor):
         checkpoint_payload = checkpoint.load(self)
         if self.ema is not None and checkpoint_payload is not None:
             self._load_ema(checkpoint_payload["iteration"])
-        self.model_parts = [self.model]
+        self.model_parts = list(self.models.values())
         # The EMA is optimizer state, so the base sleep/wake moves it with Adam's.
         self.optimizers = [self.optimizer] + ([self.ema] if self.ema is not None else [])
         self.weight_updater = self._build_diffusion_weight_updater()
@@ -174,10 +181,10 @@ class DiffusionFSDPTrainRayActor(TorchNativeTrainRayActor):
             logger.info(f"[train step {self.global_step}] rollout={rollout_id} {reduced}")
             log_metrics(self.args, reduced, step_key="train/step")
 
-    def noise_pred(self, latents, timesteps, pos_cond: dict, neg_cond: dict | None) -> torch.Tensor:
+    def noise_pred(self, component: str, latents, timesteps, pos_cond: dict, neg_cond: dict | None) -> torch.Tensor:
         with torch.autocast("cuda", dtype=self.forward_dtype, enabled=self.forward_dtype != torch.float32):
             return self.pipeline_config.compute_noise_pred(
-                model=self.model,
+                model=self.models[component],
                 latents=latents,
                 timesteps=timesteps,
                 pos_cond=pos_cond,
@@ -186,12 +193,15 @@ class DiffusionFSDPTrainRayActor(TorchNativeTrainRayActor):
             )
 
     @torch.no_grad()
-    def lora_base_noise_pred(self, latents, timesteps, pos_cond: dict, neg_cond: dict | None) -> torch.Tensor:
+    def lora_base_noise_pred(
+        self, component: str, latents, timesteps, pos_cond: dict, neg_cond: dict | None
+    ) -> torch.Tensor:
         """The KL reference: the same forward with the adapter disabled."""
-        with self.model.disable_adapter():
-            pred = self.noise_pred(latents, timesteps, pos_cond, neg_cond)
+        model = self.models[component]
+        with model.disable_adapter():
+            pred = self.noise_pred(component, latents, timesteps, pos_cond, neg_cond)
             # PEFT re-enables adapter grads on exit; reshard first so that lands on the shards.
-            _reshard(self.model)
+            _reshard(model)
         return pred
 
     @property
@@ -207,7 +217,7 @@ class DiffusionFSDPTrainRayActor(TorchNativeTrainRayActor):
         self._published_weight_version = 0
         return WeightUpdater(
             self.args,
-            self.model,
+            self.models,
             weights_getter=lambda: None,
             model_name=self.pipeline_config.model_family,
             quantization_config=None,

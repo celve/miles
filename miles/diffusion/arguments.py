@@ -170,8 +170,14 @@ def validate_diffusion_args(args) -> None:
 
     if args.diffusion_model_family is None:
         args.diffusion_model_family = resolve_model_family(args.hf_checkpoint)
+    config = get_train_pipeline_config(args.diffusion_model_family)
     if args.diffusion_lora_target_modules is None:
-        args.diffusion_lora_target_modules = get_train_pipeline_config(args.diffusion_model_family).lora_target_modules
+        args.diffusion_lora_target_modules = config.lora_target_modules
+    if algorithm.uses_ema and len(config.components) > 1:
+        raise ValueError(
+            f"--loss-type {args.loss_type} keeps an EMA of one adapter, but family {config.model_family} trains "
+            f"the components {list(config.components)}"
+        )
 
 
 def validate_diffusion_batch_size(args) -> None:

@@ -13,6 +13,8 @@ from miles.diffusion.arguments import (
     validate_diffusion_batch_size,
     validate_diffusion_sglang_config,
 )
+from miles.diffusion.train import pipeline_config
+from miles.diffusion.train.pipeline_config import SD3TrainPipelineConfig
 from miles.utils.args.configs.diffusion import DiffusionConfig
 
 
@@ -300,6 +302,18 @@ def test_a_flow_grpo_flag_nft_never_reads_is_rejected(override, flag):
 def test_an_nft_flag_flow_grpo_never_reads_is_rejected(override, flag):
     with pytest.raises(ValueError, match=f"--loss-type flow_grpo never reads: .*{flag}"):
         validate_diffusion_args(_supported(**override))
+
+
+def test_an_ema_algorithm_is_rejected_for_a_family_of_several_components(monkeypatch):
+    class TwoExperts(SD3TrainPipelineConfig):
+        model_family = "two_experts"
+        components = ("transformer", "transformer_2")
+
+    monkeypatch.setitem(pipeline_config._REGISTRY, "two_experts", TwoExperts)
+
+    validate_diffusion_args(_supported(diffusion_model_family="two_experts"))
+    with pytest.raises(ValueError, match="EMA of one adapter"):
+        validate_diffusion_args(_nft(diffusion_model_family="two_experts"))
 
 
 def test_flow_grpo_rejects_ode_rollouts():

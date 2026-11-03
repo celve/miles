@@ -40,6 +40,24 @@ class TrainPipelineConfig(abc.ABC):
     name_patterns: tuple[str, ...] = ()
     lora_target_modules: list[str] = []
     num_train_timesteps: int = 1000
+    # The pipeline's denoiser components the trainer loads, trains and syncs, in this order.
+    components: tuple[str, ...] = ("transformer",)
+
+    def component_for_timestep(self, timestep: float) -> str:
+        """The component that denoises at this scheduler timestep."""
+        return self.components[0]
+
+    def component_for_timesteps(self, timesteps: torch.Tensor) -> str:
+        """The one component a micro-batch's forward runs; its pairs must not straddle components."""
+        if len(self.components) == 1:
+            return self.components[0]
+        components = {self.component_for_timestep(t) for t in timesteps.tolist()}
+        if len(components) > 1:
+            raise ValueError(
+                f"A micro-batch mixes the timesteps of components {sorted(components)}; draw one SDE step per "
+                "rollout or set --diffusion-micro-batch-size-tstep 1"
+            )
+        return components.pop()
 
     def compute_noise_pred(
         self,
