@@ -87,6 +87,7 @@ from typing import Any
 from miles.rollout.agentic.agent_function import InfraAbort
 from miles.rollout.agentic.credentials import PROVIDER_CREDENTIALS, resolve_provider_api_key
 from miles.rollout.agentic.session import openai_session_url
+from miles.utils.eval_record import episode_dir, finish_episode, start_episode
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +155,8 @@ class HarnessBinding:
     accepts_max_seq_len: bool = True
     # exception types that, once the agent has started, only a lost sandbox raises
     sandbox_loss_exceptions: frozenset[str] = frozenset()
+    # the agent takes a ``record_dir`` kwarg and writes its steps there (miles.utils.eval_record)
+    records_steps: bool = False
 
 
 def _terminus_kwargs(
@@ -326,6 +329,7 @@ HARNESS_BINDINGS: dict[str, HarnessBinding] = {
         import_path=_QWEN3_VL_COMPUTER_1,
         accepts_max_seq_len=False,
         sandbox_loss_exceptions=frozenset({"RuntimeRequestError"}),
+        records_steps=True,
     ),
 }
 # Any other installed agent that speaks OpenAI chat completions.
@@ -409,7 +413,9 @@ def _binding(metadata: dict[str, Any]) -> HarnessBinding:
     return HARNESS_BINDINGS.get(_agent_name(metadata), _DEFAULT_BINDING)
 
 
-def build_trial_config(metadata: dict[str, Any], session_url: str, request_kwargs: dict[str, Any]):
+def build_trial_config(
+    metadata: dict[str, Any], session_url: str, request_kwargs: dict[str, Any], record_dir: Path | None = None
+):
     from harbor.models.trial.config import AgentConfig, TaskConfig, TrialConfig, VerifierConfig
 
     tasks_dir = Path(os.environ["HARBOR_TASKS_DIR"])
@@ -429,6 +435,10 @@ def build_trial_config(metadata: dict[str, Any], session_url: str, request_kwarg
     }
     if max_seq_len is not None and binding.accepts_max_seq_len:
         agent_kwargs["max_seq_len"] = max_seq_len
+    if record_dir is not None:
+        if not binding.records_steps:
+            raise ValueError(f"--eval-record-dir records computer-1 episodes; the {agent_name} binding has no recorder")
+        agent_kwargs["record_dir"] = str(record_dir)
     extra_agent_kwargs = _env_json_object("HARBOR_AGENT_KWARGS")
     if clash := sorted(set(extra_agent_kwargs) & set(agent_kwargs)):
         raise ValueError(f"HARBOR_AGENT_KWARGS sets {clash}, which the {agent_name} binding owns")
@@ -582,7 +592,16 @@ async def run(
     # fail every sample the same way; raising beats training on silent all-zero
     # rewards.
     _ensure_provider_key()
-    config = build_trial_config(metadata, session_url, request_kwargs)
+    record_dir = _record_dir(metadata)
+    config = build_trial_config(metadata, session_url, request_kwargs, record_dir=record_dir)
+    if record_dir is not None:
+        start_episode(
+            record_dir,
+            stack="harbor",
+            task_id=str(instance_id),
+            sample_index=metadata["miles_lifecycle"]["sample_index"],
+            dataset=record_dir.parent.parent.name,
+        )
 
     try:
         trial = await Trial.create(config)
@@ -592,16 +611,31 @@ async def run(
     except asyncio.TimeoutError:
         # The policy may be what is stalling, so this is a negative sample.
         logger.error(f"Harbor trial for {instance_id} exceeded {trial_timeout_s}s; scoring 0")
-        return _failed("TimeLimitExceeded")
+        return _recorded(record_dir, _failed("TimeLimitExceeded"))
     except Exception as e:
         logger.error(f"Harbor trial for {instance_id} failed: {e}", exc_info=True)
-        return _failed("AgentError")
+        return _recorded(record_dir, _failed("AgentError"))
 
     if (discard := _discard_cause(result, _binding(metadata))) is not None:
         cause, exc = discard
+        if record_dir is not None:
+            finish_episode(record_dir, reward=None, status=cause)
         raise InfraAbort(cause, f"Harbor trial for {instance_id}: {exc.exception_type}: {exc.exception_message}")
 
     out = trial_result_to_metadata(result)
     out["trial_dir"] = str(trial.paths.trial_dir)
     logger.info(f"Harbor trial {instance_id}: exit_status={out['exit_status']} reward={out['reward']}")
+    return _recorded(record_dir, out)
+
+
+def _record_dir(metadata: dict[str, Any]) -> Path | None:
+    """Where an eval episode is recorded, under the directory Miles's eval loop gave it; None when not recording."""
+    if (parent := metadata.get("eval_record_dir")) is None:
+        return None
+    return episode_dir(parent, str(metadata.get("instance_id", "")), metadata["miles_lifecycle"]["sample_index"])
+
+
+def _recorded(record_dir: Path | None, out: dict[str, Any]) -> dict[str, Any]:
+    if record_dir is not None:
+        finish_episode(record_dir, reward=out["reward"], status=out["exit_status"])
     return out

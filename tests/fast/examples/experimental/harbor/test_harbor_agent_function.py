@@ -17,6 +17,7 @@ import harbor_agent_function as haf
 import pytest
 
 from miles.rollout.agentic.agent_function import InfraAbort
+from miles.utils.eval_record import load_episode
 
 
 class _EnvironmentType(str, enum.Enum):
@@ -664,3 +665,64 @@ def test_run_raises_on_a_missing_task_instead_of_scoring_zero(tasks_dir, fake_ha
     with pytest.raises(FileNotFoundError):
         run_async(haf.run("http://s/sessions/s1", [], {}, {"instance_id": "missing"}))
     assert fake_harbor.created == []
+
+
+# --- eval recording --------------------------------------------------------
+
+
+def _recorded_metadata(tmp_path, agent_name="computer-1"):
+    return {
+        "instance_id": "task-1",
+        "agent_name": agent_name,
+        "eval_record_dir": str(tmp_path / "records" / "eval_0" / "heldout"),
+        "miles_lifecycle": {"sample_index": 5, "group_index": -1, "weight_version": ""},
+    }
+
+
+def test_run_records_an_eval_episode_with_its_verdict(tasks_dir, fake_harbor, tmp_path):
+    fake_harbor.result = _verdict(reward=1.0)
+
+    run_async(haf.run("http://s/sessions/s1", [], {}, _recorded_metadata(tmp_path)))
+
+    directory = tmp_path / "records" / "eval_0" / "heldout" / "task-1" / "5"
+    (trial,) = fake_harbor.created
+    assert trial.config.agent.kwargs["record_dir"] == str(directory)
+    episode = load_episode(directory)
+    assert (episode.stack, episode.task_id, episode.sample_index, episode.dataset) == ("harbor", "task-1", 5, "heldout")
+    assert (episode.reward, episode.status) == (1.0, "Submitted")
+
+
+def test_run_records_the_cause_of_a_discarded_eval_episode(tasks_dir, fake_harbor, tmp_path):
+    fake_harbor.result = _failed_trial("RuntimeRequestError", agent_setup=True, agent_execution=True)
+
+    with pytest.raises(InfraAbort):
+        run_async(haf.run("http://s/sessions/s1", [], {}, _recorded_metadata(tmp_path)))
+
+    episode = load_episode(tmp_path / "records" / "eval_0" / "heldout" / "task-1" / "5")
+    assert (episode.reward, episode.status) == (None, "SandboxLost")
+
+
+def test_run_records_a_timed_out_eval_episode_as_scored(tasks_dir, fake_harbor, tmp_path, monkeypatch):
+    fake_harbor.result = _verdict()
+    fake_harbor.run_delay_s = 10
+    monkeypatch.setenv("AGENT_TRIAL_TIMEOUT", "0")
+
+    run_async(haf.run("http://s/sessions/s1", [], {}, _recorded_metadata(tmp_path)))
+
+    episode = load_episode(tmp_path / "records" / "eval_0" / "heldout" / "task-1" / "5")
+    assert (episode.reward, episode.status) == (0.0, "TimeLimitExceeded")
+
+
+def test_a_harness_without_a_recorder_refuses_eval_recording(tasks_dir, fake_harbor, tmp_path):
+    with pytest.raises(ValueError, match="no recorder"):
+        run_async(haf.run("http://s/sessions/s1", [], {}, _recorded_metadata(tmp_path, agent_name="terminus-2")))
+    assert fake_harbor.created == []
+
+
+def test_an_unrecorded_episode_gives_the_agent_no_record_dir(tasks_dir, fake_harbor):
+    fake_harbor.result = _verdict()
+
+    run_async(haf.run("http://s/sessions/s1", [], {}, {"instance_id": "task-1", "agent_name": "computer-1"}))
+
+    (trial,) = fake_harbor.created
+    assert "record_dir" not in trial.config.agent.kwargs

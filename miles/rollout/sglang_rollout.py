@@ -27,6 +27,7 @@ from miles.utils.async_utils import run
 from miles.utils.audit_utils.sample_ownership.recorder import SampleOwnershipRecorder
 from miles.utils.data import Dataset
 from miles.utils.eval_config import EvalDatasetConfig
+from miles.utils.eval_record import eval_point_dir
 from miles.utils.function_registry import load_function
 from miles.utils.http_utils import get, post, router_worker_base_urls
 from miles.utils.lifecycle import TrajectoryLifecycle
@@ -680,6 +681,8 @@ async def eval_rollout_single_dataset(
             sample.index = sample_index
             sample_index += 1
             sample.metadata = dataset_cfg.inject_metadata(getattr(sample, "metadata", None))
+            if args.eval_record_dir is not None:
+                sample.metadata["eval_record_dir"] = f"{eval_point_dir(args.eval_record_dir, rollout_id)}/{dataset_cfg.name}"
             sample.generate_function_path = getattr(dataset_cfg, "custom_generate_function_path", None)
             if policy_uses_routing_key(args):
                 sample.routing_key = str(uuid.uuid4())

@@ -97,6 +97,7 @@ class ExternalSglangEvalFn(CheckpointEvalFn):
             data=await run_eval_datasets(
                 self._state,
                 self._cache,
+                rollout_id=input.rollout_id,
                 kv_cache_namespace=compute_kv_cache_namespace(self._eval_args, input),
             )
         )

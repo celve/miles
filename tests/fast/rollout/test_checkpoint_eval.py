@@ -623,7 +623,7 @@ def external_fn_env(monkeypatch):
         calls.append(("get", url))
         return {"weight_version": server.loaded_version}
 
-    async def fake_run_eval(state, cache, *, kv_cache_namespace: str | None = None):
+    async def fake_run_eval(state, cache, *, rollout_id: int, kv_cache_namespace: str | None = None):
         calls.append(("eval", state, kv_cache_namespace))
         return {"ds": {"rewards": [1.0]}}
 

@@ -1,5 +1,6 @@
 """Qwen3-VL's grid coordinates reach computer-1's 1024x900 desktop as the pixels it pointed at."""
 
+import base64
 import json
 
 import pytest
@@ -9,6 +10,8 @@ pytest.importorskip("harbor", reason="pip install harbor -- the recipe's one ext
 from examples.experimental.harbor_cua.qwen_computer import Qwen3VLComputer1  # noqa: E402
 from harbor.agents.computer_1.runtime import DisplayGeometry, normalize_completion_action  # noqa: E402
 from harbor.llms.base import LLMResponse  # noqa: E402
+
+from miles.utils.eval_record import load_episode, start_episode  # noqa: E402
 
 DESKTOP = DisplayGeometry(desktop_width=1024, desktop_height=900, window_width=1024, window_height=900)
 
@@ -69,3 +72,37 @@ def test_a_reply_without_an_action_is_still_retried(provider):
 
     assert step.needs_retry
     assert step.action is None
+
+
+def _data_url(payload: bytes) -> str:
+    return "data:image/png;base64," + base64.b64encode(payload).decode()
+
+
+def _reply(action: dict) -> LLMResponse:
+    return LLMResponse(content=json.dumps({"analysis": "a", "plan": "p", "action": action}))
+
+
+def test_a_recording_agent_keeps_each_turns_screen_reply_and_action(tmp_path):
+    directory = start_episode(tmp_path / "episode", stack="harbor", task_id="t", sample_index=0)
+    agent = Qwen3VLComputer1(
+        logs_dir=tmp_path, model_name="openai/model", provider="litellm", enable_images=True, record_dir=str(directory)
+    )
+    provider = agent._build_provider()
+
+    provider.initial_messages("Click Start.", _data_url(b"screen-0"))
+    provider.parse(_reply({"type": "click", "x": 499, "y": 284}))
+    provider.parse(LLMResponse(content="not json"))
+    provider.follow_up_messages(None, "clicked", _data_url(b"screen-1"))
+    provider.parse(_reply({"type": "done", "result": "ok"}))
+
+    episode = load_episode(directory)
+    assert episode.instruction == "Click Start."
+    assert [step.screenshot.read_bytes() for step in episode.steps] == [b"screen-0", b"screen-0", b"screen-1"]
+    assert (episode.steps[0].action["type"], episode.steps[0].action["x"]) == ("click", 499)
+    assert (episode.steps[1].action, episode.steps[1].output) == (None, "not json")
+    assert episode.steps[1].error.startswith("ERROR")
+    assert episode.steps[2].action["type"] == "done"
+
+
+def test_an_agent_without_a_record_dir_records_nothing(provider):
+    assert provider.record is None
