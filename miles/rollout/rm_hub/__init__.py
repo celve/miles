@@ -125,7 +125,7 @@ async def batched_async_rm(
         rm_function = load_function(args.custom_rm_path)
         fn_args = compute_custom_function_config(args, args.custom_rm_path)
         return await rm_function(fn_args, samples, **kwargs)
-    if args.rm_type == "pickscore":
+    if samples and all(_resolve_reward_config(args, sample) == (None, "pickscore") for sample in samples):
         # Local import, as for ocr; PickScore batches across samples, which its numerics depend on.
         from miles.diffusion.rollout.pickscore import pickscore_rm
 
