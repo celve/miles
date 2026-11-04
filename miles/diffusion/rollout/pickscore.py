@@ -130,7 +130,9 @@ class PickScorePool:
             ray.kill(actor)
 
 
-async def pickscore_rm(args, samples: Sequence[Sample], *, pickscore_pool: PickScorePool) -> list[float]:
+async def pickscore_rm(
+    args, samples: Sequence[Sample], *, pickscore_pool: PickScorePool, **_other_pools
+) -> list[float]:
     """`--rm-type pickscore`: one reward per sample, its --diffusion-pickscore-num-frames frames averaged."""
     outputs = []
     for sample in samples:
