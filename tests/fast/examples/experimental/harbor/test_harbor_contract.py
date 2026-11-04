@@ -10,6 +10,7 @@ required-field and enum drift is caught.)
 """
 
 import asyncio
+import importlib
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -19,7 +20,9 @@ import pytest
 harbor = pytest.importorskip("harbor")
 
 import harbor_agent_function as haf  # noqa: E402
+from examples.experimental.harbor_cua.opencode_cua import OpenCodeCUA  # noqa: E402
 from examples.experimental.harbor_cua.qwen_computer import Qwen3VLComputer1  # noqa: E402
+from harbor.agents.base import BaseAgent  # noqa: E402
 from harbor.agents.computer_1.computer_1 import Computer1Chat, EpisodeLoggingPaths  # noqa: E402
 from harbor.agents.factory import AgentFactory  # noqa: E402
 from harbor.models.agent.name import AgentName  # noqa: E402
@@ -95,6 +98,22 @@ def test_harbor_builds_the_qwen3_vl_computer_1_with_max_seq_len_set(tasks_dir, t
     assert agent._enable_images is True
 
 
+def test_harbor_builds_opencode_cua_with_image_input_declared(tasks_dir, tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_MODEL_NAME", "qwen")
+    cfg = haf.build_trial_config(
+        {"instance_id": "task-1", "agent_name": "opencode-cua", "max_seq_len": 4096},
+        "http://trainer:30000/sessions/s1/v1",
+        _SESSION_SAMPLING,
+    )
+    agent = AgentFactory.create_agent_from_config(cfg.agent, logs_dir=tmp_path)
+
+    assert isinstance(agent, OpenCodeCUA)
+    config = agent._opencode_config
+    assert config["provider"]["openai-compatible"]["models"]["qwen"]["modalities"]["input"] == ["text", "image"]
+    assert config["agent"]["build"]["temperature"] == _SESSION_SAMPLING["temperature"]
+    assert set(config["mcp"]) == {"computer"}
+
+
 def test_every_call_computer_1_makes_carries_miles_sampling(tasks_dir, tmp_path, chat_server):
     """The agent loop, both compactor summaries and the final-answer fallback each reach the session."""
     base_url, requests = chat_server
@@ -123,7 +142,12 @@ def test_the_pass_through_environment_types_exist(env_type):
 
 @pytest.mark.parametrize("agent_name", sorted(haf.HARNESS_BINDINGS))
 def test_every_binding_names_a_real_harbor_agent(agent_name):
-    assert AgentName(agent_name).value == agent_name
+    """A registered name, or a binding of Miles's own that hands Harbor the class to build."""
+    if (import_path := haf.HARNESS_BINDINGS[agent_name].import_path) is not None:
+        module, _, cls = import_path.partition(":")
+        assert issubclass(getattr(importlib.import_module(module), cls), BaseAgent)
+    else:
+        assert AgentName(agent_name).value == agent_name
 
 
 @pytest.mark.parametrize("agent_name", [*sorted(haf.HARNESS_BINDINGS), "some-other-openai-chat-agent"])

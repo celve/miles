@@ -283,6 +283,25 @@ def _opencode_env(session_url: str, api_key: str) -> dict[str, str]:
     return {"OPENAI_BASE_URL": session_url, "OPENAI_API_BASE": session_url, "OPENAI_API_KEY": api_key}
 
 
+def _opencode_cua_kwargs(
+    session_url: str, api_key: str, sampling_params: dict[str, Any], model: str, max_seq_len: int | None
+) -> dict[str, Any]:
+    kwargs = _opencode_kwargs(session_url, api_key, sampling_params, model, max_seq_len)
+    provider, model_id = _opencode_provider_model(model)
+    # Without image input declared, OpenCode drops the screenshots the computer tool returns.
+    kwargs["opencode_config"]["provider"][provider]["models"][model_id].update(
+        {"modalities": {"input": ["text", "image"], "output": ["text"]}, "attachment": True}
+    )
+    if (temperature := sampling_params.get("temperature")) is not None:
+        kwargs["temperature"] = temperature
+    if max_turns := _env_int("HARBOR_AGENT_MAX_ITERATIONS"):
+        kwargs["max_turns"] = max_turns
+    return kwargs
+
+
+_OPENCODE_CUA = "examples.experimental.harbor_cua.opencode_cua:OpenCodeCUA"
+
+
 # Qwen3-VL clicks on a 0..999 grid whatever its prompt says; session images serve only Qwen3-VL.
 _QWEN3_VL_COMPUTER_1 = "examples.experimental.harbor_cua.qwen_computer:Qwen3VLComputer1"
 
@@ -322,6 +341,14 @@ HARNESS_BINDINGS: dict[str, HarnessBinding] = {
         model_name=lambda model: "/".join(_opencode_provider_model(model)),
     ),
     "mini-swe-agent": HarnessBinding(kwargs=_no_kwargs, env=_mini_swe_agent_env),
+    # Needs --sglang-tool-call-parser qwen25 and --session-message-matcher loose_tool_call (OpenCode re-serialises arguments).
+    "opencode-cua": HarnessBinding(
+        kwargs=_opencode_cua_kwargs,
+        env=_opencode_env,
+        model_name=lambda model: "/".join(_opencode_provider_model(model)),
+        import_path=_OPENCODE_CUA,
+        sandbox_loss_exceptions=frozenset({"DesktopLost"}),
+    ),
     # Its actions' failures return to the policy as observations; an escaping runtime error is a harness command's.
     "computer-1": HarnessBinding(
         kwargs=_computer_1_kwargs,
