@@ -27,6 +27,13 @@ _REMOTE_DIR = "/installed-agent/computer"
 _MCP_LOG = "/logs/agent/computer_mcp.jsonl"
 _FIRST_SCREEN = f"{_REMOTE_DIR}/first.png"
 _PATH = 'export PATH="$HOME/.opencode/bin:$PATH"; [ -s "$HOME/.nvm/nvm.sh" ] && . "$HOME/.nvm/nvm.sh"; '
+# OpenCode's own dirs, for every invocation: an image's ~/.config can belong to another user than the agent's.
+_XDG = {
+    "XDG_CONFIG_HOME": f"{_REMOTE_DIR}/xdg-config",
+    "XDG_CACHE_HOME": f"{_REMOTE_DIR}/xdg-cache",
+    "XDG_DATA_HOME": "/logs/agent/opencode/xdg-data",
+    "XDG_STATE_HOME": "/logs/agent/opencode/xdg-state",
+}
 RESPONSE_FORMAT = "# Response format" + _system_prompt().split("# Response format", 1)[1]
 SYSTEM_PROMPT = "You operate a Linux desktop to complete the user's task.\n\n" + RESPONSE_FORMAT
 
@@ -91,13 +98,13 @@ class OpenCodeCUA(OpenCode):
 
     async def install(self, environment: BaseEnvironment) -> None:
         # An image with this release baked in skips the per-trial apt + nvm + npm install.
-        result = await environment.exec(command=_PATH + "opencode --version")
+        result = await environment.exec(command=_PATH + "opencode --version", env=_XDG)
         if result.return_code != 0 or (result.stdout or "").strip() != self._version:
             await super().install(environment)
 
     async def setup(self, environment: BaseEnvironment) -> None:
-        await super().setup(environment)
         await self.exec_as_root(environment, f"mkdir -p {_REMOTE_DIR} /logs/agent && chmod 777 {_REMOTE_DIR}")
+        await super().setup(environment)
         await environment.upload_file(MCP_SERVER, f"{_REMOTE_DIR}/computer_mcp.py")
         await self.exec_as_agent(
             environment,
@@ -110,12 +117,8 @@ class OpenCodeCUA(OpenCode):
         self._instruction = instruction
         if not self.model_name or "/" not in self.model_name:
             raise ValueError("Model name must be in the format provider/model_name")
-        env = {
-            "OPENCODE_FAKE_VCS": "git",
-            "XDG_DATA_HOME": "/logs/agent/opencode/xdg-data",
-            "XDG_STATE_HOME": "/logs/agent/opencode/xdg-state",
-        }
-        await self.exec_as_agent(environment, self._build_register_config_command(), env=env)
+        env = {"OPENCODE_FAKE_VCS": "git", **_XDG}
+        await self.exec_as_agent(environment, self._register_config_command(), env=env)
         first = " ".join(shlex.quote(part) for part in self._mcp_command("--screenshot", _FIRST_SCREEN))
         await self.exec_as_agent(environment, first, env=self._mcp_env)
         try:
@@ -130,6 +133,12 @@ class OpenCodeCUA(OpenCode):
                 raise NonZeroAgentExitCodeError("OpenCode emitted error event(s): " + "; ".join(messages[:3]))
         finally:
             await self._raise_if_desktop_lost(environment)
+
+    def _register_config_command(self) -> str:
+        command = self._build_register_config_command()
+        if command.count("~/.config/opencode") != 2:
+            raise RuntimeError("Harbor's OpenCode no longer writes its config to ~/.config/opencode")
+        return command.replace("~/.config/opencode", '"$XDG_CONFIG_HOME/opencode"')
 
     async def _raise_if_desktop_lost(self, environment: BaseEnvironment) -> None:
         result = await environment.exec(command=f"cat {_MCP_LOG} 2>/dev/null || true")

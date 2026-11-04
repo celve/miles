@@ -15,12 +15,14 @@ from examples.experimental.harbor_cua import opencode_cua as oc  # noqa: E402
 class FakeEnvironment:
     def __init__(self, *, version: str = oc.OPENCODE_VERSION, mcp_log: str = ""):
         self.commands: list[str] = []
+        self.envs: list[dict] = []
         self.uploads: list[tuple[str, str]] = []
         self._version = version
         self._mcp_log = mcp_log
 
     async def exec(self, command, user=None, env=None, cwd=None, timeout_sec=None, **_):
         self.commands.append(command)
+        self.envs.append(env or {})
         if "opencode --version" in command:
             return SimpleNamespace(return_code=0, stdout=f"{self._version}\n", stderr="")
         if command.startswith("cat ") and "computer_mcp.jsonl" in command:
@@ -42,7 +44,7 @@ def _agent(tmp_path, **kwargs):
 
 
 def _written_config(agent) -> dict:
-    command = agent._build_register_config_command()
+    command = agent._register_config_command()
     return json.loads(shlex.split(command.split("echo ", 1)[1])[0])
 
 
@@ -102,3 +104,16 @@ def test_a_policy_error_is_not_a_lost_desktop(tmp_path):
 def test_the_mcp_environment_reaches_the_server_and_the_first_capture(tmp_path):
     agent = _agent(tmp_path, mcp_env={"PATH": "/opt/env/bin:/usr/bin"})
     assert _written_config(agent)["mcp"]["computer"]["environment"] == {"PATH": "/opt/env/bin:/usr/bin"}
+
+
+def test_every_opencode_invocation_uses_its_own_config_dir(tmp_path):
+    """An image's ~/.config can belong to another user than the agent's (lite.osworld's /home/user)."""
+    env = FakeEnvironment()
+    agent = _agent(tmp_path)
+    asyncio.run(agent.setup(env))
+    asyncio.run(agent.run("Open the file.", env, SimpleNamespace()))
+
+    calls = [(c, e) for c, e in zip(env.commands, env.envs, strict=True) if "opencode" in c and "computer_mcp" not in c]
+    assert calls and all(e.get("XDG_CONFIG_HOME") == "/installed-agent/computer/xdg-config" for _, e in calls)
+    config = next(c for c, _ in calls if "opencode.json" in c)
+    assert '"$XDG_CONFIG_HOME/opencode"/opencode.json' in config and "~/.config" not in config
