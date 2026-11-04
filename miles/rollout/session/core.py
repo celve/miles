@@ -28,6 +28,7 @@ from miles.rollout.session.errors import (
     UpstreamGenerationAbortedError,
     UpstreamResponseError,
 )
+from miles.rollout.session.image_expansion import ImageTokenCounter, assert_engine_expansion_matches
 from miles.rollout.session.linear_trajectory import LinearTrajectory, SessionRegistry
 from miles.rollout.session.request_args import ClientResponseIntent, filter_turn_args, parse_chat_request
 from miles.rollout.session.samples.codec import COMPUTED_FIELDS, ROLLOUT_SAMPLING_MASK_FIELDS, encode_samples
@@ -215,6 +216,7 @@ class SessionCore:
         *,
         use_addition_r3=False,
         output_store=None,
+        image_token_counter: ImageTokenCounter | None = None,
     ):
         self.backend = backend
         self.registry = registry
@@ -227,6 +229,7 @@ class SessionCore:
         self.use_addition_r3 = use_addition_r3
         # The output store client deleting what this server's sessions did not hand over; None without one.
         self._output_store = output_store
+        self.image_token_counter = image_token_counter
 
     async def _take_store_ref(self, session, request_body: dict, result: dict) -> None:
         """Record the output store ref of a proxied response before anything can drop the response."""
@@ -431,18 +434,10 @@ class SessionCore:
 
             # prepare_token_ids_and_request_args applied any retry rollback, so token_ids is
             # the checkpoint this request builds on.
-            checkpoint_record = session.records[-1] if session.records else None
-            prepare_engine_request(
+            self._prepare_engine_request(
                 request_body,
                 checkpoint_token_ids=session.token_ids,
-                checkpoint_record=checkpoint_record,
-                token_space=self.config.multimodal_token_space_processing,
-            )
-            # R3 rows count the tokens the engine runs: the offset uses the engine's form.
-            self._maybe_request_addition_r3(
-                request_body,
-                engine_token_ids(session.token_ids, checkpoint_record),
-                request_body["input_ids"],
+                checkpoint_record=session.records[-1] if session.records else None,
             )
 
             # orjson: the body carries the whole prompt's input_ids on every turn.
@@ -463,7 +458,7 @@ class SessionCore:
             return proxy_result_to_response(result)
 
         response, choice, assistant_message, completion_token_ids = extract_completion(result)
-        check_engine_prompt(request_body, choice)
+        self._check_engine_prompt(request_body, choice)
         assistant_message = tito_tokenizer.postprocess_completion(
             choice=choice,
             assistant_message=assistant_message,
@@ -511,11 +506,33 @@ class SessionCore:
 
         return _chat_client_response(result, response, response_intent)
 
+    def _prepare_engine_request(
+        self, request_body: dict, *, checkpoint_token_ids: list[int], checkpoint_record: SessionRecord | None
+    ) -> None:
+        prepare_engine_request(
+            request_body,
+            checkpoint_token_ids=checkpoint_token_ids,
+            checkpoint_record=checkpoint_record,
+            token_space=self.config.multimodal_token_space_processing,
+        )
+        # R3 rows count the tokens the engine runs: the offset uses the engine's form.
+        self._maybe_request_addition_r3(
+            request_body,
+            engine_token_ids(checkpoint_token_ids, checkpoint_record),
+            request_body["input_ids"],
+        )
+
+    def _check_engine_prompt(self, request_body: dict, choice: dict) -> None:
+        if self.image_token_counter is None:
+            check_engine_prompt(request_body, choice)
+        else:
+            assert_engine_expansion_matches(request_body, choice, self.image_token_counter)
+
     def _store_message_media(self, client_args: dict) -> dict:
         return store_message_media(
             client_args,
             token_space=self.config.multimodal_token_space_processing,
-            media_dir=self.config.shared_media_dir,
+            media_dir=self.config.run_media_dir,
         )
 
     def _with_routing_key(self, headers: dict, session_id: str) -> dict:

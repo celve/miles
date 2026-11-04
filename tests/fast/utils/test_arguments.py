@@ -4019,6 +4019,8 @@ class TestMultimodalTokenSpaceProcessingArgs:
                 "multimodal_token_space_processing": True,
                 "rollout_external_engine_addrs": None,
                 "custom_inference_engine_provider_path": None,
+                "use_session_server": False,
+                "use_miles_router": False,
                 **overrides,
             }
         )
@@ -4042,6 +4044,17 @@ class TestMultimodalTokenSpaceProcessingArgs:
 
     def test_supported_settings_pass(self):
         _check_multimodal_token_space_processing_args(self._args(), sglang=make_sglang_config(**self._SUPPORTED))
+
+    @pytest.mark.parametrize("use_session_server", [True, "v2"])
+    def test_the_session_server_without_the_miles_router_is_rejected(self, use_session_server):
+        args = self._args(use_session_server=use_session_server)
+
+        with pytest.raises(ValueError, match="needs --use-miles-router"):
+            _check_multimodal_token_space_processing_args(args, sglang=make_sglang_config(**self._SUPPORTED))
+
+    def test_the_session_server_with_the_miles_router_passes(self):
+        args = self._args(use_session_server="v2", use_miles_router=True)
+        _check_multimodal_token_space_processing_args(args, sglang=make_sglang_config(**self._SUPPORTED))
 
     def test_a_custom_inference_engine_provider_is_rejected(self):
         args = self._args(custom_inference_engine_provider_path="my.provider.fn")
