@@ -43,6 +43,7 @@ class OpenCodeCUA(OpenCode):
         settle_sec: float = 2.0,
         capture_cmd: str = "import -window root {out}",
         mcp_python: str = "python3",
+        mcp_env: dict[str, str] | None = None,
         max_turns: int | None = None,
         temperature: float | None = None,
         opencode_config: dict[str, Any] | None = None,
@@ -54,6 +55,7 @@ class OpenCodeCUA(OpenCode):
         self._settle_sec = settle_sec
         self._capture_cmd = capture_cmd
         self._mcp_python = mcp_python
+        self._mcp_env = dict(mcp_env or {})
         self._opencode_config = self._deep_merge(self._cua_config(max_turns, temperature), self._opencode_config)
 
     def _mcp_command(self, *extra: str) -> list[str]:
@@ -75,8 +77,11 @@ class OpenCodeCUA(OpenCode):
             build["steps"] = max_turns
         if temperature is not None:
             build["temperature"] = temperature
+        server = {"type": "local", "command": self._mcp_command("--log", _MCP_LOG)}
+        if self._mcp_env:
+            server["environment"] = self._mcp_env
         return {
-            "mcp": {"computer": {"type": "local", "command": self._mcp_command("--log", _MCP_LOG)}},
+            "mcp": {"computer": server},
             "permission": {"*": "deny", "computer_*": "allow"},
             "compaction": {"auto": False, "prune": False},
             "share": "disabled",
@@ -97,6 +102,7 @@ class OpenCodeCUA(OpenCode):
         await self.exec_as_agent(
             environment,
             f"for _ in $(seq 60); do DISPLAY={shlex.quote(self._display)} xdotool getdisplaygeometry && exit 0; sleep 1; done; exit 1",
+            env=self._mcp_env,
         )
 
     @with_prompt_template
@@ -111,7 +117,7 @@ class OpenCodeCUA(OpenCode):
         }
         await self.exec_as_agent(environment, self._build_register_config_command(), env=env)
         first = " ".join(shlex.quote(part) for part in self._mcp_command("--screenshot", _FIRST_SCREEN))
-        await self.exec_as_agent(environment, first)
+        await self.exec_as_agent(environment, first, env=self._mcp_env)
         try:
             await self.exec_as_agent(
                 environment,

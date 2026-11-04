@@ -97,3 +97,8 @@ def test_a_lost_desktop_is_raised_after_the_run(tmp_path):
 def test_a_policy_error_is_not_a_lost_desktop(tmp_path):
     env = FakeEnvironment(mcp_log=json.dumps({"action": {"action": "fly"}, "error": "unknown action"}) + "\n")
     asyncio.run(_agent(tmp_path).run("Open the file.", env, SimpleNamespace()))
+
+
+def test_the_mcp_environment_reaches_the_server_and_the_first_capture(tmp_path):
+    agent = _agent(tmp_path, mcp_env={"PATH": "/opt/env/bin:/usr/bin"})
+    assert _written_config(agent)["mcp"]["computer"]["environment"] == {"PATH": "/opt/env/bin:/usr/bin"}
