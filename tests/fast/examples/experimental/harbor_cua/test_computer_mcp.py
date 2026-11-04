@@ -179,7 +179,14 @@ def test_the_call_cap_stops_the_client(fake_desktop):
     server += f" --max-calls 2 --log {fake_desktop['log']}"
     calls = [_call(i, {"action": "wait", "time": 0}) for i in range(1, 4)]
     stdin = "".join(json.dumps(m) + "\n" for m in calls)
-    result = subprocess.run(["sh", "-c", f"{server}; echo client-survived"], input=stdin, capture_output=True, text=True, env=env, timeout=60)
+    result = subprocess.run(
+        ["sh", "-c", f"{server}; echo client-survived"],
+        input=stdin,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+    )
 
     assert result.returncode == -signal.SIGTERM
     assert [json.loads(line)["id"] for line in result.stdout.splitlines()] == [1, 2]
