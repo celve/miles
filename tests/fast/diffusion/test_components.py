@@ -47,3 +47,38 @@ def test_the_trainer_forwards_the_component_with_the_scale_the_engine_guided_it_
     actor.noise_pred(component, None, None, {}, None)
 
     assert [(kwargs["model"], kwargs["guidance_scale"]) for kwargs in seen] == [(model, scale)]
+
+
+def _check_on_rank(rank, world_size, port, components_per_rank, raised):
+    from tests.fast.dist_utils import init_gloo
+
+    from miles.diffusion.train.schedule import check_same_component_on_every_rank
+
+    init_gloo(rank, world_size, port=port)
+    try:
+        check_same_component_on_every_rank(
+            components_per_rank[rank],
+            components=("transformer", "transformer_2"),
+            group=None,
+            device=torch.device("cpu"),
+        )
+    except RuntimeError as error:
+        raised[rank] = str(error)
+    finally:
+        torch.distributed.destroy_process_group()
+
+
+@pytest.mark.parametrize(
+    "components_per_rank,expect_error",
+    [(("transformer", "transformer"), False), (("transformer", "transformer_2"), True)],
+)
+def test_ranks_that_would_forward_different_components_stop(components_per_rank, expect_error):
+    import torch.multiprocessing as mp
+
+    from tests.fast.dist_utils import find_free_port
+
+    raised = mp.Manager().dict()
+    mp.spawn(_check_on_rank, args=(2, find_free_port(), components_per_rank, raised), nprocs=2, join=True)
+
+    assert len(raised) == (2 if expect_error else 0)
+    assert all("['transformer', 'transformer_2']" in message for message in raised.values())
