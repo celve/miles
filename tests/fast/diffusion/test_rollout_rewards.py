@@ -153,3 +153,22 @@ async def test_a_prompt_that_overrides_pickscore_with_ocr_is_scored_on_an_ocr_po
 def test_a_prompt_cannot_select_pickscore_under_another_launch_reward(monkeypatch):
     with pytest.raises(ValueError, match="launch with --rm-type pickscore"):
         _rollout(monkeypatch, rm_type="ocr", prompt_metadata=[{"rm_type": "pickscore"}])
+
+
+def test_a_prompt_cannot_select_the_ocr_reward_in_a_video_run(monkeypatch):
+    monkeypatch.setattr(rollout_fn, "PickScorePool", _FakePickScorePool)
+    with pytest.raises(ValueError, match="only the first frame"):
+        _rollout(monkeypatch, rm_type="pickscore", diffusion_output_num_frames=5, prompt_metadata=[{"rm_type": "ocr"}])
+
+
+def test_a_global_custom_reward_builds_no_pool_for_the_overrides_it_replaces(monkeypatch):
+    monkeypatch.setattr(rollout_fn, "PickScorePool", _FakePickScorePool)
+    fn, _ = _rollout(
+        monkeypatch,
+        rm_type="pickscore",
+        custom_rm_path=f"{__name__}.fixed_steps",
+        diffusion_output_num_frames=5,
+        prompt_metadata=[{"rm_type": "ocr"}],
+    )
+
+    assert fn.reward_kwargs == {}
