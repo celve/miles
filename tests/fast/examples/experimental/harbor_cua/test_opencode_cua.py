@@ -3,7 +3,9 @@
 import asyncio
 import json
 import shlex
+from datetime import UTC, datetime
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -155,3 +157,17 @@ def test_a_first_screen_that_cannot_be_captured_is_a_lost_desktop(tmp_path):
     with pytest.raises(oc.DesktopLost):
         asyncio.run(_agent(tmp_path).run("Open the file.", env, SimpleNamespace()))
     assert not any(" run --format=json" in c for c in env.commands)
+
+
+def test_opencode_runs_where_it_is_about_noon(tmp_path):
+    env = FakeEnvironment()
+    asyncio.run(_agent(tmp_path).run("Open the file.", env, SimpleNamespace()))
+
+    (run_env,) = [e for c, e in zip(env.commands, env.envs, strict=True) if " run --format=json" in c]
+    assert 11 <= datetime.now(ZoneInfo(run_env["TZ"])).hour <= 13
+
+
+@pytest.mark.parametrize("hour", range(24))
+def test_every_utc_hour_maps_to_a_zone_at_noon(hour):
+    now = datetime(2026, 11, 4, hour, 30, tzinfo=UTC)
+    assert now.astimezone(ZoneInfo(oc._noon_zone(now))).hour == 12
