@@ -324,15 +324,27 @@ def two_experts(monkeypatch):
     return dict(diffusion_model_family="two_experts", diffusion_guidance_scale_2=3.0)
 
 
+_GLOBAL_STEPS = dict(
+    diffusion_step_strategy_path="miles.rollout.diffusion_rollout.step_strategy.epoch_global_random_choice",
+    diffusion_sde_candidate_steps="1,2,3",
+    diffusion_num_sde_steps=1,
+)
+
+
 def test_an_ema_algorithm_is_rejected_for_a_family_of_several_components(two_experts):
-    validate_diffusion_args(_supported(**two_experts))
+    validate_diffusion_args(_supported(**(two_experts | _GLOBAL_STEPS)))
     with pytest.raises(ValueError, match="EMA of one adapter"):
         validate_diffusion_args(_nft(**two_experts))
 
 
+def test_a_family_of_several_components_rejects_per_request_sde_windows(two_experts):
+    with pytest.raises(ValueError, match="sde_window draws each request's steps apart"):
+        validate_diffusion_args(_supported(**two_experts))
+
+
 def test_the_second_guidance_scale_is_required_exactly_by_a_family_that_guides_with_it(two_experts):
     with pytest.raises(ValueError, match="so pass it"):
-        validate_diffusion_args(_supported(**(two_experts | dict(diffusion_guidance_scale_2=None))))
+        validate_diffusion_args(_supported(**(two_experts | _GLOBAL_STEPS | dict(diffusion_guidance_scale_2=None))))
     with pytest.raises(ValueError, match="no second guidance scale"):
         validate_diffusion_args(_supported(diffusion_guidance_scale_2=3.0))
 

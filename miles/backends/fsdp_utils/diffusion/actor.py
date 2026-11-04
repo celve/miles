@@ -17,7 +17,7 @@ from miles.backends.fsdp_utils.diffusion.losses import get_diffusion_loss_functi
 from miles.backends.fsdp_utils.diffusion.metric_buffer import MetricBuffer
 from miles.backends.fsdp_utils.diffusion.model import DTYPES, load_fsdp_dit
 from miles.backends.fsdp_utils.diffusion.pipeline_config import get_train_pipeline_config
-from miles.backends.fsdp_utils.diffusion.schedule import tile_train_pairs
+from miles.backends.fsdp_utils.diffusion.schedule import check_same_component_on_every_rank, tile_train_pairs
 from miles.backends.fsdp_utils.diffusion.weight_sync import DiffusionLoraFromTensor, DiffusionLoraWeightIterator
 from miles.backends.fsdp_utils.lr_scheduler import get_lr_scheduler
 from miles.backends.fsdp_utils.parallel import create_fsdp_parallel_state
@@ -186,6 +186,18 @@ class DiffusionFSDPTrainRayActor(TorchNativeTrainRayActor):
             }
             logger.info(f"[train step {self.global_step}] rollout={rollout_id} {reduced}")
             log_metrics(self.args, reduced, step_key="train/step")
+
+    def component_for(self, timesteps: torch.Tensor) -> str:
+        """The component this micro-batch forwards, the same on every DP rank."""
+        component = self.pipeline_config.component_for_timesteps(timesteps)
+        if len(self.pipeline_config.components) > 1:
+            check_same_component_on_every_rank(
+                component,
+                components=self.pipeline_config.components,
+                group=get_parallel_state().intra_dp.group,
+                device=timesteps.device,
+            )
+        return component
 
     def noise_pred(self, component: str, latents, timesteps, pos_cond: dict, neg_cond: dict | None) -> torch.Tensor:
         with torch.autocast("cuda", dtype=self.forward_dtype, enabled=self.forward_dtype != torch.float32):

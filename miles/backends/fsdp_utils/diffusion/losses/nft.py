@@ -20,7 +20,7 @@ def microbatch_loss(actor, pairs: list[dict], *, rollout_id: int, microbatch_id:
     eps = torch.randn(batch.x0.shape, device=device, dtype=batch.x0.dtype, generator=generator)
     xt = corrupt(batch.x0, batch.t, eps)
     model_t = actor.pipeline_config.process_sigma_as_timesteps_input(batch.t)
-    component = actor.pipeline_config.component_for_timesteps(model_t)
+    component = actor.component_for(model_t)
     new_pred = actor.noise_pred(component, xt, model_t, batch.pos_cond, None)
     # pi_old is the EMA, which is also what the engines sample with.
     with torch.no_grad(), actor.ema.use_weights(actor.model):

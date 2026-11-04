@@ -207,6 +207,12 @@ def validate_diffusion_args(args) -> None:
             if config.guidance_scale_2_component
             else f"family {config.model_family} has no second guidance scale; drop --diffusion-guidance-scale-2"
         )
+    if len(config.components) > 1 and args.diffusion_step_strategy_path == f"{step_strategy.__name__}.sde_window":
+        raise ValueError(
+            f"family {config.model_family} routes timesteps to the components {list(config.components)}, which every "
+            "DP rank must forward in lockstep; sde_window draws each request's steps apart, so use "
+            "epoch_global_random_choice"
+        )
     if algorithm.uses_ema and len(config.components) > 1:
         raise ValueError(
             f"--loss-type {args.loss_type} keeps an EMA of one adapter, but family {config.model_family} trains "
