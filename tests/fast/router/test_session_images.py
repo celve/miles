@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -85,7 +86,7 @@ class ScriptedChatBackend:
     """A mock router in front of SGLang's chat route, which attaches the messages' images to pretokenized ids."""
 
     def __init__(
-        self, vlm, replies: list[str], *, count_bias: int = 0, drop_images: bool = False, token_space: bool = False
+        self, vlm, replies: list[str | dict], *, count_bias: int = 0, drop_images: bool = False, token_space: bool = False
     ):
         self.vlm = vlm
         self.replies = replies
@@ -158,8 +159,12 @@ class ScriptedChatBackend:
         counts = self.vlm.processor._get_num_multimodal_tokens(image_sizes=sizes).num_image_tokens
         return [int(count) + self.count_bias for count in counts]
 
+    def _scripted(self, index: int) -> str | dict:
+        return self.replies[min(index, len(self.replies) - 1)]
+
     def _output_ids(self, index: int) -> list[int]:
-        text = self.replies[min(index, len(self.replies) - 1)]
+        reply = self._scripted(index)
+        text = reply["raw"] if isinstance(reply, dict) else reply
         return self.vlm.tokenizer.encode(text, add_special_tokens=False)
 
     def _reply(self, payload: dict) -> dict:
@@ -175,15 +180,19 @@ class ScriptedChatBackend:
             )
             effective = effective[:start] + expanded
         output_ids = self._output_ids(index)
+        # A dict reply is what SGLang's tool-call parser returns for its raw text.
+        scripted = self._scripted(index)
+        message = scripted["message"] if isinstance(scripted, dict) else None
         choices = []
         for choice_index in range(payload.get("n") or 1):
             choice = {
                 "index": choice_index,
-                "message": {
+                "message": message
+                or {
                     "role": "assistant",
                     "content": self.vlm.tokenizer.decode(output_ids, skip_special_tokens=True),
                 },
-                "finish_reason": "stop",
+                "finish_reason": "tool_calls" if message and message.get("tool_calls") else "stop",
                 "meta_info": {
                     "id": f"chat-{index}",
                     "completion_tokens": len(output_ids),
@@ -260,7 +269,7 @@ def build_server(args_values: dict[str, Any], *, backend_url: str) -> tuple[Sess
 @contextmanager
 def image_router(
     vlm,
-    replies: list[str],
+    replies: list[str | dict],
     *,
     count_bias: int = 0,
     extra_args: dict | None = None,
@@ -811,3 +820,106 @@ class TestAgentCompatibility:
             choices = _post_chat(env.url, session_id, body).json()["choices"]
             counts = expected_counts(vlm, [SHOT1])
             assert [image_token_runs(choice["prompt_token_ids"], vlm.pad_id) for choice in choices] == [counts, counts]
+
+
+COMPUTER_USE = {
+    "type": "function",
+    "function": {
+        "name": "computer_use",
+        "description": "Use a mouse and keyboard to interact with a computer, and take screenshots.",
+        "parameters": {"type": "object", "properties": {"action": {"type": "string"}, "coordinate": {"type": "array"}}},
+    },
+}
+
+
+def tool_call_reply(text: str, call_id: str, arguments: dict) -> dict:
+    """Qwen3-VL's raw tool call and the message SGLang's parser makes of it."""
+    call = json.dumps({"name": "computer_use", "arguments": arguments})
+    return {
+        "raw": f"{text}<tool_call>\n{call}\n</tool_call>",
+        "message": {
+            "role": "assistant",
+            "content": text,
+            "tool_calls": [
+                {
+                    "id": call_id,
+                    "index": 0,
+                    "type": "function",
+                    "function": {"name": "computer_use", "arguments": json.dumps(arguments)},
+                }
+            ],
+        },
+    }
+
+
+def opencode_replay(call_id: str, text: str, arguments: dict, observation: str, screen: bytes | None) -> list[dict]:
+    """How OpenCode 1.19.5 sends a computer_use turn back (LIN-2696's captures): arguments re-serialised
+    without spaces, the tool's text as the tool message, and its screenshot in a user message after it."""
+    compact = json.dumps(arguments, separators=(",", ":"))
+    turn = [
+        {
+            "role": "assistant",
+            "content": text,
+            "tool_calls": [{"id": call_id, "type": "function", "function": {"name": "computer_use", "arguments": compact}}],
+        },
+        {"role": "tool", "tool_call_id": call_id, "content": observation},
+    ]
+    if screen is not None:
+        turn.append(
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "Attached media from tool result:"}, image_part(screen)],
+            }
+        )
+    return turn
+
+
+class TestOpenCodeComputerUse:
+    """OpenCode's computer_use episode: tool calls, tool text, and screenshots in user messages after them."""
+
+    REPLIES = [
+        tool_call_reply("Action: Click the icon.\n", "call_a", {"action": "left_click", "coordinate": [500, 300]}),
+        tool_call_reply("Action: Finish.\n", "call_b", {"action": "terminate", "status": "success"}),
+        "Done.",
+    ]
+
+    def _episode(self, env) -> tuple[str, list[int]]:
+        session_id = _create_session(env.url)
+        first = [
+            {"role": "system", "content": "You operate a Linux desktop."},
+            {"role": "user", "content": [image_part(SHOT1), {"type": "text", "text": "Open the settings app."}]},
+        ]
+        second = first + opencode_replay(
+            "call_a", "Action: Click the icon.\n", {"action": "left_click", "coordinate": [500, 300]}, "Performed left_click.", SHOT2
+        )
+        third = second + opencode_replay(
+            "call_b", "Action: Finish.\n", {"action": "terminate", "status": "success"}, "The task is terminated.", None
+        )
+        statuses = []
+        for messages in (first, second, third):
+            body = {"messages": messages, "tools": [COMPUTER_USE], "tool_choice": "auto", "temperature": 1.0, "stream": True}
+            statuses.append(_post_chat(env.url, session_id, body).status_code)
+        return session_id, statuses
+
+    def test_an_episode_is_one_sample_with_every_screenshot(self, vlm):
+        with image_router(vlm, self.REPLIES, extra_args={"session_message_matcher": "loose_tool_call"}) as env:
+            session_id, statuses = self._episode(env)
+            assert statuses == [200, 200, 200]
+            samples = collect(env.url, session_id)
+
+        assert len(samples) == 1
+        sample = samples[0]
+        assert image_token_runs(sample.tokens, vlm.pad_id) == expected_counts(vlm, [SHOT1, SHOT2])
+        assert len(sample.rollout_log_probs) == sample.response_length
+        trained = [t for t, m in zip(sample.tokens[-sample.response_length :], sample.loss_mask, strict=True) if m]
+        for reply in self.REPLIES:
+            raw = reply["raw"] if isinstance(reply, dict) else reply
+            ids = vlm.tokenizer.encode(raw, add_special_tokens=False)
+            assert any(trained[i : i + len(ids)] == ids for i in range(len(trained)))
+
+    def test_the_strict_matcher_splits_the_episode(self, vlm):
+        """Why the recipe needs loose_tool_call: OpenCode's compact arguments never match SGLang's."""
+        with image_router(vlm, self.REPLIES) as env:
+            session_id, statuses = self._episode(env)
+            assert statuses == [200, 200, 200]
+            assert len(collect(env.url, session_id)) > 1

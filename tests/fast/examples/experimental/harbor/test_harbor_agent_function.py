@@ -275,6 +275,27 @@ def test_opencode_binding_remaps_the_openai_provider(tasks_dir, monkeypatch):
     assert "max_turns" not in cfg.agent.kwargs
 
 
+def test_opencode_cua_binding_declares_images_and_caps_turns(tasks_dir, monkeypatch):
+    monkeypatch.setenv("AGENT_MODEL_NAME", "qwen")
+    monkeypatch.setenv("HARBOR_AGENT_MAX_ITERATIONS", "30")
+    cfg = haf.build_trial_config(
+        {"instance_id": "task-1", "agent_name": "opencode-cua"}, "http://s/v1", {"max_tokens": 512, "temperature": 1.0}
+    )
+    assert cfg.agent.import_path == "examples.experimental.harbor_cua.opencode_cua:OpenCodeCUA"
+    assert cfg.agent.name is None
+    assert cfg.agent.model_name == "openai-compatible/qwen"
+    # without image input declared, OpenCode drops the screenshots the computer tool returns
+    entry = cfg.agent.kwargs["opencode_config"]["provider"]["openai-compatible"]["models"]["qwen"]
+    assert entry["modalities"]["input"] == ["text", "image"] and entry["attachment"] is True
+    assert cfg.agent.kwargs["temperature"] == 1.0
+    assert cfg.agent.kwargs["max_turns"] == 30
+    assert cfg.agent.env["OPENAI_BASE_URL"] == "http://s/v1"
+
+
+def test_a_lost_desktop_discards_an_opencode_cua_trial(tasks_dir):
+    assert "DesktopLost" in haf.HARNESS_BINDINGS["opencode-cua"].sandbox_loss_exceptions
+
+
 _SESSION_SAMPLING = {"temperature": 1.0, "top_p": 1.0, "top_k": -1, "max_tokens": 512, "stop_token_ids": [151645]}
 
 
