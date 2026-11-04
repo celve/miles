@@ -434,18 +434,10 @@ class SessionCore:
 
             # prepare_token_ids_and_request_args applied any retry rollback, so token_ids is
             # the checkpoint this request builds on.
-            checkpoint_record = session.records[-1] if session.records else None
-            prepare_engine_request(
+            self._prepare_engine_request(
                 request_body,
                 checkpoint_token_ids=session.token_ids,
-                checkpoint_record=checkpoint_record,
-                token_space=self.config.multimodal_token_space_processing,
-            )
-            # R3 rows count the tokens the engine runs: the offset uses the engine's form.
-            self._maybe_request_addition_r3(
-                request_body,
-                engine_token_ids(session.token_ids, checkpoint_record),
-                request_body["input_ids"],
+                checkpoint_record=session.records[-1] if session.records else None,
             )
 
             # orjson: the body carries the whole prompt's input_ids on every turn.
@@ -513,6 +505,22 @@ class SessionCore:
         # --- lock released ---
 
         return _chat_client_response(result, response, response_intent)
+
+    def _prepare_engine_request(
+        self, request_body: dict, *, checkpoint_token_ids: list[int], checkpoint_record: SessionRecord | None
+    ) -> None:
+        prepare_engine_request(
+            request_body,
+            checkpoint_token_ids=checkpoint_token_ids,
+            checkpoint_record=checkpoint_record,
+            token_space=self.config.multimodal_token_space_processing,
+        )
+        # R3 rows count the tokens the engine runs: the offset uses the engine's form.
+        self._maybe_request_addition_r3(
+            request_body,
+            engine_token_ids(checkpoint_token_ids, checkpoint_record),
+            request_body["input_ids"],
+        )
 
     def _check_engine_prompt(self, request_body: dict, choice: dict) -> None:
         if self.image_token_counter is None:
