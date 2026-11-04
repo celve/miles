@@ -14,7 +14,7 @@ import hashlib
 import io
 import os
 import shutil
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -67,15 +67,7 @@ def collect_media_refs(messages: Iterable[dict[str, Any]], media_dir: str | None
     """
     multimodal_inputs: dict[str, list[str]] = {}
     for message in messages:
-        content = message.get("content")
-        if not isinstance(content, list):
-            continue
-        for part in content:
-            part_type = part.get("type") if isinstance(part, dict) else None
-            if part_type not in _PART_TYPES:
-                continue
-            key, fields = _PART_TYPES[part_type]
-            source = next((part[field] for field in fields if part.get(field) is not None), None)
+        for key, _, source in _media_parts(message):
             if isinstance(source, dict) and "url" in source:
                 source = source["url"]
             multimodal_inputs.setdefault(key, []).append(materialize_media_ref(source, media_dir))
@@ -84,12 +76,7 @@ def collect_media_refs(messages: Iterable[dict[str, Any]], media_dir: str | None
 
 def has_message_media(messages: Iterable[dict[str, Any]]) -> bool:
     """Whether any message holds an image, audio or video part."""
-    return any(
-        isinstance(part, dict) and part.get("type") in _PART_TYPES
-        for message in messages
-        if isinstance(message.get("content"), list)
-        for part in message["content"]
-    )
+    return any(next(_media_parts(message), None) is not None for message in messages)
 
 
 def materialize_message_media(messages: list[dict[str, Any]], media_dir: str | None) -> list[dict[str, Any]]:
@@ -101,25 +88,36 @@ def materialize_message_media(messages: list[dict[str, Any]], media_dir: str | N
     """
     out = []
     for message in messages:
-        content = message.get("content")
-        if not isinstance(content, list) or not has_message_media([message]):
+        if not has_message_media([message]):
             out.append(message)
             continue
         parts = []
-        for part in content:
-            if not isinstance(part, dict) or part.get("type") not in _PART_TYPES:
-                parts.append(part)
-                continue
-            _, fields = _PART_TYPES[part["type"]]
-            field = next((field for field in fields if part.get(field) is not None), None)
-            source = part[field] if field is not None else None
-            if isinstance(source, dict) and "url" in source:
-                part = {**part, field: {**source, "url": materialize_media_ref(source["url"], media_dir)}}
-            else:
-                part = {**part, field: materialize_media_ref(source, media_dir)}
+        for part in message["content"]:
+            media = _media_part(part)
+            if media is not None:
+                _, field, source = media
+                if isinstance(source, dict) and "url" in source:
+                    part = {**part, field: {**source, "url": materialize_media_ref(source["url"], media_dir)}}
+                else:
+                    part = {**part, field: materialize_media_ref(source, media_dir)}
             parts.append(part)
         out.append({**message, "content": parts})
     return out
+
+
+def _media_parts(message: dict[str, Any]) -> Iterator[tuple[str, str | None, Any]]:
+    content = message.get("content")
+    if isinstance(content, list):
+        yield from filter(None, map(_media_part, content))
+
+
+def _media_part(part: Any) -> tuple[str, str | None, Any] | None:
+    """A media part's ``multimodal_inputs`` key, the field holding its source, and the source; None otherwise."""
+    if not isinstance(part, dict) or part.get("type") not in _PART_TYPES:
+        return None
+    key, fields = _PART_TYPES[part["type"]]
+    field = next((field for field in fields if part.get(field) is not None), None)
+    return key, field, part[field] if field is not None else None
 
 
 def materialize_media_ref(source: Any, media_dir: str | None) -> str:
