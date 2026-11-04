@@ -118,3 +118,18 @@ async def test_pickscore_scores_each_microgroup_in_one_batched_call(monkeypatch)
 
     assert reward_calls == [2, 2] and fn.reward_pool.calls == [2, 2]
     assert [sample.reward for sample in group] == [0.25] * 4
+
+
+async def test_a_sample_that_overrides_the_reward_leaves_the_pickscore_batch():
+    from miles.rollout.rm_hub import batched_async_rm
+
+    pool = _FakePickScorePool(None)
+    args = Namespace(**parser_defaults() | dict(rm_type="pickscore", custom_rm_path=None))
+    samples = [Sample(index=0, prompt="p"), Sample(index=1, prompt="p", metadata={"rm_type": "deterministic_random"})]
+    for sample in samples:
+        sample.diffusion = DiffusionRollout(generated_output=torch.zeros(3, 1, 4, 4))
+        sample.tokens, sample.response = [], ""
+
+    rewards = await batched_async_rm(args, samples, pickscore_pool=pool)
+
+    assert pool.calls == [1] and rewards[0] == 0.25 and rewards[1] in (0, 1)
