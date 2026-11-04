@@ -39,9 +39,11 @@ class DiffusionRolloutFn(BaseRolloutFn):
         self.algorithm = get_algorithm(args.loss_type)
         self.sampling_params = build_sampling_params(args)
         self.semaphore: asyncio.Semaphore | None = None
-        # rm_hub runs --custom-rm-path ahead of --rm-type, so a built-in pool exists only when that reward scores.
-        self.reward_pool, self.reward_kwargs = (
-            (None, {}) if args.custom_rm_path is not None else _build_reward_pool(args)
+        # rm_hub runs --custom-rm-path ahead of --rm-type, so built-in pools exist only when no global custom reward does.
+        self.reward_kwargs = (
+            {}
+            if args.custom_rm_path is not None
+            else _build_reward_pools(args, _selected_rm_types(args, self.data_source))
         )
         self.client = httpx.AsyncClient(limits=httpx.Limits(max_keepalive_connections=0), timeout=httpx.Timeout(None))
 
@@ -111,19 +113,32 @@ class DiffusionRolloutFn(BaseRolloutFn):
 
     async def dispose(self) -> None:
         await self.client.aclose()
-        if self.reward_pool is not None:
-            self.reward_pool.shutdown()
+        for pool in self.reward_kwargs.values():
+            pool.shutdown()
 
 
-def _build_reward_pool(args: Namespace) -> tuple[OcrRewardPool | PickScorePool | None, dict[str, Any]]:
-    """The built-in reward's scorers, owned by the rollout and handed to `rm_hub` through its kwargs."""
-    if args.rm_type == "ocr":
-        pool = OcrRewardPool(num_workers=args.diffusion_ocr_num_workers)
-        return pool, {"ocr_pool": pool}
-    if args.rm_type == "pickscore":
-        pool = PickScorePool(args)
-        return pool, {"pickscore_pool": pool}
-    return None, {}
+def _selected_rm_types(args: Namespace, data_source) -> set[str]:
+    """The launch reward and every reward a prompt's metadata `rm_type` overrides it with."""
+    overrides = {
+        str(metadata.get("rm_type")).strip() for _, metadata, _ in data_source.dataset if metadata.get("rm_type")
+    }
+    return {args.rm_type} | overrides
+
+
+def _build_reward_pools(args: Namespace, rm_types: set[str]) -> dict[str, OcrRewardPool | PickScorePool]:
+    """The scorers of every built-in reward the run can select, owned by the rollout and handed to `rm_hub` through
+    its kwargs; each reward reads its own pool."""
+    pools: dict[str, OcrRewardPool | PickScorePool] = {}
+    if "ocr" in rm_types:
+        pools["ocr_pool"] = OcrRewardPool(num_workers=args.diffusion_ocr_num_workers)
+    if "pickscore" in rm_types:
+        if args.rm_type != "pickscore":
+            raise ValueError(
+                "a prompt selects the PickScore reward, whose flags only --rm-type pickscore accepts; launch with "
+                "--rm-type pickscore and let the other prompts override it"
+            )
+        pools["pickscore_pool"] = PickScorePool(args)
+    return pools
 
 
 def build_sampling_params(args: Namespace) -> dict[str, Any]:

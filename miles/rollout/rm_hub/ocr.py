@@ -101,7 +101,7 @@ class OcrRewardPool:
         self._executor.shutdown(cancel_futures=True)
 
 
-async def ocr_rm(args, sample: Sample, *, ocr_pool: OcrRewardPool) -> float:
+async def ocr_rm(args, sample: Sample, *, ocr_pool: OcrRewardPool, **_other_pools) -> float:
     """`--rm-type ocr`: the reward of one generated image, scored on the rollout's own pool."""
     assert sample.diffusion is not None, "--rm-type ocr scores diffusion samples only"
     image = image_to_rgb_uint8(sample.diffusion.generated_output)
