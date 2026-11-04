@@ -22,8 +22,8 @@ harbor = pytest.importorskip("harbor")
 import harbor_agent_function as haf  # noqa: E402
 from examples.experimental.harbor_cua.opencode_cua import OpenCodeCUA  # noqa: E402
 from examples.experimental.harbor_cua.qwen_computer import Qwen3VLComputer1  # noqa: E402
-from harbor.agents.computer_1.computer_1 import Computer1Chat, EpisodeLoggingPaths  # noqa: E402
 from harbor.agents.base import BaseAgent  # noqa: E402
+from harbor.agents.computer_1.computer_1 import Computer1Chat, EpisodeLoggingPaths  # noqa: E402
 from harbor.agents.factory import AgentFactory  # noqa: E402
 from harbor.models.agent.name import AgentName  # noqa: E402
 from harbor.models.environment_type import EnvironmentType  # noqa: E402

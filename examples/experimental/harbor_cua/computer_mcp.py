@@ -227,7 +227,9 @@ class Desktop:
         started = time.monotonic()
         action = args.get("action")
         if action == "terminate":
-            content = [{"type": "text", "text": f"The task is terminated with status {args.get('status', 'success')}."}]
+            content = [
+                {"type": "text", "text": f"The task is terminated with status {args.get('status', 'success')}."}
+            ]
         elif action == "answer":
             content = [{"type": "text", "text": "The answer is recorded."}]
         else:
@@ -249,7 +251,9 @@ class Desktop:
                 {"type": "text", "text": f"Performed {action}."},
                 {"type": "image", "data": base64.b64encode(png).decode(), "mimeType": "image/png"},
             ]
-        self._log({"action": args, "screenshot": action not in _NO_SCREEN, "sec": round(time.monotonic() - started, 3)})
+        self._log(
+            {"action": args, "screenshot": action not in _NO_SCREEN, "sec": round(time.monotonic() - started, 3)}
+        )
         return {"content": content}
 
     def _log(self, row: dict) -> None:

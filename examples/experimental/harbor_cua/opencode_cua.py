@@ -14,12 +14,11 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+from examples.experimental.harbor_cua.osworld_qwen.qwen3vl import _system_prompt
 from harbor.agents.installed.base import NonZeroAgentExitCodeError, with_prompt_template
 from harbor.agents.installed.opencode import OpenCode
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
-
-from examples.experimental.harbor_cua.osworld_qwen.qwen3vl import _system_prompt
 
 # The release the request shapes were probed on (LIN-2696); OpenCode's 2.x line is a different package.
 OPENCODE_VERSION = "1.19.5"

@@ -33,14 +33,23 @@ def test_the_tool_is_qwen3_vls_computer_use():
     [
         ({"action": "left_click", "coordinate": [500, 300]}, ["mousemove", "960", "324", "click", "1"]),
         ({"action": "right_click", "coordinate": [0, 999]}, ["mousemove", "0", "1079", "click", "3"]),
-        ({"action": "double_click", "coordinate": [999, 0]}, ["mousemove", "1919", "0", "click", "--repeat", "2", "1"]),
+        (
+            {"action": "double_click", "coordinate": [999, 0]},
+            ["mousemove", "1919", "0", "click", "--repeat", "2", "1"],
+        ),
         ({"action": "triple_click", "coordinate": [10, 10]}, ["mousemove", "19", "11", "click", "--repeat", "3", "1"]),
-        ({"action": "left_click_drag", "coordinate": [500, 500]}, ["mousedown", "1", "mousemove", "960", "540", "mouseup", "1"]),
+        (
+            {"action": "left_click_drag", "coordinate": [500, 500]},
+            ["mousedown", "1", "mousemove", "960", "540", "mouseup", "1"],
+        ),
         ({"action": "type", "text": "hi\nthere"}, ["type", "--clearmodifiers", "--", "hi\nthere"]),
         ({"action": "key", "keys": ["ctrl", "c"]}, ["key", "--clearmodifiers", "ctrl+c"]),
         ({"action": "key", "keys": ["Enter"]}, ["key", "--clearmodifiers", "Return"]),
         ({"action": "scroll", "pixels": -5}, ["click", "--repeat", "5", "5"]),
-        ({"action": "scroll", "pixels": 3, "coordinate": [500, 500]}, ["mousemove", "960", "540", "click", "--repeat", "3", "4"]),
+        (
+            {"action": "scroll", "pixels": 3, "coordinate": [500, 500]},
+            ["mousemove", "960", "540", "click", "--repeat", "3", "4"],
+        ),
         ({"action": "wait", "time": 1}, None),
         ({"action": "terminate", "status": "success"}, None),
     ],
@@ -68,7 +77,11 @@ def test_malformed_actions_are_the_policys_errors(args):
 def test_clicks_match_computer_1(monkeypatch):
     runtime = pytest.importorskip("harbor.agents.computer_1.runtime")
     geometry = runtime.DisplayGeometry(desktop_width=GEOMETRY[0], desktop_height=GEOMETRY[1])
-    for qwen, harbor_type in (("left_click", "click"), ("double_click", "double_click"), ("right_click", "right_click")):
+    for qwen, harbor_type in (
+        ("left_click", "click"),
+        ("double_click", "double_click"),
+        ("right_click", "right_click"),
+    ):
         for x, y in ((0, 0), (500, 300), (999, 999), (123, 877)):
             hx, hy = runtime.scale_normalized_coordinate(x, y, geometry)
             action = runtime.ComputerAction(type=harbor_type, x=hx, y=hy)

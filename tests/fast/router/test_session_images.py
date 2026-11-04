@@ -86,7 +86,13 @@ class ScriptedChatBackend:
     """A mock router in front of SGLang's chat route, which attaches the messages' images to pretokenized ids."""
 
     def __init__(
-        self, vlm, replies: list[str | dict], *, count_bias: int = 0, drop_images: bool = False, token_space: bool = False
+        self,
+        vlm,
+        replies: list[str | dict],
+        *,
+        count_bias: int = 0,
+        drop_images: bool = False,
+        token_space: bool = False,
     ):
         self.vlm = vlm
         self.replies = replies
@@ -827,7 +833,10 @@ COMPUTER_USE = {
     "function": {
         "name": "computer_use",
         "description": "Use a mouse and keyboard to interact with a computer, and take screenshots.",
-        "parameters": {"type": "object", "properties": {"action": {"type": "string"}, "coordinate": {"type": "array"}}},
+        "parameters": {
+            "type": "object",
+            "properties": {"action": {"type": "string"}, "coordinate": {"type": "array"}},
+        },
     },
 }
 
@@ -860,7 +869,9 @@ def opencode_replay(call_id: str, text: str, arguments: dict, observation: str, 
         {
             "role": "assistant",
             "content": text,
-            "tool_calls": [{"id": call_id, "type": "function", "function": {"name": "computer_use", "arguments": compact}}],
+            "tool_calls": [
+                {"id": call_id, "type": "function", "function": {"name": "computer_use", "arguments": compact}}
+            ],
         },
         {"role": "tool", "tool_call_id": call_id, "content": observation},
     ]
@@ -890,14 +901,28 @@ class TestOpenCodeComputerUse:
             {"role": "user", "content": [image_part(SHOT1), {"type": "text", "text": "Open the settings app."}]},
         ]
         second = first + opencode_replay(
-            "call_a", "Action: Click the icon.\n", {"action": "left_click", "coordinate": [500, 300]}, "Performed left_click.", SHOT2
+            "call_a",
+            "Action: Click the icon.\n",
+            {"action": "left_click", "coordinate": [500, 300]},
+            "Performed left_click.",
+            SHOT2,
         )
         third = second + opencode_replay(
-            "call_b", "Action: Finish.\n", {"action": "terminate", "status": "success"}, "The task is terminated.", None
+            "call_b",
+            "Action: Finish.\n",
+            {"action": "terminate", "status": "success"},
+            "The task is terminated.",
+            None,
         )
         statuses = []
         for messages in (first, second, third):
-            body = {"messages": messages, "tools": [COMPUTER_USE], "tool_choice": "auto", "temperature": 1.0, "stream": True}
+            body = {
+                "messages": messages,
+                "tools": [COMPUTER_USE],
+                "tool_choice": "auto",
+                "temperature": 1.0,
+                "stream": True,
+            }
             statuses.append(_post_chat(env.url, session_id, body).status_code)
         return session_id, statuses
 
