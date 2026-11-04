@@ -5,6 +5,12 @@ OpenCode's coding setup is switched off so a request carries only what the polic
 call and compaction, which would add requests outside the episode or rewrite its history, are off.
 The desktop is the image's own (an X server already on ``display``), and the first screen rides the
 first user message, since ``computer_use`` has no screenshot action.
+
+Bound as ``agent_name`` ``opencode-cua``. A run needs ``--sglang-tool-call-parser qwen25`` (Qwen3-VL's tool calls),
+``--session-message-matcher loose_tool_call`` (OpenCode re-serialises tool arguments, which strict matching splits
+into several samples), and a ``--max-seq-len`` above an episode's length (every screenshot stays in the history:
+15 turns at 1080p are ~33K tokens). The in-repo launcher's browser tasks rely on computer-1 starting the desktop,
+so they do not run under this agent.
 """
 
 from __future__ import annotations

@@ -144,6 +144,13 @@ def test_an_mcp_session_over_stdio(fake_desktop):
     assert [("error" in r, r.get("screenshot")) for r in rows] == [(False, True), (True, None), (False, False)]
 
 
+def test_a_capture_that_writes_nothing_is_the_desktops_failure(fake_desktop):
+    responses = _serve(fake_desktop, [_call(1, {"action": "wait", "time": 0})], "true")
+    assert responses[0]["result"]["isError"] is True
+    (row,) = [json.loads(line) for line in Path(fake_desktop["log"]).read_text().splitlines()]
+    assert "infra_error" in row
+
+
 def test_a_failed_capture_is_logged_as_the_desktops_failure(fake_desktop):
     responses = _serve(fake_desktop, [_call(1, {"action": "wait", "time": 0})], "exit 3")
     assert responses[0]["result"]["isError"] is True

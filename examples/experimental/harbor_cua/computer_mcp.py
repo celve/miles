@@ -224,8 +224,11 @@ class Desktop:
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "screen.png")
             self.screenshot(path)
-            with open(path, "rb") as f:
-                return f.read()
+            try:
+                with open(path, "rb") as f:
+                    return f.read()
+            except OSError as exc:
+                raise CaptureError(f"the capture command wrote no screenshot: {exc}") from exc
 
     def call(self, args: dict) -> dict:
         started = time.monotonic()
