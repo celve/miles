@@ -113,7 +113,7 @@ def test_every_opencode_invocation_uses_its_own_config_dir(tmp_path):
     asyncio.run(agent.setup(env))
     asyncio.run(agent.run("Open the file.", env, SimpleNamespace()))
 
-    calls = [(c, e) for c, e in zip(env.commands, env.envs, strict=True) if "opencode" in c and "computer_mcp" not in c]
+    calls = [(c, e) for c, e in zip(env.commands, env.envs, strict=True) if "opencode" in c and "--screenshot" not in c]
     assert calls and all(e.get("XDG_CONFIG_HOME") == "/installed-agent/computer/xdg-config" for _, e in calls)
     config = next(c for c, _ in calls if "opencode.json" in c)
     assert '"$XDG_CONFIG_HOME/opencode"/opencode.json' in config and "~/.config" not in config
