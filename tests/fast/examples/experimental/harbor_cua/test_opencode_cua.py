@@ -14,13 +14,16 @@ from harbor.agents.installed.base import NonZeroAgentExitCodeError  # noqa: E402
 
 
 class FakeEnvironment:
-    def __init__(self, *, version: str = oc.OPENCODE_VERSION, mcp_log: str = "", opencode_exit: int = 0):
+    def __init__(
+        self, *, version: str = oc.OPENCODE_VERSION, mcp_log: str = "", opencode_exit: int = 0, capture_exit: int = 0
+    ):
         self.commands: list[str] = []
         self.envs: list[dict] = []
         self.uploads: list[tuple[str, str]] = []
         self._version = version
         self._mcp_log = mcp_log
         self._opencode_exit = opencode_exit
+        self._capture_exit = capture_exit
 
     async def exec(self, command, user=None, env=None, cwd=None, timeout_sec=None, **_):
         self.commands.append(command)
@@ -29,6 +32,8 @@ class FakeEnvironment:
             return SimpleNamespace(return_code=0, stdout=f"{self._version}\n", stderr="")
         if command.startswith("cat ") and "computer_mcp.jsonl" in command:
             return SimpleNamespace(return_code=0, stdout=self._mcp_log, stderr="")
+        if "--screenshot" in command:
+            return SimpleNamespace(return_code=self._capture_exit, stdout="", stderr="infra_error: no screenshot")
         if " run --format=json" in command:
             return SimpleNamespace(return_code=self._opencode_exit, stdout="", stderr="")
         return SimpleNamespace(return_code=0, stdout="", stderr="")
@@ -142,3 +147,11 @@ def test_opencode_failing_without_the_server_stopping_it_still_fails(tmp_path):
     env = FakeEnvironment(mcp_log=_row("left_click", screenshot=True), opencode_exit=1)
     with pytest.raises(NonZeroAgentExitCodeError):
         asyncio.run(_agent(tmp_path).run("Open the file.", env, SimpleNamespace()))
+
+
+def test_a_first_screen_that_cannot_be_captured_is_a_lost_desktop(tmp_path):
+    """Before any policy call, so the trial is discarded rather than scored."""
+    env = FakeEnvironment(capture_exit=1)
+    with pytest.raises(oc.DesktopLost):
+        asyncio.run(_agent(tmp_path).run("Open the file.", env, SimpleNamespace()))
+    assert not any(" run --format=json" in c for c in env.commands)

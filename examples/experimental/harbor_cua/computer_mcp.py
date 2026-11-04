@@ -219,16 +219,15 @@ class Desktop:
             self._run(["bash", "-c", self.capture_cmd.replace("{out}", shlex.quote(out))])
         except (RuntimeError, subprocess.TimeoutExpired) as exc:
             raise CaptureError(f"screen capture failed: {exc}") from exc
+        if not os.path.isfile(out) or os.path.getsize(out) == 0:
+            raise CaptureError(f"the capture command wrote no screenshot to {out}")
 
     def screenshot_png(self) -> bytes:
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "screen.png")
             self.screenshot(path)
-            try:
-                with open(path, "rb") as f:
-                    return f.read()
-            except OSError as exc:
-                raise CaptureError(f"the capture command wrote no screenshot: {exc}") from exc
+            with open(path, "rb") as f:
+                return f.read()
 
     def call(self, args: dict) -> dict:
         started = time.monotonic()
@@ -315,7 +314,10 @@ def main() -> None:
     args = parser.parse_args()
     desktop = Desktop(args.display, args.settle_sec, args.capture_cmd, args.log)
     if args.screenshot:
-        desktop.screenshot(args.screenshot)
+        try:
+            desktop.screenshot(args.screenshot)
+        except CaptureError as exc:
+            sys.exit(f"infra_error: {exc}")
         return
     calls = 0
     for line in sys.stdin:
