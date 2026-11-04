@@ -113,7 +113,10 @@ class DiffusionRolloutFn(BaseRolloutFn):
 
 
 def _selected_rm_types(args: Namespace, data_source) -> set[str]:
-    """The launch reward and every reward a prompt's metadata `rm_type` overrides it with."""
+    """The launch reward and every reward a prompt's metadata `rm_type` overrides it with; a global custom reward
+    takes every sample, so it selects only the launch reward's pool."""
+    if args.custom_rm_path is not None:
+        return {args.rm_type}
     overrides = {
         str(metadata.get("rm_type")).strip() for _, metadata, _ in data_source.dataset if metadata.get("rm_type")
     }
@@ -124,6 +127,8 @@ def _build_reward_pools(args: Namespace, rm_types: set[str]) -> dict[str, OcrRew
     """The scorers of every built-in reward the run can select, owned by the rollout and handed to `rm_hub` through
     its kwargs; each reward reads its own pool."""
     pools: dict[str, OcrRewardPool | PickScorePool] = {}
+    if "ocr" in rm_types and args.diffusion_output_num_frames != 1:
+        raise ValueError("a prompt selects the OCR reward, which reads only the first frame, in a video run")
     if "ocr" in rm_types:
         pools["ocr_pool"] = OcrRewardPool(num_workers=args.diffusion_ocr_num_workers)
     if "pickscore" in rm_types:
