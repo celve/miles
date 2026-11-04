@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import shlex
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -128,7 +129,7 @@ class OpenCodeCUA(OpenCode):
         self._instruction = instruction
         if not self.model_name or "/" not in self.model_name:
             raise ValueError("Model name must be in the format provider/model_name")
-        env = {"OPENCODE_FAKE_VCS": "git", **_XDG}
+        env = {"OPENCODE_FAKE_VCS": "git", "TZ": _noon_zone(datetime.now(UTC)), **_XDG}
         await self.exec_as_agent(environment, self._register_config_command(), env=env)
         first = " ".join(shlex.quote(part) for part in self._mcp_command("--screenshot", _FIRST_SCREEN))
         try:
@@ -171,6 +172,12 @@ class OpenCodeCUA(OpenCode):
             except json.JSONDecodeError:
                 continue
         return rows
+
+
+def _noon_zone(now: datetime) -> str:
+    """A zone where ``now`` is about noon: OpenCode puts the local date in every request's system prompt, so an
+    episode that crossed midnight would no longer extend its own history."""
+    return f"Etc/GMT{now.hour - 12:+d}"
 
 
 def _raise_if_desktop_lost(rows: list[dict[str, Any]]) -> None:
