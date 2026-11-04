@@ -26,6 +26,8 @@ MCP_SERVER = Path(__file__).with_name("computer_mcp.py")
 _REMOTE_DIR = "/installed-agent/computer"
 _MCP_LOG = "/logs/agent/computer_mcp.jsonl"
 _FIRST_SCREEN = f"{_REMOTE_DIR}/first.png"
+# An empty working directory: OpenCode indexes and git-snapshots the one it starts in.
+_WORK = f"{_REMOTE_DIR}/work"
 _PATH = 'export PATH="$HOME/.opencode/bin:$PATH"; [ -s "$HOME/.nvm/nvm.sh" ] && . "$HOME/.nvm/nvm.sh"; '
 # OpenCode's own dirs, for every invocation: an image's ~/.config can belong to another user than the agent's.
 _XDG = {
@@ -84,7 +86,7 @@ class OpenCodeCUA(OpenCode):
             build["steps"] = max_turns
         if temperature is not None:
             build["temperature"] = temperature
-        server = {"type": "local", "command": self._mcp_command("--log", _MCP_LOG)}
+        server = {"type": "local", "command": self._mcp_command("--log", _MCP_LOG, "--stop-on-terminate")}
         if self._mcp_env:
             server["environment"] = self._mcp_env
         return {
@@ -92,6 +94,7 @@ class OpenCodeCUA(OpenCode):
             "permission": {"*": "deny", "computer_*": "allow"},
             "compaction": {"auto": False, "prune": False},
             "share": "disabled",
+            "snapshot": False,
             "autoupdate": False,
             "agent": {"title": {"disable": True}, "build": build},
         }
@@ -124,15 +127,23 @@ class OpenCodeCUA(OpenCode):
         try:
             await self.exec_as_agent(
                 environment,
-                _PATH + f"opencode --model={shlex.quote(self.model_name)} run --format=json --thinking "
+                f"mkdir -p {_WORK} && cd {_WORK} && "
+                + _PATH
+                + f"opencode --model={shlex.quote(self.model_name)} run --format=json --thinking "
                 f"--file {_FIRST_SCREEN} --dangerously-skip-permissions -- {shlex.quote(instruction)} "
                 "2>&1 </dev/null | stdbuf -oL tee /logs/agent/opencode.txt",
                 env=env,
             )
-            if messages := self._error_messages():
-                raise NonZeroAgentExitCodeError("OpenCode emitted error event(s): " + "; ".join(messages[:3]))
-        finally:
-            await self._raise_if_desktop_lost(environment)
+        except Exception as exc:
+            rows = await self._mcp_rows(environment)
+            _raise_if_desktop_lost(rows)
+            # The server stops OpenCode once the policy terminates, so that exit is the episode's end.
+            if not (isinstance(exc, NonZeroAgentExitCodeError) and _ended_by_terminate(rows)):
+                raise
+            return
+        _raise_if_desktop_lost(await self._mcp_rows(environment))
+        if messages := self._error_messages():
+            raise NonZeroAgentExitCodeError("OpenCode emitted error event(s): " + "; ".join(messages[:3]))
 
     def _register_config_command(self) -> str:
         command = self._build_register_config_command()
@@ -140,12 +151,22 @@ class OpenCodeCUA(OpenCode):
             raise RuntimeError("Harbor's OpenCode no longer writes its config to ~/.config/opencode")
         return command.replace("~/.config/opencode", '"$XDG_CONFIG_HOME/opencode"')
 
-    async def _raise_if_desktop_lost(self, environment: BaseEnvironment) -> None:
+    async def _mcp_rows(self, environment: BaseEnvironment) -> list[dict[str, Any]]:
         result = await environment.exec(command=f"cat {_MCP_LOG} 2>/dev/null || true")
+        rows = []
         for line in (result.stdout or "").splitlines():
             try:
-                row = json.loads(line)
+                rows.append(json.loads(line))
             except json.JSONDecodeError:
                 continue
-            if "infra_error" in row:
-                raise DesktopLost(row["infra_error"])
+        return rows
+
+
+def _raise_if_desktop_lost(rows: list[dict[str, Any]]) -> None:
+    for row in rows:
+        if "infra_error" in row:
+            raise DesktopLost(row["infra_error"])
+
+
+def _ended_by_terminate(rows: list[dict[str, Any]]) -> bool:
+    return bool(rows) and (rows[-1].get("action") or {}).get("action") == "terminate" and "error" not in rows[-1]

@@ -10,15 +10,17 @@ import pytest
 pytest.importorskip("harbor", reason="pip install harbor -- the recipe's one extra dependency")
 
 from examples.experimental.harbor_cua import opencode_cua as oc  # noqa: E402
+from harbor.agents.installed.base import NonZeroAgentExitCodeError  # noqa: E402
 
 
 class FakeEnvironment:
-    def __init__(self, *, version: str = oc.OPENCODE_VERSION, mcp_log: str = ""):
+    def __init__(self, *, version: str = oc.OPENCODE_VERSION, mcp_log: str = "", opencode_exit: int = 0):
         self.commands: list[str] = []
         self.envs: list[dict] = []
         self.uploads: list[tuple[str, str]] = []
         self._version = version
         self._mcp_log = mcp_log
+        self._opencode_exit = opencode_exit
 
     async def exec(self, command, user=None, env=None, cwd=None, timeout_sec=None, **_):
         self.commands.append(command)
@@ -27,6 +29,8 @@ class FakeEnvironment:
             return SimpleNamespace(return_code=0, stdout=f"{self._version}\n", stderr="")
         if command.startswith("cat ") and "computer_mcp.jsonl" in command:
             return SimpleNamespace(return_code=0, stdout=self._mcp_log, stderr="")
+        if " run --format=json" in command:
+            return SimpleNamespace(return_code=self._opencode_exit, stdout="", stderr="")
         return SimpleNamespace(return_code=0, stdout="", stderr="")
 
     async def upload_file(self, source_path, target_path):
@@ -54,12 +58,14 @@ def test_the_config_leaves_only_the_computer_tool_and_no_side_requests(tmp_path)
     assert config["permission"] == {"*": "deny", "computer_*": "allow"}
     assert config["agent"]["title"] == {"disable": True}
     assert config["compaction"] == {"auto": False, "prune": False}
+    assert config["snapshot"] is False
     build = config["agent"]["build"]
     assert build["steps"] == 30 and build["temperature"] == 1.0
     assert build["prompt"].endswith(oc.RESPONSE_FORMAT)
     command = config["mcp"]["computer"]["command"]
     assert command[:2] == ["python3", "/installed-agent/computer/computer_mcp.py"]
     assert command[command.index("--log") + 1] == "/logs/agent/computer_mcp.jsonl"
+    assert "--stop-on-terminate" in command
     assert config["provider"]["openai-compatible"]["models"]["m"]["modalities"]["input"] == ["text", "image"]
 
 
@@ -119,3 +125,18 @@ def test_every_opencode_invocation_uses_its_own_config_dir(tmp_path):
     assert calls and all(e.get("XDG_CONFIG_HOME") == "/installed-agent/computer/xdg-config" for _, e in calls)
     config = next(c for c, _ in calls if "opencode.json" in c)
     assert '"$XDG_CONFIG_HOME/opencode"/opencode.json' in config and "~/.config" not in config
+
+
+def _row(action: str, **extra) -> str:
+    return json.dumps({"action": {"action": action}, **extra}) + "\n"
+
+
+def test_opencode_stopped_by_a_terminate_ends_the_episode_cleanly(tmp_path):
+    env = FakeEnvironment(mcp_log=_row("left_click", screenshot=True) + _row("terminate"), opencode_exit=143)
+    asyncio.run(_agent(tmp_path).run("Open the file.", env, SimpleNamespace()))
+
+
+def test_opencode_failing_without_a_terminate_still_fails(tmp_path):
+    env = FakeEnvironment(mcp_log=_row("left_click", screenshot=True), opencode_exit=1)
+    with pytest.raises(NonZeroAgentExitCodeError):
+        asyncio.run(_agent(tmp_path).run("Open the file.", env, SimpleNamespace()))

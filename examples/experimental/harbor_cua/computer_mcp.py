@@ -8,6 +8,8 @@ Every action but ``terminate`` and ``answer`` returns a screenshot taken after `
 
     python3 computer_mcp.py [--display :1] [--settle-sec 2] [--capture-cmd 'import -window root {out}'] [--log f.jsonl]
     python3 computer_mcp.py --screenshot out.png   # one capture with the same settings, then exit
+
+With ``--stop-on-terminate`` a ``terminate`` call ends the client that started the server (its parent process).
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import base64
 import json
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -301,6 +304,9 @@ def main() -> None:
     parser.add_argument("--capture-cmd", default="import -window root {out}", help="shell writing a PNG to {out}")
     parser.add_argument("--log", default=None, help="append one JSON line per tool call")
     parser.add_argument("--screenshot", default=None, help="write one capture here and exit")
+    parser.add_argument(
+        "--stop-on-terminate", action="store_true", help="end the client (this server's parent) after a terminate"
+    )
     args = parser.parse_args()
     desktop = Desktop(args.display, args.settle_sec, args.capture_cmd, args.log)
     if args.screenshot:
@@ -309,10 +315,21 @@ def main() -> None:
     for line in sys.stdin:
         if not line.strip():
             continue
-        response = handle(desktop, json.loads(line))
+        message = json.loads(line)
+        response = handle(desktop, message)
         if response is not None:
             sys.stdout.write(json.dumps(response) + "\n")
             sys.stdout.flush()
+        if args.stop_on_terminate and _terminated(message, response):
+            # An agent CLI's loop ends only on a reply without a tool call, which Qwen3-VL keeps not giving.
+            os.kill(os.getppid(), signal.SIGTERM)
+            return
+
+
+def _terminated(message: dict, response: dict | None) -> bool:
+    arguments = (message.get("params") or {}).get("arguments") or {}
+    succeeded = response is not None and "result" in response and not response["result"].get("isError")
+    return message.get("method") == "tools/call" and arguments.get("action") == "terminate" and succeeded
 
 
 if __name__ == "__main__":

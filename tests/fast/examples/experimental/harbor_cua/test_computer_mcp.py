@@ -2,6 +2,7 @@
 
 import base64
 import json
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -148,3 +149,15 @@ def test_a_failed_capture_is_logged_as_the_desktops_failure(fake_desktop):
     assert responses[0]["result"]["isError"] is True
     (row,) = [json.loads(line) for line in Path(fake_desktop["log"]).read_text().splitlines()]
     assert "infra_error" in row
+
+
+def test_a_terminate_stops_the_client_that_started_the_server(fake_desktop):
+    """The server's parent stands in for OpenCode, whose loop would otherwise ask the policy again."""
+    env = {"PATH": f"{fake_desktop['bin']}:/usr/bin:/bin", "FAKE_XDOTOOL_LOG": str(fake_desktop["xdotool_log"])}
+    server = f"{sys.executable} {mcp.__file__} --settle-sec 0 --capture-cmd true --stop-on-terminate"
+    stdin = "".join(json.dumps(m) + "\n" for m in [_call(1, {"action": "terminate", "status": "success"}), _call(2, {"action": "wait"})])
+    result = subprocess.run(["sh", "-c", f"{server}; echo client-survived"], input=stdin, capture_output=True, text=True, env=env, timeout=60)
+
+    assert result.returncode == -signal.SIGTERM
+    (response,) = [json.loads(line) for line in result.stdout.splitlines()]
+    assert response["id"] == 1 and "isError" not in response["result"]
