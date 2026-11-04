@@ -131,7 +131,10 @@ class OpenCodeCUA(OpenCode):
         env = {"OPENCODE_FAKE_VCS": "git", **_XDG}
         await self.exec_as_agent(environment, self._register_config_command(), env=env)
         first = " ".join(shlex.quote(part) for part in self._mcp_command("--screenshot", _FIRST_SCREEN))
-        await self.exec_as_agent(environment, first, env=self._mcp_env)
+        try:
+            await self.exec_as_agent(environment, first, env=self._mcp_env)
+        except NonZeroAgentExitCodeError as exc:
+            raise DesktopLost(f"the first screen could not be captured: {exc}") from exc
         try:
             await self.exec_as_agent(
                 environment,

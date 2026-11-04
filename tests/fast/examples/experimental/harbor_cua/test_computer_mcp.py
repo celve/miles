@@ -198,3 +198,12 @@ def test_the_call_cap_stops_the_client(fake_desktop):
     assert result.returncode == -signal.SIGTERM
     assert [json.loads(line)["id"] for line in result.stdout.splitlines()] == [1, 2]
     assert json.loads(fake_desktop["log"].read_text().splitlines()[-1]) == {"stop": "max_calls"}
+
+
+def test_a_first_screen_the_capture_did_not_write_fails_the_command(tmp_path):
+    out = tmp_path / "first.png"
+    argv = [sys.executable, mcp.__file__, "--capture-cmd", "true", "--screenshot", str(out)]
+    result = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+
+    assert result.returncode != 0 and "infra_error" in result.stderr
+    assert not out.exists()
