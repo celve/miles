@@ -60,12 +60,13 @@ def test_the_config_leaves_only_the_computer_tool_and_no_side_requests(tmp_path)
     assert config["compaction"] == {"auto": False, "prune": False}
     assert config["snapshot"] is False
     build = config["agent"]["build"]
-    assert build["steps"] == 30 and build["temperature"] == 1.0
+    assert build["steps"] == 31 and build["temperature"] == 1.0
     assert build["prompt"].endswith(oc.RESPONSE_FORMAT)
     command = config["mcp"]["computer"]["command"]
     assert command[:2] == ["python3", "/installed-agent/computer/computer_mcp.py"]
     assert command[command.index("--log") + 1] == "/logs/agent/computer_mcp.jsonl"
     assert "--stop-on-terminate" in command
+    assert command[command.index("--max-calls") + 1] == "30"
     assert config["provider"]["openai-compatible"]["models"]["m"]["modalities"]["input"] == ["text", "image"]
 
 
@@ -132,11 +133,12 @@ def _row(action: str, **extra) -> str:
 
 
 def test_opencode_stopped_by_a_terminate_ends_the_episode_cleanly(tmp_path):
-    env = FakeEnvironment(mcp_log=_row("left_click", screenshot=True) + _row("terminate"), opencode_exit=143)
+    log = _row("left_click", screenshot=True) + _row("terminate") + json.dumps({"stop": "terminate"}) + "\n"
+    env = FakeEnvironment(mcp_log=log, opencode_exit=143)
     asyncio.run(_agent(tmp_path).run("Open the file.", env, SimpleNamespace()))
 
 
-def test_opencode_failing_without_a_terminate_still_fails(tmp_path):
+def test_opencode_failing_without_the_server_stopping_it_still_fails(tmp_path):
     env = FakeEnvironment(mcp_log=_row("left_click", screenshot=True), opencode_exit=1)
     with pytest.raises(NonZeroAgentExitCodeError):
         asyncio.run(_agent(tmp_path).run("Open the file.", env, SimpleNamespace()))

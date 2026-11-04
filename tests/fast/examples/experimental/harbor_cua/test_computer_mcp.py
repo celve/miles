@@ -171,3 +171,16 @@ def test_a_terminate_stops_the_client_that_started_the_server(fake_desktop):
     assert result.returncode == -signal.SIGTERM
     (response,) = [json.loads(line) for line in result.stdout.splitlines()]
     assert response["id"] == 1 and "isError" not in response["result"]
+
+
+def test_the_call_cap_stops_the_client(fake_desktop):
+    env = {"PATH": f"{fake_desktop['bin']}:/usr/bin:/bin", "FAKE_XDOTOOL_LOG": str(fake_desktop["xdotool_log"])}
+    server = f"{sys.executable} {mcp.__file__} --settle-sec 0 --capture-cmd 'cp {fake_desktop['screen']} {{out}}'"
+    server += f" --max-calls 2 --log {fake_desktop['log']}"
+    calls = [_call(i, {"action": "wait", "time": 0}) for i in range(1, 4)]
+    stdin = "".join(json.dumps(m) + "\n" for m in calls)
+    result = subprocess.run(["sh", "-c", f"{server}; echo client-survived"], input=stdin, capture_output=True, text=True, env=env, timeout=60)
+
+    assert result.returncode == -signal.SIGTERM
+    assert [json.loads(line)["id"] for line in result.stdout.splitlines()] == [1, 2]
+    assert json.loads(fake_desktop["log"].read_text().splitlines()[-1]) == {"stop": "max_calls"}

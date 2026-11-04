@@ -83,10 +83,12 @@ class OpenCodeCUA(OpenCode):
     def _cua_config(self, max_turns: int | None, temperature: float | None) -> dict[str, Any]:
         build: dict[str, Any] = {"prompt": SYSTEM_PROMPT}
         if max_turns is not None:
-            build["steps"] = max_turns
+            # The server ends the episode at the cap; OpenCode's own cap would add a tool-less "maximum steps" turn.
+            build["steps"] = max_turns + 1
         if temperature is not None:
             build["temperature"] = temperature
-        server = {"type": "local", "command": self._mcp_command("--log", _MCP_LOG, "--stop-on-terminate")}
+        stops = ["--stop-on-terminate", *(["--max-calls", str(max_turns)] if max_turns is not None else [])]
+        server = {"type": "local", "command": self._mcp_command("--log", _MCP_LOG, *stops)}
         if self._mcp_env:
             server["environment"] = self._mcp_env
         return {
@@ -137,8 +139,8 @@ class OpenCodeCUA(OpenCode):
         except Exception as exc:
             rows = await self._mcp_rows(environment)
             _raise_if_desktop_lost(rows)
-            # The server stops OpenCode once the policy terminates, so that exit is the episode's end.
-            if not (isinstance(exc, NonZeroAgentExitCodeError) and _ended_by_terminate(rows)):
+            # The server stops OpenCode at a terminate or the turn cap, so that exit is the episode's end.
+            if not (isinstance(exc, NonZeroAgentExitCodeError) and _stopped_by_server(rows)):
                 raise
             return
         _raise_if_desktop_lost(await self._mcp_rows(environment))
@@ -168,5 +170,5 @@ def _raise_if_desktop_lost(rows: list[dict[str, Any]]) -> None:
             raise DesktopLost(row["infra_error"])
 
 
-def _ended_by_terminate(rows: list[dict[str, Any]]) -> bool:
-    return bool(rows) and (rows[-1].get("action") or {}).get("action") == "terminate" and "error" not in rows[-1]
+def _stopped_by_server(rows: list[dict[str, Any]]) -> bool:
+    return bool(rows) and "stop" in rows[-1]

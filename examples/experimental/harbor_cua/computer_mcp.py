@@ -9,7 +9,8 @@ Every action but ``terminate`` and ``answer`` returns a screenshot taken after `
     python3 computer_mcp.py [--display :1] [--settle-sec 2] [--capture-cmd 'import -window root {out}'] [--log f.jsonl]
     python3 computer_mcp.py --screenshot out.png   # one capture with the same settings, then exit
 
-With ``--stop-on-terminate`` a ``terminate`` call ends the client that started the server (its parent process).
+With ``--stop-on-terminate`` a ``terminate`` call, and with ``--max-calls N`` the N-th call, ends the client that
+started the server (its parent process), after logging ``{"stop": <reason>}``.
 """
 
 from __future__ import annotations
@@ -307,11 +308,13 @@ def main() -> None:
     parser.add_argument(
         "--stop-on-terminate", action="store_true", help="end the client (this server's parent) after a terminate"
     )
+    parser.add_argument("--max-calls", type=int, default=None, help="end the client after this many tool calls")
     args = parser.parse_args()
     desktop = Desktop(args.display, args.settle_sec, args.capture_cmd, args.log)
     if args.screenshot:
         desktop.screenshot(args.screenshot)
         return
+    calls = 0
     for line in sys.stdin:
         if not line.strip():
             continue
@@ -320,10 +323,17 @@ def main() -> None:
         if response is not None:
             sys.stdout.write(json.dumps(response) + "\n")
             sys.stdout.flush()
+        calls += message.get("method") == "tools/call"
         if args.stop_on_terminate and _terminated(message, response):
-            # An agent CLI's loop ends only on a reply without a tool call, which Qwen3-VL keeps not giving.
-            os.kill(os.getppid(), signal.SIGTERM)
-            return
+            reason = "terminate"
+        elif args.max_calls is not None and calls >= args.max_calls:
+            reason = "max_calls"
+        else:
+            continue
+        # An agent CLI's loop ends only on a reply without a tool call, which Qwen3-VL keeps not giving.
+        desktop._log({"stop": reason})
+        os.kill(os.getppid(), signal.SIGTERM)
+        return
 
 
 def _terminated(message: dict, response: dict | None) -> bool:
