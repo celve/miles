@@ -155,8 +155,18 @@ def test_a_terminate_stops_the_client_that_started_the_server(fake_desktop):
     """The server's parent stands in for OpenCode, whose loop would otherwise ask the policy again."""
     env = {"PATH": f"{fake_desktop['bin']}:/usr/bin:/bin", "FAKE_XDOTOOL_LOG": str(fake_desktop["xdotool_log"])}
     server = f"{sys.executable} {mcp.__file__} --settle-sec 0 --capture-cmd true --stop-on-terminate"
-    stdin = "".join(json.dumps(m) + "\n" for m in [_call(1, {"action": "terminate", "status": "success"}), _call(2, {"action": "wait"})])
-    result = subprocess.run(["sh", "-c", f"{server}; echo client-survived"], input=stdin, capture_output=True, text=True, env=env, timeout=60)
+    stdin = "".join(
+        json.dumps(m) + "\n"
+        for m in [_call(1, {"action": "terminate", "status": "success"}), _call(2, {"action": "wait"})]
+    )
+    result = subprocess.run(
+        ["sh", "-c", f"{server}; echo client-survived"],
+        input=stdin,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+    )
 
     assert result.returncode == -signal.SIGTERM
     (response,) = [json.loads(line) for line in result.stdout.splitlines()]
