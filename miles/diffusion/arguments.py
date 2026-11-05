@@ -53,6 +53,11 @@ _UNSUPPORTED = [
         and not (a.diffusion_pickscore_model_path and a.diffusion_pickscore_processor_path),
     ),
     (
+        "a PickScore worker on a fraction of a GPU or several (--diffusion-pickscore-num-gpus-per-worker other than 0 "
+        "or 1); each worker scores on one whole GPU or on the CPU",
+        lambda a: a.rm_type == "pickscore" and a.diffusion_pickscore_num_gpus_per_worker not in (0, 1),
+    ),
+    (
         "the OCR reward on video (--diffusion-output-num-frames > 1); it reads only the first frame",
         lambda a: a.rm_type == "ocr" and a.diffusion_output_num_frames != 1,
     ),

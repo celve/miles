@@ -9,7 +9,6 @@ import httpx
 
 from miles.diffusion.algorithms import get_algorithm
 from miles.diffusion.rollout.ocr import OcrRewardPool
-from miles.diffusion.rollout.pickscore import PickScorePool
 from miles.diffusion.rollout.response import parse_rollout_response
 from miles.rollout.base_types import (
     BaseRolloutFn,
@@ -39,7 +38,11 @@ class DiffusionRolloutFn(BaseRolloutFn):
         self.algorithm = get_algorithm(args.loss_type)
         self.sampling_params = build_sampling_params(args)
         self.semaphore: asyncio.Semaphore | None = None
-        self.reward_kwargs = _build_reward_pools(args, _selected_rm_types(args, self.data_source))
+        self.reward_pools = dict(input.reward_pools)
+        self.local_reward_pools = _build_reward_pools(
+            args, _selected_rm_types(args, self.data_source), declared=self.reward_pools
+        )
+        self.reward_kwargs = {f"{name}_pool": pool for name, pool in self.reward_pools.items()} | self.local_reward_pools
         self.client = httpx.AsyncClient(limits=httpx.Limits(max_keepalive_connections=0), timeout=httpx.Timeout(None))
 
     async def __call__(self, input: RolloutFnInput) -> RolloutFnTrainOutput:
@@ -47,6 +50,7 @@ class DiffusionRolloutFn(BaseRolloutFn):
         if self.semaphore is None:
             num_engines = len(await get_worker_urls(self.args))
             self.semaphore = asyncio.Semaphore(self.args.sglang_server_concurrency * num_engines)
+        await asyncio.gather(*(pool.ensure_healthy() for pool in self.reward_pools.values()))
         groups = self.data_source.get_samples(self.args.rollout_batch_size)
         groups = await asyncio.gather(*(self._generate_group(group) for group in groups))
         for sample in (sample for group in groups for sample in group):
@@ -108,7 +112,7 @@ class DiffusionRolloutFn(BaseRolloutFn):
 
     async def dispose(self) -> None:
         await self.client.aclose()
-        for pool in self.reward_kwargs.values():
+        for pool in self.local_reward_pools.values():
             pool.shutdown()
 
 
@@ -123,21 +127,19 @@ def _selected_rm_types(args: Namespace, data_source) -> set[str]:
     return {args.rm_type} | overrides
 
 
-def _build_reward_pools(args: Namespace, rm_types: set[str]) -> dict[str, OcrRewardPool | PickScorePool]:
-    """The scorers of every built-in reward the run can select, owned by the rollout and handed to `rm_hub` through
-    its kwargs; each reward reads its own pool."""
-    pools: dict[str, OcrRewardPool | PickScorePool] = {}
+def _build_reward_pools(args: Namespace, rm_types: set[str], *, declared: dict) -> dict[str, OcrRewardPool]:
+    """The scorers of every selected built-in reward the run does not declare as a reward pool, owned by the rollout
+    and handed to `rm_hub` through its kwargs; each reward reads its own pool."""
+    pools: dict[str, OcrRewardPool] = {}
     if "ocr" in rm_types and args.diffusion_output_num_frames != 1:
         raise ValueError("a prompt selects the OCR reward, which reads only the first frame, in a video run")
     if "ocr" in rm_types:
         pools["ocr_pool"] = OcrRewardPool(num_workers=args.diffusion_ocr_num_workers)
-    if "pickscore" in rm_types:
-        if args.rm_type != "pickscore":
-            raise ValueError(
-                "a prompt selects the PickScore reward, whose flags only --rm-type pickscore accepts; launch with "
-                "--rm-type pickscore and let the other prompts override it"
-            )
-        pools["pickscore_pool"] = PickScorePool(args)
+    if "pickscore" in rm_types and "pickscore" not in declared:
+        raise ValueError(
+            "a prompt selects the PickScore reward, whose flags only --rm-type pickscore accepts; launch with "
+            "--rm-type pickscore and let the other prompts override it"
+        )
     return pools
 
 

@@ -1,4 +1,4 @@
-"""PickScore batches as miles_diffusion does: samples per actor call, frames per CLIP forward, a video's mean."""
+"""PickScore batches as miles_diffusion does: samples per worker call, frames per CLIP forward, a video's mean."""
 
 from argparse import Namespace
 from types import SimpleNamespace
@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from miles.diffusion.rollout import pickscore
-from miles.diffusion.rollout.pickscore import PickScorePool, PickScoreRewardActor, pickscore_rm
+from miles.diffusion.rollout.pickscore import PickScoreBatchScorer, pickscore_rm
 
 
 @pytest.mark.parametrize(
@@ -34,8 +34,8 @@ class _ValueScorer:
         return [float(image.getpixel((0, 0))[0]) for image in images]
 
 
-def test_an_actor_forwards_fixed_frame_chunks_across_samples_and_averages_each_video():
-    actor = object.__new__(PickScoreRewardActor)
+def test_a_worker_forwards_fixed_frame_chunks_across_samples_and_averages_each_video():
+    actor = object.__new__(PickScoreBatchScorer)
     actor.frames_per_forward, actor.scorer = 4, _ValueScorer()
     videos = [torch.arange(3.0).view(1, 3, 1, 1).expand(3, 3, 1, 1) * 10, torch.full((3, 2, 1, 1), 50.0)]
 
@@ -43,25 +43,6 @@ def test_an_actor_forwards_fixed_frame_chunks_across_samples_and_averages_each_v
 
     assert actor.scorer.forwards == [4, 1]
     assert scores == [10.0, 50.0]
-
-
-class _Actor:
-    def __init__(self, name, calls):
-        self.score_batch = SimpleNamespace(
-            remote=lambda outputs, prompts: calls.append((name, len(outputs))) or prompts
-        )
-
-
-async def test_the_pool_splits_samples_into_batches_round_robin(monkeypatch):
-    calls = []
-    monkeypatch.setattr(pickscore.ray, "get", lambda refs: [[float(len(p)) for p in prompts] for prompts in refs])
-    pool = object.__new__(PickScorePool)
-    pool._actors, pool._batch_size, pool._next_actor = [_Actor("a", calls), _Actor("b", calls)], 2, 0
-
-    scores = await pool.score([None] * 5, ["x", "xx", "xxx", "xxxx", "xxxxx"])
-
-    assert calls == [("a", 2), ("b", 2), ("a", 1)]
-    assert scores == [1.0, 2.0, 3.0, 4.0, 5.0]
 
 
 async def test_pickscore_rm_sends_only_the_scored_frames():

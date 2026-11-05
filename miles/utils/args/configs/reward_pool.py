@@ -46,5 +46,14 @@ class RewardScalingConfig(FrozenStrictBaseModel):
 
 def compute_reward_pools(args) -> tuple[list[RewardPoolConfig], RewardScalingConfig]:
     """The run's reward pools and their slots, which start after the rollout and eval GPUs."""
-    pools: list[RewardPoolConfig] = []
+    pools = _declare_reward_pools(args)
     return pools, RewardScalingConfig.resolve(pools, gpu_offset=(args.rollout_num_gpus or 0) + args.eval_num_gpus)
+
+
+def _declare_reward_pools(args) -> list[RewardPoolConfig]:
+    if args.model_kind != "diffusion":
+        return []
+    # Local import: the diffusion package pulls in optional dependencies text runs never install.
+    from miles.diffusion.rewards import declare_reward_pools
+
+    return declare_reward_pools(args)
