@@ -147,6 +147,9 @@ def _default(name: str):
 
 
 def validate_diffusion_args(args) -> None:
+    # Miles' default text loss names no diffusion algorithm; Flow-GRPO is the diffusion default.
+    if args.loss_type == AlgoConfig.model_fields["loss_type"].default:
+        args.loss_type = "flow_grpo"
     algorithm = ALGORITHMS.get(args.loss_type)
     checks = _UNSUPPORTED + (algorithm.unsupported if algorithm else [])
     unsupported = [what for what, requested in checks if requested(args)]

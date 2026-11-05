@@ -298,7 +298,7 @@ def test_a_flow_grpo_flag_nft_never_reads_is_rejected(override, flag):
     ],
 )
 def test_an_nft_flag_flow_grpo_never_reads_is_rejected(override, flag):
-    with pytest.raises(ValueError, match=f"--loss-type policy_loss never reads: .*{flag}"):
+    with pytest.raises(ValueError, match=f"--loss-type flow_grpo never reads: .*{flag}"):
         validate_diffusion_args(_supported(**override))
 
 
@@ -307,11 +307,17 @@ def test_flow_grpo_rejects_ode_rollouts():
         validate_diffusion_args(_supported(diffusion_sde_type="ode"))
 
 
-def test_a_text_run_rejects_the_diffusion_nft_loss():
+@pytest.mark.parametrize("loss_type", ["flow_grpo", "nft"])
+def test_a_text_run_rejects_the_diffusion_losses(loss_type):
     from tests.fast.fixtures.args_fixtures import parse_fsdp_test_config
 
-    with pytest.raises(ValueError, match="--loss-type nft is DiffusionNFT"):
-        parse_fsdp_test_config("--loss-type", "nft")
+    with pytest.raises(ValueError, match=f"--loss-type {loss_type} is a diffusion algorithm"):
+        parse_fsdp_test_config("--loss-type", loss_type)
+
+
+@pytest.mark.parametrize("argv", [(), ("--loss-type", "policy_loss"), ("--loss-type", "flow_grpo")])
+def test_a_diffusion_run_trains_flow_grpo_by_default_or_by_name(argv):
+    assert _parse_diffusion_run("--global-batch-size", "64", *argv).loss_type == "flow_grpo"
 
 
 def test_a_parsed_nft_run_passes_and_carries_the_seed_the_converter_reads():
