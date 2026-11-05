@@ -1,14 +1,13 @@
-"""PickScore reward of diffusion rollouts: CLIP-H PickScore on dedicated GPU Ray actors, a video's frames averaged.
+"""PickScore reward of diffusion rollouts: CLIP-H PickScore on the workers of the `pickscore` reward pool, a video's
+frames averaged.
 
 Ported from radixark/miles_diffusion (miles/rollout/rm_hub/pickscore.py and core.py). Batching is part of the
-numerics: each actor call takes --diffusion-pickscore-batch-size samples, and each CLIP forward that many frames.
+numerics: each worker call takes --diffusion-pickscore-batch-size samples, and each CLIP forward that many frames.
 """
 
-import asyncio
 from collections.abc import Sequence
 
 import numpy as np
-import ray
 import torch
 from PIL import Image
 
@@ -69,16 +68,14 @@ def _embedding(features) -> torch.Tensor:
     return features if isinstance(features, torch.Tensor) else features.pooler_output
 
 
-class PickScoreRewardActor:
-    def __init__(self, *, processor_path: str, model_path: str, frames_per_forward: int) -> None:
+class PickScoreBatchScorer:
+    """A reward pool worker's scorer: each sample's mean over the frames it arrives with."""
+
+    def __init__(self, *, device: torch.device, processor_path: str, model_path: str, frames_per_forward: int) -> None:
         self.frames_per_forward = frames_per_forward
-        device = torch.device("cuda", 0) if ray.get_gpu_ids() and torch.cuda.is_available() else torch.device("cpu")
-        if device.type == "cuda":
-            torch.cuda.set_device(device)
         self.scorer = PickScoreScorer(device=device, processor_path=processor_path, model_path=model_path)
 
     def score_batch(self, outputs: list[torch.Tensor], prompts: list[str]) -> list[float]:
-        """Each sample's mean over the frames it arrives with."""
         images, frame_counts = [], []
         for output in outputs:
             frames = video_to_uint8_frames(output)
@@ -96,43 +93,7 @@ class PickScoreRewardActor:
         return scores
 
 
-class PickScorePool:
-    """PickScore actors at --diffusion-pickscore-num-gpus-per-worker each, default-scheduled, which lands them on
-    GPUs outside the colocated train and rollout placement group; batches go round robin."""
-
-    def __init__(self, args) -> None:
-        num_gpus = args.diffusion_pickscore_num_gpus_per_worker
-        self._actors = [
-            ray.remote(PickScoreRewardActor)
-            .options(num_cpus=num_gpus, num_gpus=num_gpus)
-            .remote(
-                processor_path=args.diffusion_pickscore_processor_path,
-                model_path=args.diffusion_pickscore_model_path,
-                frames_per_forward=args.diffusion_pickscore_batch_size,
-            )
-            for _ in range(args.diffusion_pickscore_num_workers)
-        ]
-        self._batch_size = args.diffusion_pickscore_batch_size
-        self._next_actor = 0
-
-    async def score(self, outputs: list[torch.Tensor], prompts: list[str]) -> list[float]:
-        refs = []
-        for start in range(0, len(outputs), self._batch_size):
-            end = start + self._batch_size
-            actor = self._actors[self._next_actor % len(self._actors)]
-            self._next_actor += 1
-            refs.append(actor.score_batch.remote(outputs[start:end], prompts[start:end]))
-        chunks = await asyncio.get_running_loop().run_in_executor(None, ray.get, refs)
-        return [score for chunk in chunks for score in chunk]
-
-    def shutdown(self) -> None:
-        for actor in self._actors:
-            ray.kill(actor)
-
-
-async def pickscore_rm(
-    args, samples: Sequence[Sample], *, pickscore_pool: PickScorePool, **_other_pools
-) -> list[float]:
+async def pickscore_rm(args, samples: Sequence[Sample], *, pickscore_pool, **_other_pools) -> list[float]:
     """`--rm-type pickscore`: one reward per sample, its --diffusion-pickscore-num-frames frames averaged."""
     outputs = []
     for sample in samples:
