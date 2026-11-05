@@ -90,7 +90,7 @@ class DiffusionFSDPTrainRayActor(TorchNativeTrainRayActor):
         )
         checkpoint_payload = checkpoint.load(self)
         if self.ema is not None and checkpoint_payload is not None:
-            load_ema(self.ema, self.model, _checkpoint_dir(args.backend.load, checkpoint_payload["iteration"]))
+            self._load_ema(checkpoint_payload["iteration"])
         self.model_parts = [self.model]
         # The EMA is optimizer state, so the base sleep/wake moves it with Adam's.
         self.optimizers = [self.optimizer] + ([self.ema] if self.ema is not None else [])
@@ -219,9 +219,17 @@ class DiffusionFSDPTrainRayActor(TorchNativeTrainRayActor):
         )
 
     def _save_checkpoint(self, rollout_id: int) -> None:
-        checkpoint.save(self, iteration=rollout_id)
-        if self.ema is not None:
+        # Before checkpoint.save, which writes the tracker last, so a checkpoint it names holds its EMA.
+        if self.ema is not None and not self.args.backend.no_save_optim:
             save_ema(self.ema, self.model, _checkpoint_dir(self.args.backend.save, rollout_id + 1))
+        checkpoint.save(self, iteration=rollout_id)
+
+    def _load_ema(self, step_id: int) -> None:
+        # Optimizer state, so --no-load-optim leaves it out too: it restarts from the loaded weights.
+        if self.args.backend.no_load_optim:
+            self.ema.reset_from_model()
+        else:
+            load_ema(self.ema, self.model, _checkpoint_dir(self.args.backend.load, step_id))
 
 
 def _checkpoint_dir(root: str, step_id: int) -> Path:
