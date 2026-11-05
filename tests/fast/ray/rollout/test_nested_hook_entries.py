@@ -137,3 +137,42 @@ class TestNestedHookEntries:
         assert dict(captured[0])["eval_setting" if evaluation else "train_setting"] == (2 if evaluation else 1)
         assert captured[0].dataset_setting == 7
         assert "dataset_setting" not in dict(args)
+
+
+async def test_the_executor_hands_its_reward_pools_to_the_train_and_eval_rollout_functions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MILES_USE_LEGACY_ROLLOUT_V1", "0")
+    monkeypatch.setattr(inference_rollout_common, "load_tokenizer", lambda *args, **kwargs: object())
+    monkeypatch.setattr(inference_rollout_common, "load_processor", lambda *args, **kwargs: None)
+    args = make_rollout_config(
+        debug_train_only=True,
+        enable_sample_ownership_checker=False,
+        data_source_path=_hook("test-source", source_setting=6),
+        rollout_function_path=_hook("test-train-rollout"),
+        eval_function_path=_hook("test-eval-rollout"),
+    )
+    pools = {"pickscore": object()}
+    executor = RolloutExecutor(
+        args=args,
+        router_providers=[],
+        session_server_provider=None,
+        inference_controller_provider=FakeInferenceTopologyProvider(
+            InferenceRuntimeImmutState(engine_count=0, gpu_count=0)
+        ),
+        reward_pools=pools,
+    )
+
+    with (
+        function_registry.temporary("test-source", _RecordingSource),
+        function_registry.temporary("test-train-rollout", _RecordingRollout),
+        function_registry.temporary("test-eval-rollout", _RecordingRollout),
+    ):
+        try:
+            await executor.init()
+
+            assert executor.generate_rollout.constructor_input.reward_pools == pools
+            assert executor.eval_generate_rollout.constructor_input.reward_pools == pools
+        finally:
+            if hasattr(executor, "use_legacy_rollout_v1"):
+                await executor.dispose()
