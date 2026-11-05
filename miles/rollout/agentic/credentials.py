@@ -240,20 +240,24 @@ def resolve_provider_api_key(env_var: str, file_env_var: str, default_path: str)
     return key
 
 
-def provision_provider(env: dict[str, str], spec: dict, *, arg_path: str = "") -> None:
+def provision_provider(env: dict[str, str], spec: dict, *, arg_path: str = "", remote: bool = False) -> None:
     """One provider's whole launcher-side provisioning, from its PROVIDER_CREDENTIALS spec:
     key supply (the file's path, never the value), SDK preflight, forwarding the
-    address-like vars by value, and echoing which endpoint is in effect."""
-    sandbox_key_supply(
-        env,
-        provider=spec["provider"],
-        key_env_vars=spec["key_env_vars"],
-        file_env_var=spec["file_env_var"],
-        arg_path=arg_path,
-        default_path=spec["default_path"],
-        provision_hint=spec["provision_hint"],
-    )
-    preflight_sdk(spec["sdk"], spec["sdk_hint"], spec.get("sdk_min_version"))
+    address-like vars by value, and echoing which endpoint is in effect.
+
+    ``remote``: an agent worker creates the sandboxes and holds the key and the SDK, so only the
+    address-like vars are forwarded from here."""
+    if not remote:
+        sandbox_key_supply(
+            env,
+            provider=spec["provider"],
+            key_env_vars=spec["key_env_vars"],
+            file_env_var=spec["file_env_var"],
+            arg_path=arg_path,
+            default_path=spec["default_path"],
+            provision_hint=spec["provision_hint"],
+        )
+        preflight_sdk(spec["sdk"], spec["sdk_hint"], spec.get("sdk_min_version"))
     for var, default in spec.get("env_defaults", {}).items():
         forward_address(env, var, os.environ.get(var, "").strip() or default)
     for var in spec["forward"]:
@@ -262,3 +266,12 @@ def provision_provider(env: dict[str, str], spec: dict, *, arg_path: str = "") -
     if spec["target"]:
         var, label, default_desc = spec["target"]
         print(f"{spec['provider']} {label}: {env.get(var, default_desc)}", flush=True)
+
+
+def provider_env_names() -> tuple[str, ...]:
+    """Every env var a provider's sandboxes are configured by: key file paths and address-like vars, never a key."""
+    return tuple(
+        name
+        for spec in PROVIDER_CREDENTIALS.values()
+        for name in (spec["file_env_var"], *spec.get("env_defaults", {}), *spec["forward"])
+    )

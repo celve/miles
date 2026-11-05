@@ -23,11 +23,15 @@ from collections.abc import Awaitable, Callable
 from typing import Any, BinaryIO, NoReturn
 
 from miles.rollout.agentic import rollout_limits
+from miles.rollout.agentic.errors import InfraAbort, RemoteTraceback
+from miles.rollout.agentic.remote import call_on_worker
 from miles.utils.logging_utils import configure_logger_raw
+
+__all__ = ["AGENT_FUNCTION_MODES", "InfraAbort", "call_agent_function", "report_to_caller"]
 
 logger = logging.getLogger(__name__)
 
-AGENT_FUNCTION_MODES = ("subproc", "inline")
+AGENT_FUNCTION_MODES = ("subproc", "inline", "worker")
 
 # A cancelled agent gets this long to run its own cleanup (closing its sandbox) before its process exits.
 _CANCEL_GRACE_S = 120.0
@@ -45,12 +49,6 @@ _PR_SET_PDEATHSIG = 1
 # frames on the child's result pipe: a report sent while the call runs, or the call's outcome
 _REPORT_FRAME, _OUTCOME_FRAME = b"r", b"o"
 _FRAME_HEADER_BYTES = 9  # frame kind + 8-byte payload length
-
-
-class InfraAbort(Exception):
-    def __init__(self, exit_status: str, message: str | None = None):
-        super().__init__(message or exit_status)
-        self.exit_status = exit_status
 
 
 class _ResultPipe:
@@ -76,17 +74,6 @@ class _ResultPipe:
 _result_pipe: _ResultPipe | None = None
 
 
-class _RemoteTraceback(Exception):
-    """The agent process's traceback, chained under the error it raised, as concurrent.futures does."""
-
-    def __init__(self, tb: str):
-        super().__init__(tb)
-        self.tb = tb
-
-    def __str__(self) -> str:
-        return self.tb
-
-
 def report_to_caller(item: Any) -> bool:
     """Send a picklable ``item`` to the process that made this ``subproc`` agent call.
 
@@ -103,13 +90,25 @@ async def call_agent_function(
     *,
     mode: str,
     on_child_reports: Callable[[list[Any]], None] | None = None,
+    worker_url: str | None = None,
+    extra_env: dict[str, str] | None = None,
+    abort_scope: str | None = None,
     **kwargs: Any,
 ) -> Any:
-    """Await ``fn(**kwargs)`` on this loop (``inline``) or in a child process of its own (``subproc``).
+    """Await ``fn(**kwargs)`` on this loop (``inline``), in a child process of its own (``subproc``), or in one on
+    the agent worker at ``worker_url`` (``worker``), whose ``subproc`` runs it.
 
-    Under ``subproc``, ``on_child_reports`` receives each item the agent sends with ``report_to_caller``."""
+    Under ``subproc`` and ``worker``, ``on_child_reports`` receives each item the agent sends with
+    ``report_to_caller``, and ``extra_env`` is added to the agent process's environment. Under ``worker``, a rollout
+    abort cancels the call only if it aborts ``abort_scope`` or every scope."""
     if mode == "inline":
         return await fn(**kwargs)
+    if mode == "worker":
+        if worker_url is None:
+            raise ValueError("--custom-agent-function-mode worker needs --custom-agent-function-worker-url")
+        return await call_on_worker(
+            worker_url, fn, kwargs, env=extra_env or {}, on_child_reports=on_child_reports, abort_scope=abort_scope
+        )
     # pickled before the process starts, so an unpicklable argument fails here
     call = pickle.dumps(sys.path) + pickle.dumps((fn, kwargs, _CANCEL_GRACE_S, _LEFTOVER_CLEANUP_S))
     proc = await asyncio.create_subprocess_exec(
@@ -119,7 +118,7 @@ async def call_agent_function(
         str(os.getpid()),
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
-        env={**os.environ, rollout_limits.SCOPE_ENV_VAR: rollout_limits.current_scope()},
+        env={**os.environ, rollout_limits.SCOPE_ENV_VAR: rollout_limits.current_scope(), **(extra_env or {})},
     )
     try:
         await _send_call(proc, call)
@@ -182,7 +181,7 @@ def _unpack_outcome(output: bytes) -> Any:
     if outcome[0] == "ok":
         return outcome[1]
     _, error, child_traceback = outcome
-    raise error from _RemoteTraceback(f'\n"""\n{child_traceback}"""')
+    raise error from RemoteTraceback(f'\n"""\n{child_traceback}"""')
 
 
 def _child_main(parent_pid: int) -> None:

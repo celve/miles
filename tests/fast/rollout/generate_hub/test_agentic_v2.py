@@ -216,6 +216,46 @@ async def test_any_other_agent_error_keeps_the_recorded_session(monkeypatch):
     assert sample.status == Sample.Status.COMPLETED
 
 
+@pytest.mark.asyncio
+async def test_worker_mode_sends_the_call_to_the_worker_with_the_runs_env_and_its_router_scope(monkeypatch):
+    sample = Sample(status=Sample.Status.COMPLETED, response="done", response_length=1, tokens=[1])
+    _patch_agent(monkeypatch, _Tracer(SamplesReply(samples=[sample], session_metadata={}, empty_reason=None)))
+    monkeypatch.setenv("HARBOR_TASKS_DIR", "/tasks")
+    seen: dict = {}
+
+    async def fake_call(fn, **kwargs):
+        seen.update(kwargs)
+        return None
+
+    monkeypatch.setattr(agentic_tool_call, "call_agent_function", fake_call)
+
+    await agentic_tool_call.generate(
+        _generate_input(
+            custom_agent_function_mode="worker",
+            custom_agent_function_worker_url="http://worker:11100",
+            custom_agent_function_worker_env=["HARBOR_*"],
+            sglang_router_ip="10.0.0.1",
+            sglang_router_port=31000,
+        )
+    )
+
+    assert seen["worker_url"] == "http://worker:11100"
+    assert seen["extra_env"] == {"HARBOR_TASKS_DIR": "/tasks"}
+    assert seen["abort_scope"] == "10.0.0.1:31000"
+
+
+@pytest.mark.asyncio
+async def test_worker_mode_without_a_worker_url_fails_before_a_session_opens(monkeypatch):
+    extra_keys = _patch_agent(monkeypatch, _Tracer())
+
+    with pytest.raises(ValueError, match="--custom-agent-function-worker-url"):
+        await agentic_tool_call.generate(
+            _generate_input(custom_agent_function_mode="worker", custom_agent_function_worker_url=None)
+        )
+
+    assert extra_keys == []
+
+
 async def _abort_for_infra(**kwargs):
     raise InfraAbort("ServerUnreachable", "the environment host went away")
 
