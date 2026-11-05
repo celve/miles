@@ -12,6 +12,7 @@ from miles.backends.training_utils.data.context_parallel import (
 from miles.backends.training_utils.data.sampling_mask import get_rollout_sampling_masks
 from miles.backends.training_utils.loss.hub.corrections import vanilla_tis_function
 from miles.backends.training_utils.loss.hub.logit_processors import get_log_probs_and_entropy, get_values
+from miles.backends.training_utils.loss.hub.m2po import compute_m2po_policy_loss
 from miles.backends.training_utils.loss.hub.math_utils import (
     compute_approx_kl,
     compute_ess_ratio_contribution,
@@ -211,9 +212,26 @@ def policy_loss_function(
         advantages.new_zeros(()),
     )
 
-    pg_loss, pg_clipfrac = compute_policy_loss(
-        ppo_kl, advantages, args.eps_clip, args.eps_clip_high, getattr(args, "eps_clip_c", None)
-    )
+    use_m2po = getattr(args, "use_m2po", False)
+    if use_m2po:
+        assert rollout_old_log_probs is not None, "rollout_log_probs must be provided when --use-m2po is set"
+        behaviour_log_ratio = torch.where(
+            active_tokens,
+            log_probs.detach() - torch.cat(rollout_old_log_probs, dim=0),
+            log_probs.new_zeros(()),
+        )
+        pg_loss, pg_clipfrac, m2po_metrics = compute_m2po_policy_loss(
+            ppo_kl,
+            behaviour_log_ratio,
+            advantages,
+            tau=args.m2po_tau,
+            eps_clip=args.eps_clip,
+            eps_clip_high=args.eps_clip_high,
+        )
+    else:
+        pg_loss, pg_clipfrac = compute_policy_loss(
+            ppo_kl, advantages, args.eps_clip, args.eps_clip_high, getattr(args, "eps_clip_c", None)
+        )
 
     if getattr(args, "dump_details", None) is not None:
         from miles.backends.training_utils.metrics.debug_dump import maybe_dump_policy_loss_debug
@@ -396,6 +414,10 @@ def policy_loss_function(
         for metric_key, metric_value in tis_metrics.items():
             key_name = f"{metric_key}"
             reported_loss[key_name] = sum_of_sample_mean_for_mismatch_metrics(metric_value)
+
+    if use_m2po:
+        for metric_key, metric_value in m2po_metrics.items():
+            reported_loss[metric_key] = sum_of_sample_mean(metric_value).clone().detach()
 
     if args.use_opsm:
         reported_loss["opsm_clipfrac"] = opsm_clipfrac

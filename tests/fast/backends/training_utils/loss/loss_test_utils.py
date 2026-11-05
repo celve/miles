@@ -105,6 +105,8 @@ _ARGS_DEFAULTS = dict(
     custom_pg_loss_reducer_function_path=None,
     use_opsm=False,
     opsm_delta=0.1,
+    use_m2po=False,
+    m2po_tau=0.04,
     calculate_per_token_loss=False,
     # value_loss_function
     value_clip=0.2,
