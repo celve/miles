@@ -54,7 +54,17 @@ class DiffusionConfig(BaseConfig):
         int, Arg(help="Images per /rollout/generate request; a prompt's group is split into such requests.")
     ] = 8
     diffusion_dit_precision: A[str | None, Arg(help="Rollout DiT precision passed to the engine (fp16/bf16).")] = None
-    diffusion_ocr_num_workers: A[int, Arg(help="CPU PaddleOCR reward actors.")] = 4
+    diffusion_reward_pools: A[
+        list[str],
+        Arg(
+            type_parser=str,
+            nargs="+",
+            choices=["ocr", "pickscore"],
+            help="Reward pools to start besides --rm-type's own, for rewards that only some prompts select through "
+            "their metadata `rm_type`.",
+        ),
+    ] = []
+    diffusion_ocr_num_workers: A[int, Arg(help="Workers of the CPU PaddleOCR reward pool.")] = 4
     diffusion_pickscore_model_path: A[str | None, Arg(help="PickScore model (yuvalkirstain/PickScore_v1).")] = None
     diffusion_pickscore_processor_path: A[
         str | None, Arg(help="PickScore's CLIP processor (laion/CLIP-ViT-H-14-laion2B-s32B-b79K).")

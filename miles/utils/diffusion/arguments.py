@@ -16,6 +16,7 @@ from miles.utils.args.configs.diffusion import DiffusionConfig
 from miles.utils.args.configs.reward_model import RewardModelRolloutOnlyConfig
 from miles.utils.args.configs.rollout import RolloutRelatedConfig, RolloutRelatedRolloutOnlyConfig
 from miles.utils.diffusion.algorithms import ALGORITHMS
+from miles.utils.diffusion.rewards import declared_reward_pool_names
 
 _HOOKS = {
     "rollout_function_path": "miles.rollout.diffusion_rollout.rollout_fn.DiffusionRolloutFn",
@@ -49,18 +50,23 @@ _UNSUPPORTED = [
         lambda a: a.custom_rm_path is None and a.rm_type not in ("ocr", "pickscore"),
     ),
     (
-        "--rm-type pickscore without --diffusion-pickscore-model-path and --diffusion-pickscore-processor-path",
-        lambda a: a.rm_type == "pickscore"
+        "the PickScore reward without --diffusion-pickscore-model-path and --diffusion-pickscore-processor-path",
+        lambda a: "pickscore" in declared_reward_pool_names(a)
         and not (a.diffusion_pickscore_model_path and a.diffusion_pickscore_processor_path),
     ),
     (
         "a PickScore worker on a fraction of a GPU or several (--diffusion-pickscore-num-gpus-per-worker other than 0 "
         "or 1); each worker scores on one whole GPU or on the CPU",
-        lambda a: a.rm_type == "pickscore" and a.diffusion_pickscore_num_gpus_per_worker not in (0, 1),
+        lambda a: "pickscore" in declared_reward_pool_names(a)
+        and a.diffusion_pickscore_num_gpus_per_worker not in (0, 1),
     ),
     (
         "the OCR reward on video (--diffusion-output-num-frames > 1); it reads only the first frame",
-        lambda a: a.rm_type == "ocr" and a.diffusion_output_num_frames != 1,
+        lambda a: "ocr" in declared_reward_pool_names(a) and a.diffusion_output_num_frames != 1,
+    ),
+    (
+        "--diffusion-reward-pools with a global --custom-rm-path, which scores every sample, so no built-in pool starts",
+        lambda a: bool(a.diffusion_reward_pools) and a.custom_rm_path is not None,
     ),
     (
         "the output store or the Mooncake object store",
@@ -188,11 +194,11 @@ def validate_diffusion_args(args) -> None:
         )
     _derive_hooks(args)
     _check_step_strategy_flags(args)
-    if args.rm_type != "pickscore":
+    if "pickscore" not in declared_reward_pool_names(args):
         if unread_pickscore := [flag for flag in _PICKSCORE_FLAGS if vars(args)[flag] != _default(flag)]:
             raise ValueError(
-                "without --rm-type pickscore no PickScore pool is built, so these are never read: "
-                + ", ".join(f"--{flag.replace('_', '-')}" for flag in unread_pickscore)
+                "without --rm-type pickscore or --diffusion-reward-pools pickscore no PickScore pool starts, so these "
+                "are never read: " + ", ".join(f"--{flag.replace('_', '-')}" for flag in unread_pickscore)
             )
     if args.diffusion_lora_rank <= 0 or args.diffusion_num_sde_steps <= 0:
         raise ValueError("--diffusion-lora-rank and --diffusion-num-sde-steps must be positive")
