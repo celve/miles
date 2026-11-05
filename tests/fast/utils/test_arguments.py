@@ -256,10 +256,11 @@ EXTERNAL_ARGS = [
 
 
 class TestM2poValidation:
-    def _validated(self, extra):
+    def _validated(self, extra, context_parallel_size=1):
         parser = argparse.ArgumentParser()
         get_miles_extra_args_provider()(parser)
         args = parser.parse_args(extra + ["--num-rollout", "1"] + REQUIRED_ARGS)
+        args.context_parallel_size = context_parallel_size
         miles_validate_args(args)
         return args
 
@@ -278,6 +279,10 @@ class TestM2poValidation:
     def test_m2po_refuses_what_it_would_silently_ignore(self, extra, message):
         with pytest.raises(AssertionError, match=message):
             self._validated(["--use-m2po", *extra])
+
+    def test_m2po_refuses_context_parallelism(self):
+        with pytest.raises(AssertionError, match="CP splits"):
+            self._validated(["--use-m2po", "--use-tis"], context_parallel_size=2)
 
 
 class TestMaxConsecutiveAbortedGroups:

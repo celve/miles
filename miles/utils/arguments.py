@@ -3914,6 +3914,7 @@ def miles_validate_args(args):
         assert args.advantage_estimator != "gspo", "--use-m2po masks tokens, but GSPO's ratio is per sequence."
         assert args.eps_clip_c is None, "--use-m2po replaces PPO clipping, dual-clip included: drop --eps-clip-c."
         assert args.m2po_tau > 0, f"--m2po-tau must be positive, got {args.m2po_tau}."
+        assert args.context_parallel_size == 1, "--use-m2po masks a micro-batch's tokens, which CP splits across ranks."
 
     if args.get_mismatch_metrics:
         assert (
