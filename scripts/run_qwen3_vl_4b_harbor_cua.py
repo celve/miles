@@ -66,7 +66,7 @@ Usage:
     python3 scripts/run_qwen3_vl_4b_harbor_cua.py --harbor-env-type e2b --mode eval
     python3 scripts/run_qwen3_vl_4b_harbor_cua.py --harbor-env-type e2b --rollout-path session
     python3 scripts/run_qwen3_vl_4b_harbor_cua.py --harbor-env-type e2b --rollout-path session --media-refs
-    python3 scripts/run_qwen3_vl_4b_harbor_cua.py --model-name qwen3.8-27b --harbor-env-type e2b \
+    python3 scripts/run_qwen3_vl_4b_harbor_cua.py --model-name qwen3.8-27b --num-gpus-per-node 8 --harbor-env-type e2b \
         --rollout-path session --skip-prepare --data-dir <train.jsonl and eval.jsonl> --harbor-tasks-dir <task dirs>
 """
 
@@ -547,6 +547,11 @@ def main(args: ScriptArgs):
     if args.rollout_path == "session" and args.osworld_runner_url:
         raise typer.BadParameter(
             "--rollout-path session runs computer-1 in the rollout worker, not the OSWorld runner"
+        )
+    if args.backend == "megatron" and (args.num_gpus_per_node * args.num_nodes) % args.tensor_parallel:
+        raise typer.BadParameter(
+            f"--model-name {args.model_name} trains at tensor parallel {args.tensor_parallel}, which "
+            f"{args.num_nodes} node(s) of --num-gpus-per-node {args.num_gpus_per_node} cannot divide"
         )
     if args.recipe.session_only and args.rollout_path != "session":
         raise typer.BadParameter(f"--model-name {args.model_name} trains through --rollout-path session only")

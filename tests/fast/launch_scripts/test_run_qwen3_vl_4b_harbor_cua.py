@@ -250,7 +250,7 @@ def test_qwen38_refuses_the_generate_path():
     launcher = import_launch_script(LAUNCHER)
 
     with pytest.raises(typer.BadParameter, match="--rollout-path session only"):
-        launcher.main(harbor_env_type="e2b", model_name="qwen3.8-27b")
+        launcher.main(harbor_env_type="e2b", model_name="qwen3.8-27b", num_gpus_per_node=8)
 
 
 def test_dead_groups_are_dropped_only_when_asked(monkeypatch, tmp_path):
@@ -269,3 +269,10 @@ def test_tis_replaces_the_rollout_logprob_ratio(monkeypatch, tmp_path):
 
     assert "--use-tis" in tis and "--use-rollout-logprobs" not in tis
     assert "--use-rollout-logprobs" in default and "--use-tis" not in default
+
+
+def test_an_allocation_the_tensor_parallel_group_does_not_fit_is_refused():
+    launcher = import_launch_script(LAUNCHER)
+
+    with pytest.raises(typer.BadParameter, match="tensor parallel 4"):
+        launcher.main(harbor_env_type="e2b", model_name="qwen3.8-27b", rollout_path="session")
