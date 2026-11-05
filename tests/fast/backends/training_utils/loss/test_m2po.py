@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import pytest
 import torch
 import torch.distributed as dist
@@ -39,8 +41,9 @@ def _algorithm_1(log_ratio: torch.Tensor, advantages: torch.Tensor, tau: float) 
         for i, (r, a) in enumerate(zip(log_ratio.tolist(), advantages.tolist(), strict=True))
         if (a > 0 and r > 0) or (a < 0 and r < 0)
     ]
-    while trust_region and sum(log_ratio[i] ** 2 for i in trust_region) / len(trust_region) > tau:
-        largest = max(trust_region, key=lambda i: log_ratio[i] ** 2)
+    squared = [r * r for r in log_ratio.tolist()]
+    while trust_region and math.fsum(squared[i] for i in trust_region) / len(trust_region) > tau:
+        largest = max(trust_region, key=lambda i: squared[i])
         keep[largest] = 0
         trust_region.remove(largest)
     return keep
