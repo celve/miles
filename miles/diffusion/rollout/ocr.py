@@ -1,9 +1,6 @@
 """OCR reward of Flow-GRPO: 1 - normalized edit distance between the quoted prompt text and PaddleOCR's reading."""
 
-import asyncio
 import logging
-import multiprocessing
-from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 import torch
@@ -66,43 +63,18 @@ def _patch_numpy_for_imgaug() -> None:
         }
 
 
-_worker_scorer: OcrScorer | None = None
+class OcrBatchScorer:
+    """A reward pool worker's scorer: one PaddleOCR reading per image."""
+
+    def __init__(self, *, device: torch.device) -> None:
+        self.scorer = OcrScorer()
+
+    def score_batch(self, images: list[np.ndarray], prompts: list[str]) -> list[float]:
+        return [self.scorer(image, prompt) for image, prompt in zip(images, prompts, strict=True)]
 
 
-def _init_worker() -> None:
-    global _worker_scorer
-    _worker_scorer = OcrScorer()
-
-
-def _score_in_worker(image: np.ndarray, prompt: str) -> float:
-    return _worker_scorer(image, prompt)
-
-
-class OcrRewardPool:
-    """CPU PaddleOCR worker processes, one image per task."""
-
-    def __init__(self, num_workers: int) -> None:
-        self._executor = ProcessPoolExecutor(
-            max_workers=num_workers, mp_context=multiprocessing.get_context("spawn"), initializer=_init_worker
-        )
-
-    async def score(self, images: list[np.ndarray], prompts: list[str]) -> list[float]:
-        loop = asyncio.get_running_loop()
-        return list(
-            await asyncio.gather(
-                *(
-                    loop.run_in_executor(self._executor, _score_in_worker, image, prompt)
-                    for image, prompt in zip(images, prompts, strict=True)
-                )
-            )
-        )
-
-    def shutdown(self) -> None:
-        self._executor.shutdown(cancel_futures=True)
-
-
-async def ocr_rm(args, sample: Sample, *, ocr_pool: OcrRewardPool, **_other_pools) -> float:
-    """`--rm-type ocr`: the reward of one generated image, scored on the rollout's own pool."""
+async def ocr_rm(args, sample: Sample, *, ocr_pool, **_other_pools) -> float:
+    """`--rm-type ocr`: the reward of one generated image, scored on the `ocr` reward pool."""
     assert sample.diffusion is not None, "--rm-type ocr scores diffusion samples only"
     image = image_to_rgb_uint8(sample.diffusion.generated_output)
     return (await ocr_pool.score([image], [sample.prompt]))[0]

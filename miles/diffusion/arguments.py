@@ -8,6 +8,7 @@ rejected here, before any worker starts, rather than failing inside one.
 from miles.backends.fsdp_utils.arguments import FSDPArgs
 from miles.backends.sglang_utils.sglang_api_client import WorkerType
 from miles.diffusion.algorithms import ALGORITHMS
+from miles.diffusion.rewards import declared_reward_pool_names
 from miles.diffusion.rollout import step_strategy
 from miles.diffusion.train.pipeline_config import get_train_pipeline_config, resolve_model_family
 from miles.utils.args.configs.algo import AlgoConfig
@@ -48,18 +49,19 @@ _UNSUPPORTED = [
         lambda a: a.custom_rm_path is None and a.rm_type not in ("ocr", "pickscore"),
     ),
     (
-        "--rm-type pickscore without --diffusion-pickscore-model-path and --diffusion-pickscore-processor-path",
-        lambda a: a.rm_type == "pickscore"
+        "the PickScore reward without --diffusion-pickscore-model-path and --diffusion-pickscore-processor-path",
+        lambda a: "pickscore" in declared_reward_pool_names(a)
         and not (a.diffusion_pickscore_model_path and a.diffusion_pickscore_processor_path),
     ),
     (
         "a PickScore worker on a fraction of a GPU or several (--diffusion-pickscore-num-gpus-per-worker other than 0 "
         "or 1); each worker scores on one whole GPU or on the CPU",
-        lambda a: a.rm_type == "pickscore" and a.diffusion_pickscore_num_gpus_per_worker not in (0, 1),
+        lambda a: "pickscore" in declared_reward_pool_names(a)
+        and a.diffusion_pickscore_num_gpus_per_worker not in (0, 1),
     ),
     (
         "the OCR reward on video (--diffusion-output-num-frames > 1); it reads only the first frame",
-        lambda a: a.rm_type == "ocr" and a.diffusion_output_num_frames != 1,
+        lambda a: "ocr" in declared_reward_pool_names(a) and a.diffusion_output_num_frames != 1,
     ),
     (
         "the output store or the Mooncake object store",
@@ -182,11 +184,11 @@ def validate_diffusion_args(args) -> None:
         )
     _derive_hooks(args)
     _check_step_strategy_flags(args)
-    if args.rm_type != "pickscore":
+    if "pickscore" not in declared_reward_pool_names(args):
         if unread_pickscore := [flag for flag in _PICKSCORE_FLAGS if vars(args)[flag] != _default(flag)]:
             raise ValueError(
-                "without --rm-type pickscore no PickScore pool is built, so these are never read: "
-                + ", ".join(f"--{flag.replace('_', '-')}" for flag in unread_pickscore)
+                "without --rm-type pickscore or --diffusion-reward-pools pickscore no PickScore pool starts, so these "
+                "are never read: " + ", ".join(f"--{flag.replace('_', '-')}" for flag in unread_pickscore)
             )
     if args.diffusion_lora_rank <= 0 or args.diffusion_num_sde_steps <= 0:
         raise ValueError("--diffusion-lora-rank and --diffusion-num-sde-steps must be positive")
