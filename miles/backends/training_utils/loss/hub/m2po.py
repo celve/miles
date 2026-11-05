@@ -12,12 +12,13 @@ from miles.backends.training_utils.loss.hub.math_utils import (
 def compute_m2po_mask(log_ratio: torch.Tensor, advantages: torch.Tensor, tau: float) -> torch.Tensor:
     """Algorithm 1: mask the trust-region tokens with the largest (log r)² until the rest average at most tau."""
     trust_region = ((advantages > 0) & (log_ratio > 0)) | ((advantages < 0) & (log_ratio < 0))
-    sort_key = torch.where(trust_region, log_ratio.square(), torch.full_like(log_ratio, -1.0))
+    squared = log_ratio.double().square()
+    sort_key = torch.where(trust_region, squared, torch.full_like(squared, -1.0))
     sorted_key, order = sort_key.sort(descending=True)
-    sorted_sq = sorted_key.clamp(min=0)
+    suffix_sums = sorted_key.clamp(min=0).flip(0).cumsum(0).flip(0)
     position = torch.arange(sort_key.numel(), device=sort_key.device)
     num_trust_region = trust_region.sum()
-    kept_mean = (sorted_sq.sum() - sorted_sq.cumsum(0) + sorted_sq) / (num_trust_region - position).clamp(min=1)
+    kept_mean = suffix_sums / (num_trust_region - position).clamp(min=1)
     masked_sorted = (position < num_trust_region) & (kept_mean > tau)
     return torch.ones_like(log_ratio).scatter(0, order, (~masked_sorted).to(log_ratio.dtype))
 
