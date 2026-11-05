@@ -81,6 +81,7 @@ _ARGS_DEFAULTS = dict(
     use_sampling_support_replay=False,
     skip_actor_forward_only=False,
     kl_coef=0.1,
+    proximal_kl_coef=0.0,
     kl_loss_type="k1",
     gamma=1.0,
     lambd=0.95,

@@ -61,6 +61,17 @@ class LossFunction(Protocol):
         ...
 
 
+def _proximal_kl(
+    log_probs: torch.Tensor,
+    proximal_log_probs: list[torch.Tensor],
+    active_tokens: torch.Tensor,
+    sum_of_sample_mean: Callable[[torch.Tensor], torch.Tensor],
+) -> torch.Tensor:
+    kl = compute_approx_kl(log_probs, torch.cat(proximal_log_probs, dim=0), kl_loss_type="low_var_kl")
+    kl = torch.where(active_tokens, torch.nan_to_num(kl, nan=0.0, posinf=0.0, neginf=0.0), kl.new_zeros(()))
+    return sum_of_sample_mean(kl)
+
+
 def policy_loss_function(
     args: Namespace,
     batch: RolloutBatch,
@@ -348,6 +359,10 @@ def policy_loss_function(
         if args.kl_loss_coef != 0:
             loss = loss + args.kl_loss_coef * kl_loss
 
+    if args.proximal_kl_coef != 0:
+        proximal_kl = _proximal_kl(log_probs, trainer_scored_log_probs, active_tokens, sum_of_sample_mean)
+        loss = loss + args.proximal_kl_coef * proximal_kl
+
     # make sure the gradient could backprop correctly; fp32 sum avoids fp16 inf -> nan
     if log_probs.numel() == 0:
         loss += 0 * logits.sum(dtype=torch.float32)
@@ -394,6 +409,8 @@ def policy_loss_function(
 
     if args.use_kl_loss:
         reported_loss["kl_loss"] = kl_loss.clone().detach()
+    if args.proximal_kl_coef != 0:
+        reported_loss["proximal_kl"] = proximal_kl.clone().detach()
 
     if args.get_mismatch_metrics or args.use_tis:
         # Aggregate mismatch/TIS/RS related metrics with the *pre-RS* masks.

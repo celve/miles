@@ -276,6 +276,22 @@ class TestMaxConsecutiveAbortedGroups:
             self._validated(["--max-consecutive-aborted-groups", "-1"])
 
 
+class TestProximalKlValidation:
+    def _validated(self, extra):
+        parser = argparse.ArgumentParser()
+        get_miles_extra_args_provider()(parser)
+        args = parser.parse_args(extra + ["--num-rollout", "1"] + REQUIRED_ARGS)
+        miles_validate_args(args)
+        return args
+
+    def test_the_default_is_off(self):
+        assert self._validated([]).proximal_kl_coef == 0.0
+
+    def test_it_is_refused_without_trainer_scored_log_probs(self):
+        with pytest.raises(AssertionError, match="proximal_kl_coef needs trainer-scored log-probs"):
+            self._validated(["--use-rollout-logprobs", "--proximal-kl-coef", "0.1"])
+
+
 class TestExternalRolloutValidation:
     def _parse(self, extra):
         parser = argparse.ArgumentParser()
