@@ -28,6 +28,7 @@ def agentic_train_args(
     session_server_workers: int,
     session_server_port: int = 30000,
     session_server_external_host: str = "",
+    session_images: bool = False,
 ) -> str:
     """The agentic wiring every Harbor launcher passes to train.py.
 
@@ -38,6 +39,9 @@ def agentic_train_args(
     external_host_arg = (
         f"--session-server-external-host {session_server_external_host} " if session_server_external_host else ""
     )
+    session_server_args = (
+        "--use-session-server v2 --multimodal-token-space-processing " if session_images else "--use-session-server "
+    )
     return (
         "--custom-generate-function-path miles.rollout.generate_hub.agentic_tool_call.generate "
         "--custom-agent-function-path harbor_agent_function.run "
@@ -45,7 +49,7 @@ def agentic_train_args(
         "--rollout-function-path generate.RolloutFn "
         "--dynamic-sampling-filter-path miles.rollout.filter_hub.dynamic_sampling_filters.check_no_aborted "
         f"--tito-model {tito_model} "
-        "--use-session-server "
+        f"{session_server_args}"
         f"--session-server-port {session_server_port} "
         f"--session-server-workers {session_server_workers} "
         f"{external_host_arg}"
@@ -118,6 +122,11 @@ def harbor_env_vars(args) -> dict[str, str]:
         "HARBOR_VERIFIER_TIMEOUT_SEC",
         "HARBOR_ENV_BUILD_TIMEOUT_MULTIPLIER",
         "HARBOR_AGENT_ALLOWED_HOSTS",
+        "HARBOR_AGENT_IMPORT_PATH",
+        "HARBOR_CUA_COORDINATE_SPACE",
+        "HARBOR_AGENT_KWARGS",
+        "HARBOR_VERIFIER_IMPORT_PATH",
+        "HARBOR_VERIFIER_KWARGS",
     ):
         if value := os.environ.get(var, "").strip():
             env[var] = value
