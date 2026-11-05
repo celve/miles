@@ -60,6 +60,11 @@ _UNSUPPORTED = [
         and a.diffusion_pickscore_num_gpus_per_worker not in (0, 1),
     ),
     (
+        "a colocated PickScore pool on the CPU (--diffusion-pickscore-placement colocated with "
+        "--diffusion-pickscore-num-gpus-per-worker 0); only a GPU worker shares a rollout GPU",
+        lambda a: a.diffusion_pickscore_placement == "colocated" and a.diffusion_pickscore_num_gpus_per_worker == 0,
+    ),
+    (
         "the OCR reward on video (--diffusion-output-num-frames > 1); it reads only the first frame",
         lambda a: "ocr" in declared_reward_pool_names(a) and a.diffusion_output_num_frames != 1,
     ),

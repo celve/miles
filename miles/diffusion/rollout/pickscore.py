@@ -75,6 +75,10 @@ class PickScoreBatchScorer:
         self.frames_per_forward = frames_per_forward
         self.scorer = PickScoreScorer(device=device, processor_path=processor_path, model_path=model_path)
 
+    def to(self, device: torch.device) -> None:
+        self.scorer.model.to(device)
+        self.scorer.device = device
+
     def score_batch(self, outputs: list[torch.Tensor], prompts: list[str]) -> list[float]:
         images, frame_counts = [], []
         for output in outputs:
