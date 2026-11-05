@@ -251,3 +251,13 @@ def test_qwen38_refuses_the_generate_path():
 
     with pytest.raises(typer.BadParameter, match="--rollout-path session only"):
         launcher.main(harbor_env_type="e2b", model_name="qwen3.8-27b")
+
+
+def test_dead_groups_are_dropped_only_when_asked(monkeypatch, tmp_path):
+    dropping, _ = _train_command(
+        monkeypatch, tmp_path, model_name="qwen3.8-27b", rollout_path="session", drop_zero_std_groups=True
+    )
+    keeping, _ = _train_command(monkeypatch, tmp_path, model_name="qwen3.8-27b", rollout_path="session")
+
+    assert "--dynamic-sampling-filter-path miles.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std" in dropping
+    assert "--dynamic-sampling-filter-path miles.rollout.filter_hub.dynamic_sampling_filters.check_no_aborted" in keeping

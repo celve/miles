@@ -257,12 +257,13 @@ class DesktopQwen3VLComputer1(Qwen3VLComputer1):
     async def _execute_action(self, action: Any, episode: int) -> Any:
         if action is not None and action.type not in TERMINAL_ACTION_TYPES:
             self._fingerprints.append(json.dumps(asdict(action), sort_keys=True, default=str))
+            # As CUA-Lite's LoopDetectWrapper does, the action that would close the loop is never executed.
+            if self._loop_limit is not None and _loops(self._fingerprints, self._loop_limit):
+                self._early_termination_reason = "loop_detected"
+                raise LoopDetected(self._fingerprints[-1])
         return await super()._execute_action(action, episode)
 
     async def _query_litellm(self, chat: Any, prompt: Any, *args: Any, **kwargs: Any) -> Any:
-        if self._loop_limit is not None and _loops(self._fingerprints, self._loop_limit):
-            self._early_termination_reason = "loop_detected"
-            raise LoopDetected(self._fingerprints[-1])
         self._collapse_turns(chat.messages)
         # A parse-error retry carries no screen of its own, so the history keeps the current one.
         self._trim_history(chat.messages, _images_in(prompt))

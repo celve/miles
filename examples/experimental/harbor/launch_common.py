@@ -30,6 +30,7 @@ def agentic_train_args(
     session_server_external_host: str = "",
     session_images: bool = False,
     agent_worker_url: str = "",
+    drop_zero_std_groups: bool = False,
 ) -> str:
     """The agentic wiring every Harbor launcher passes to train.py.
 
@@ -47,6 +48,8 @@ def agentic_train_args(
         else ""
     )
     # The bare flag selects v1, and session images exist only on v2.
+    # Aborted and reward-less groups are refused before either filter runs (filter_hub.common_filters.apply_preput_filters).
+    dynamic_filter = "check_reward_nonzero_std" if drop_zero_std_groups else "check_no_aborted"
     session_server_args = (
         "--use-session-server v2 --use-session-images " if session_images else "--use-session-server "
     )
@@ -55,7 +58,7 @@ def agentic_train_args(
         "--custom-agent-function-path harbor_agent_function.run "
         "--custom-rm-path generate.reward_func "
         "--rollout-function-path generate.RolloutFn "
-        "--dynamic-sampling-filter-path miles.rollout.filter_hub.dynamic_sampling_filters.check_no_aborted "
+        f"--dynamic-sampling-filter-path miles.rollout.filter_hub.dynamic_sampling_filters.{dynamic_filter} "
         f"--tito-model {tito_model} "
         f"{session_server_args}"
         f"--session-server-port {session_server_port} "

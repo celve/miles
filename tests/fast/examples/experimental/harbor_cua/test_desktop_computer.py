@@ -282,35 +282,43 @@ def test_a_short_history_is_left_alone(tmp_path, monkeypatch):
     assert seen[0] == _turns(3)
 
 
-def _execute(agent, monkeypatch, actions):
+def _record_executions(monkeypatch):
+    executed = []
+
     async def fake_execute(self, action, episode):
-        return None
+        executed.append(action)
 
     monkeypatch.setattr(Computer1, "_execute_action", fake_execute)
-    for action in actions:
-        asyncio.run(agent._execute_action(action, 0))
+    return executed
 
 
 @pytest.mark.parametrize(
-    ("actions", "loops"),
+    ("actions", "executed_before_stop"),
     [
-        ([ComputerAction(type="click", x=5, y=5)] * 5, True),
-        ([ComputerAction(type="click", x=5, y=5)] * 4, False),
-        ([ComputerAction(type="click", x=5, y=5), ComputerAction(type="key", keys=["Tab"])] * 5, True),
-        ([ComputerAction(type="click", x=i, y=5) for i in range(5)], False),
+        ([ComputerAction(type="click", x=5, y=5)] * 5, 4),
+        ([ComputerAction(type="click", x=5, y=5), ComputerAction(type="key", keys=["Tab"])] * 5, 9),
     ],
 )
-def test_a_repeated_block_of_actions_ends_the_episode(tmp_path, monkeypatch, actions, loops):
+def test_the_action_that_closes_a_loop_is_never_executed(tmp_path, monkeypatch, actions, executed_before_stop):
+    executed = _record_executions(monkeypatch)
     agent = _agent(tmp_path, loop_limit=5)
-    _execute(agent, monkeypatch, actions)
-    query = agent._query_litellm(SimpleNamespace(messages=[]), [_image_turn("now")])
-    if loops:
-        with pytest.raises(dc.LoopDetected):
-            asyncio.run(query)
-        assert agent._early_termination_reason == "loop_detected"
-    else:
-        monkeypatch.setattr(Computer1, "_query_litellm", lambda *a, **k: asyncio.sleep(0))
-        asyncio.run(query)
+    with pytest.raises(dc.LoopDetected):
+        for action in actions:
+            asyncio.run(agent._execute_action(action, 0))
+    assert len(executed) == executed_before_stop
+    assert agent._early_termination_reason == "loop_detected"
+
+
+@pytest.mark.parametrize(
+    "actions",
+    [[ComputerAction(type="click", x=5, y=5)] * 4, [ComputerAction(type="click", x=i, y=5) for i in range(5)]],
+)
+def test_actions_short_of_a_loop_all_execute(tmp_path, monkeypatch, actions):
+    executed = _record_executions(monkeypatch)
+    agent = _agent(tmp_path, loop_limit=5)
+    for action in actions:
+        asyncio.run(agent._execute_action(action, 0))
+    assert len(executed) == len(actions)
 
 
 def test_a_detected_loop_ends_the_run_without_an_error(tmp_path, monkeypatch):

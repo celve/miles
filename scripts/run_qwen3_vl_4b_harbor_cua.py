@@ -49,6 +49,8 @@ Args:
         when the workers' value, after ``--extra-env-vars``, is above 0, the run refuses
         unless the workers' SGLang clears it on weight updates (celve/sglang 55bdbddf84,
         sgl-project/sglang#47480). 0 runs on an older SGLang.
+    --drop-zero-std-groups: with ``--rollout-path session``, refuse groups whose rewards are all equal, which GRPO
+        gives zero advantage, and keep sampling groups until the batch is full of live ones.
     --media-refs: with ``--rollout-path session``, hand the trainer each retained
         screenshot as a file under ``--output-dir``/media instead of pixel tensors; the
         trainer rebuilds the pixels with SGLang's token-space processor, which the
@@ -185,6 +187,7 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     eval_server_concurrency: int = 32
     freeze_vision_model: Literal["auto", "on", "off"] = "auto"
     media_refs: bool = False
+    drop_zero_std_groups: bool = False
     # Keeps the resent screenshot's ViT embedding (~42 MB at 1080p) for 64 desktops.
     vlm_cache_size_mb: int = 4096
     # megatron by default because LIN-2046 measured FSDP training Qwen3-VL with linear
@@ -309,6 +312,7 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
                 session_images=True,
                 session_server_external_host=args.session_server_external_host,
                 agent_worker_url=args.agent_worker_url,
+                drop_zero_std_groups=args.drop_zero_std_groups,
             )
             # The session server's per-sample cap, where the generate path caps by --rollout-max-context-len.
             + "--max-seq-len 32768 "
@@ -541,6 +545,8 @@ def main(args: ScriptArgs):
         )
     if args.recipe.session_only and args.rollout_path != "session":
         raise typer.BadParameter(f"--model-name {args.model_name} trains through --rollout-path session only")
+    if args.drop_zero_std_groups and args.rollout_path != "session":
+        raise typer.BadParameter("--drop-zero-std-groups is implemented for --rollout-path session only")
     if args.media_refs and args.rollout_path != "session":
         raise typer.BadParameter("--media-refs is implemented for --rollout-path session only")
     if args.agent_worker_url and args.rollout_path != "session":
