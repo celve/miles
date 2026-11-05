@@ -22,6 +22,11 @@ def sde_window(args: Namespace, sample: Sample, num_steps: int, seed: int) -> tu
     return steps, sorted(set(steps) | {step + 1 for step in steps})
 
 
+def ode_and_return_last(args: Namespace, sample: Sample, num_steps: int, seed: int) -> tuple[None, list[int]]:
+    """DiffusionNFT: a pure ODE rollout that returns only the final, clean latent."""
+    return None, [num_steps]
+
+
 def _window_range(raw: str | None, *, num_steps: int) -> tuple[int, int]:
     if not raw:
         return 0, num_steps

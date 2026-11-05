@@ -73,6 +73,8 @@ def test_the_recipe_layout_passes_and_resolves_the_family_defaults():
         (dict(debug_rollout_only=True), "debug"),
         (dict(ci_test=True), "ci-test"),
         (dict(eps_clip=0.2), "explicitly"),
+        (dict(loss_type="custom_loss"), "--loss-type other than the diffusion algorithms"),
+        (dict(loss_type="sft_loss"), "--loss-type other than the diffusion algorithms"),
         (dict(use_dynamic_batch_size=True), "token-based batching"),
         (dict(use_dynamic_global_batch_size=True), "token-based batching"),
         (dict(micro_batch_size=8), "--micro-batch-size"),
@@ -193,7 +195,6 @@ def test_a_parsed_diffusion_run_derives_its_batch_size_from_steps_per_rollout():
 @pytest.mark.parametrize(
     "override,flag",
     [
-        (dict(loss_type="custom_loss"), "--loss-type"),
         (dict(custom_loss_function_path="my.loss"), "--custom-loss-function-path"),
         (dict(entropy_coef=0.01), "--entropy-coef"),
         (dict(use_tis=True), "--use-tis"),
@@ -237,3 +238,92 @@ def test_a_step_count_that_does_not_divide_the_images_is_rejected():
 def test_the_batch_size_must_be_set_and_divide_the_rollout(global_batch_size, message):
     with pytest.raises(ValueError, match=message):
         validate_diffusion_batch_size(_supported(global_batch_size=global_batch_size))
+
+
+def _nft(**overrides):
+    recipe = dict(
+        loss_type="nft",
+        eps_clip=0.2,
+        diffusion_sde_type="ode",
+        diffusion_noise_level=0.0,
+        diffusion_guidance_scale=1.0,
+        diffusion_step_strategy_path="miles.diffusion.rollout.step_strategy.ode_and_return_last",
+        diffusion_nft_num_dropped_timesteps=1,
+    )
+    return _supported(**(recipe | overrides))
+
+
+def test_the_nft_recipe_layout_passes():
+    validate_diffusion_args(_nft())
+
+
+@pytest.mark.parametrize(
+    "override,message",
+    [
+        (dict(diffusion_sde_type="sde"), "SDE rollouts"),
+        (dict(diffusion_noise_level=0.7), "noise-level"),
+        (dict(diffusion_guidance_scale=4.5), "classifier-free guidance"),
+        (dict(diffusion_kl_beta=0.04), "KL"),
+        (dict(diffusion_nft_beta=0.0), "nft-beta"),
+        (dict(diffusion_nft_num_dropped_timesteps=10), "dropped-timesteps"),
+        (dict(diffusion_ema_decay_max=1.5), "EMA decay"),
+        (dict(diffusion_ema_decay_ramp=-0.1), "EMA decay"),
+    ],
+)
+def test_each_unsupported_nft_option_is_rejected_at_startup(override, message):
+    with pytest.raises(ValueError, match=message):
+        validate_diffusion_args(_nft(**override))
+
+
+@pytest.mark.parametrize(
+    "override,flag",
+    [
+        (dict(eps_clip=1e-4), "--eps-clip"),
+        (dict(diffusion_num_sde_steps=4), "--diffusion-num-sde-steps"),
+        (dict(diffusion_sde_window_range="0,5"), "--diffusion-sde-window-range"),
+        (dict(diffusion_negative_prompt=" "), "--diffusion-negative-prompt"),
+    ],
+)
+def test_a_flow_grpo_flag_nft_never_reads_is_rejected(override, flag):
+    with pytest.raises(ValueError, match=f"--loss-type nft never reads: .*{flag}"):
+        validate_diffusion_args(_nft(**override))
+
+
+@pytest.mark.parametrize(
+    "override,flag",
+    [
+        (dict(diffusion_nft_beta=0.5), "--diffusion-nft-beta"),
+        (dict(diffusion_ema_decay_max=0.9), "--diffusion-ema-decay-max"),
+        (dict(diffusion_nft_adaptive_weight=False), "--diffusion-nft-adaptive-weight"),
+    ],
+)
+def test_an_nft_flag_flow_grpo_never_reads_is_rejected(override, flag):
+    with pytest.raises(ValueError, match=f"--loss-type flow_grpo never reads: .*{flag}"):
+        validate_diffusion_args(_supported(**override))
+
+
+def test_flow_grpo_rejects_ode_rollouts():
+    with pytest.raises(ValueError, match="ODE rollouts under Flow-GRPO"):
+        validate_diffusion_args(_supported(diffusion_sde_type="ode"))
+
+
+@pytest.mark.parametrize("loss_type", ["flow_grpo", "nft"])
+def test_a_text_run_rejects_the_diffusion_losses(loss_type):
+    from tests.fast.fixtures.args_fixtures import parse_fsdp_test_config
+
+    with pytest.raises(ValueError, match=f"--loss-type {loss_type} is a diffusion algorithm"):
+        parse_fsdp_test_config("--loss-type", loss_type)
+
+
+@pytest.mark.parametrize("argv", [(), ("--loss-type", "policy_loss"), ("--loss-type", "flow_grpo")])
+def test_a_diffusion_run_trains_flow_grpo_by_default_or_by_name(argv):
+    assert _parse_diffusion_run("--global-batch-size", "64", *argv).loss_type == "flow_grpo"
+
+
+def test_a_parsed_nft_run_passes_and_carries_the_seed_the_converter_reads():
+    config = _parse_diffusion_run(
+        *("--loss-type", "nft", "--eps-clip", "0.2", "--num-steps-per-rollout", "1"),
+        *("--diffusion-sde-type", "ode", "--diffusion-noise-level", "0", "--diffusion-guidance-scale", "1"),
+    )
+
+    assert config.loss_type == "nft" and config.seed == 1234

@@ -1,16 +1,18 @@
 """Startup validation and derived defaults of `--model-kind diffusion` runs.
 
-The diffusion path supports one layout: a single SD3-family model, Flow-GRPO with the OCR reward, a LoRA adapter on
-FSDP, colocated single-GPU engines and the synchronous loop. Everything else is rejected here, before any worker
-starts, rather than failing inside one.
+The diffusion path supports one layout: a single SD3-family model, Flow-GRPO or DiffusionNFT (`--loss-type`) with
+the OCR reward, a LoRA adapter on FSDP, colocated single-GPU engines and the synchronous loop. Everything else is
+rejected here, before any worker starts, rather than failing inside one.
 """
 
 from miles.backends.fsdp_utils.arguments import FSDPArgs
 from miles.backends.sglang_utils.sglang_api_client import WorkerType
+from miles.diffusion.algorithms import ALGORITHMS
 from miles.diffusion.train.pipeline_config import get_train_pipeline_config, resolve_model_family
 from miles.utils.args.configs.algo import AlgoConfig
 from miles.utils.args.configs.backend_fields import TrainerBackendTraitConfig
 from miles.utils.args.configs.data import DataConfig
+from miles.utils.args.configs.diffusion import DiffusionConfig
 from miles.utils.args.configs.rollout import RolloutRelatedConfig, RolloutRelatedRolloutOnlyConfig
 
 _HOOKS = {
@@ -59,9 +61,8 @@ _UNSUPPORTED = [
     ("--debug-train-only or --debug-rollout-only", lambda a: a.debug_train_only or a.debug_rollout_only),
     ("--ci-test: its version readback and sample-ownership audit read token fields", lambda a: a.ci_test),
     (
-        # Equality with the parser default is all args can tell; Flow-GRPO clips near 1e-4, never at text PPO's 0.2.
-        "Miles' text PPO clip default (--eps-clip 0.2); pass the ratio clip explicitly, e.g. --eps-clip 1e-4",
-        lambda a: a.eps_clip == AlgoConfig.model_fields["eps_clip"].default,
+        f"a --loss-type other than the diffusion algorithms {sorted(ALGORITHMS)}",
+        lambda a: a.loss_type not in ALGORITHMS,
     ),
     (
         "token-based batching (--use-dynamic-batch-size, --use-dynamic-global-batch-size); images are tiled by "
@@ -85,12 +86,14 @@ _UNSUPPORTED = [
 ]
 
 
-# Text-training and text-sampling flags the Flow-GRPO path never reads (the ones above have their own messages);
+# Text-training and text-sampling flags the diffusion path never reads (the ones above have their own messages);
 # each must keep its default, or the run would silently differ from what was asked.
 _UNREAD = {
     AlgoConfig: sorted(
         AlgoConfig.model_fields.keys()
         - {"eps_clip", "advantage_estimator", "ref_load", "kl_coef", "use_kl_loss", "eps_clip_high", "eps_clip_c"}
+        # Selects the diffusion algorithm, which validates the flags it reads and those it does not.
+        - {"loss_type"}
         - {"use_rollout_routing_replay"}
         # Derived from --advantage-estimator after parsing, which the grpo check above already pins.
         - {"use_critic"}
@@ -138,17 +141,28 @@ _UNREAD_DEFAULTS = {
 _PRECISION_FLAGS = {"--fp16", "--bf16", "--keep-fp32-master"}
 
 
+def _default(name: str):
+    (config,) = (config for config in (AlgoConfig, DiffusionConfig) if name in config.model_fields)
+    return config.model_fields[name].get_default(call_default_factory=True)
+
+
 def validate_diffusion_args(args) -> None:
-    unsupported = [what for what, requested in _UNSUPPORTED if requested(args)]
+    # Miles' default text loss names no diffusion algorithm; Flow-GRPO is the diffusion default.
+    if args.loss_type == AlgoConfig.model_fields["loss_type"].default:
+        args.loss_type = "flow_grpo"
+    algorithm = ALGORITHMS.get(args.loss_type)
+    checks = _UNSUPPORTED + (algorithm.unsupported if algorithm else [])
+    unsupported = [what for what, requested in checks if requested(args)]
     if unsupported:
         raise ValueError("--model-kind diffusion does not support: " + "; ".join(unsupported))
+    unread_defaults = _UNREAD_DEFAULTS | {name: _default(name) for name in algorithm.unread_flags}
     unread = [
-        f"--{name.replace('_', '-')}" for name, default in _UNREAD_DEFAULTS.items() if vars(args)[name] != default
+        f"--{name.replace('_', '-')}" for name, default in unread_defaults.items() if vars(args)[name] != default
     ]
     if unread:
         hint = "; set precision with --diffusion-forward-dtype" if _PRECISION_FLAGS & set(unread) else ""
         raise ValueError(
-            "--model-kind diffusion trains Flow-GRPO on images and never reads: " + ", ".join(unread) + hint
+            f"--model-kind diffusion with --loss-type {args.loss_type} never reads: " + ", ".join(unread) + hint
         )
     _derive_hooks(args)
     if args.diffusion_lora_rank <= 0 or args.diffusion_num_sde_steps <= 0:
