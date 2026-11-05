@@ -13,6 +13,7 @@ class SessionServerConfig(FrozenStrictBaseModel):
     port: int
     instance_id: str | None
     backend_url: str
+    eval_backend_url: str | None
     # header the router places a session by; None = turns are not pinned to one engine
     routing_key_header: str | None
     timeout: float | None
@@ -44,13 +45,20 @@ class SessionServerConfig(FrozenStrictBaseModel):
 
 
 def compute_session_server_config(
-    args, *, host: str, port: int, instance_id: str | None, backend_url: str
+    args,
+    *,
+    host: str,
+    port: int,
+    instance_id: str | None,
+    backend_url: str,
+    eval_backend_url: str | None = None,
 ) -> SessionServerConfig:
     return SessionServerConfig(
         host=host,
         port=port,
         instance_id=instance_id,
         backend_url=backend_url,
+        eval_backend_url=eval_backend_url,
         routing_key_header=_routing_key_header(args),
         timeout=args.miles_router_timeout,
         hf_checkpoint=args.hf_checkpoint,

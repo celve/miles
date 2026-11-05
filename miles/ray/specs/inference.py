@@ -247,6 +247,10 @@ class SessionServerSpec(BaseCommandSpec):
         args = ctx.args
         interpreter_prefix = self.interpreter_prefix
         (router_addrs,) = ctx.pool_addrs[compute_router_pool_id(0)]
+        eval_backend_url = None
+        if (eval_model_idx := _compute_separate_eval_model_idx(args)) is not None:
+            (eval_router_addrs,) = ctx.pool_addrs[compute_router_pool_id(eval_model_idx)]
+            eval_backend_url = eval_router_addrs["primary"].addr
         session_config = compute_session_server_config(
             args,
             host=args.session_server_ip or ctx.self_addrs["primary"].host,
@@ -254,6 +258,7 @@ class SessionServerSpec(BaseCommandSpec):
             # TODO: make the indexing it k8s native compatible
             instance_id=compute_session_server_instance_id(args, ctx.cell_index),
             backend_url=router_addrs["primary"].addr,
+            eval_backend_url=eval_backend_url,
         )
         launch_argv = [*interpreter_prefix, "-m", "miles.rollout.session.server", *config_to_argv(session_config)]
         return shlex.join(launch_argv)
@@ -268,6 +273,13 @@ def _compute_spec_session_server(args: Any) -> SessionServerSpec:
             _compute_session_server_primary_port_info(args),
         ],
     )
+
+
+def _compute_separate_eval_model_idx(args) -> int | None:
+    if args.eval_num_gpus == 0:
+        return None
+    eval_model_idx = next(idx for idx, model_cfg in enumerate(args.sglang.models) if model_cfg.name == "eval")
+    return eval_model_idx or None
 
 
 def _compute_session_server_primary_port_info(args) -> PortInfo:

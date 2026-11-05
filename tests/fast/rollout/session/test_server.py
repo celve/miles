@@ -42,7 +42,8 @@ class TestSessionServer:
 
         server = SessionServer(make_session_server_config(backend_url="http://backend.invalid:8000"))
 
-        assert server.proxy == (URL(expected) if expected else None)
+        proxy, _ = server._env_proxies["http://backend.invalid:8000"]
+        assert proxy == (URL(expected) if expected else None)
 
 
 @pytest.fixture

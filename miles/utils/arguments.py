@@ -1120,7 +1120,15 @@ def miles_validate_args(args):
             f"eval_num_gpus ({args.eval_num_gpus}) must be divisible by "
             f"eval_num_gpus_per_engine ({args.eval_num_gpus_per_engine})."
         )
+        if args.eval_server_concurrency is None:
+            args.eval_server_concurrency = args.sglang_server_concurrency
+        assert (
+            args.eval_server_concurrency > 0
+        ), f"--eval-server-concurrency must be positive, got {args.eval_server_concurrency}."
     else:
+        assert (
+            args.eval_server_concurrency is None
+        ), "--eval-server-concurrency sizes the dedicated eval engines, which need --eval-num-gpus > 0."
         overrides = collect_eval_sglang_overrides(args)
         assert not overrides, (
             f"--eval-sglang-* configures the dedicated eval fleet, which needs --eval-num-gpus > 0. "
@@ -1523,7 +1531,10 @@ def miles_validate_args(args):
             "Snapshot eval requires a snapshot source: set --eval-hf-dir (staging exports) "
             "or --save-hf (reuse periodic HF checkpoints)."
         )
-        assert not args.colocate, "Snapshot eval is not supported with --colocate."
+        assert not (args.colocate and args.eval_hf_dir is not None), (
+            "Snapshot eval under --colocate must reuse --save-hf checkpoints: an --eval-hf-dir export "
+            "loads the trainer onto GPUs the colocated engines still hold. Unset --eval-hf-dir."
+        )
         assert not args.debug_rollout_only, "Snapshot eval is not supported with debug_rollout_only."
         assert (
             args.load_debug_rollout_data is None

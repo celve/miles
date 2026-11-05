@@ -205,8 +205,9 @@ Sections mirror the launch-script argument groups.
 | `--eval-temperature` | float | – | Eval temperature. Inherits from rollout if unset. |
 | `--eval-top-p` | float | – | Eval top-p. Inherits from rollout if unset. |
 | `--eval-top-k` | int | – | Eval top-k. Inherits from rollout if unset. |
-| `--eval-num-gpus` | int | `0` | Dedicated eval fleet size. `0` = shared-engine eval. Requires `train_async.py`. |
+| `--eval-num-gpus` | int | `0` | Dedicated eval fleet size. `0` = shared-engine eval. Under `--colocate` the fleet takes GPUs past the colocated ones and reuses `--save-hf` checkpoints. |
 | `--eval-num-gpus-per-engine` | int | `1` | Eval engine TP, independent of rollout TP. |
+| `--eval-server-concurrency` | int | – | Requests in flight per eval engine. Inherits `--sglang-server-concurrency` if unset. |
 | `--eval-hf-dir` | str | – | Staging dir for per-eval HF snapshots (tmpfs recommended). Unset + `--save-hf` = reuse mode. |
 | `--eval-max-in-flight` | int | `2` | Snapshots the trainer may export ahead of the eval backend. Evals are serialized, so this buys lead time, not concurrency — and one more staged snapshot. |
 | `--eval-overflow-policy` | str | `backpressure` | At the cap: await the oldest eval, or `skip` the new point (logged as `eval/skipped_busy`). |

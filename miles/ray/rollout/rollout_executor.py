@@ -28,7 +28,7 @@ from miles.rollout.base_types import (
 )
 from miles.rollout.checkpoint_eval import CheckpointEvalFn, EvalSkip
 from miles.rollout.fully_async_data_buffer import Group
-from miles.rollout.inference_rollout.compatibility import load_rollout_function
+from miles.rollout.inference_rollout.compatibility import LegacyRolloutFnAdapter, load_rollout_function
 from miles.utils import object_store
 from miles.utils.args.custom_function import CustomFunctionConfig
 from miles.utils.args.custom_view import ImmutableNamespace, compute_custom_function_config
@@ -510,6 +510,12 @@ class RolloutExecutor(DedicatedRpcLoopWorker):
         if eval_fleet_info is None:
             self._eval_fleet = None
             return
+        if isinstance(self.eval_generate_rollout, LegacyRolloutFnAdapter):
+            raise ValueError(
+                f"{self.args.eval_function_path.path} is a legacy rollout function and cannot generate on the "
+                "dedicated eval engines (--eval-num-gpus); make it a BaseRolloutFn that generates against "
+                "input.generate_state, or evaluate on the training engines without --eval-num-gpus."
+            )
 
         fn_args = _compute_rollout_function_config(self.args, self.args.eval_function_path)
         self._eval_fleet = RolloutExecutorEvalFleet(
