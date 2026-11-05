@@ -46,4 +46,5 @@ def _pickscore_pool(args) -> RewardPoolConfig:
         uses_gpu=args.diffusion_pickscore_num_gpus_per_worker > 0,
         batch_size=args.diffusion_pickscore_batch_size,
         num_gpus_per_node=args.num_gpus_per_node,
+        colocated=args.diffusion_pickscore_placement == "colocated",
     )

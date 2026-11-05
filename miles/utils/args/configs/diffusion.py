@@ -77,6 +77,14 @@ class DiffusionConfig(BaseConfig):
             "0 scores on the CPU."
         ),
     ] = 1.0
+    diffusion_pickscore_placement: A[
+        str,
+        Arg(
+            choices=["dedicated", "colocated"],
+            help="`dedicated` gives the PickScore workers GPUs of their own; `colocated` puts them on the first rollout "
+            "GPUs, sleeping while training holds them.",
+        ),
+    ] = "dedicated"
     diffusion_pickscore_batch_size: A[
         int, Arg(help="Samples per PickScore actor call, and frames per PickScore forward.")
     ] = 8

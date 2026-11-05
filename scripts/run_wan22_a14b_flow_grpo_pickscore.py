@@ -13,6 +13,8 @@ Args:
     --model-path: a local Wan2.2-T2V-A14B-Diffusers directory; downloaded to --model-dir when empty.
     --save-interval: rollouts between checkpoints; 0 saves none.
     --pickscore-gpus: 1 gives the PickScore worker its own GPU; 0 scores on the CPU and leaves the node at 4 GPUs.
+    --pickscore-placement: `colocated` puts the PickScore worker on the first train GPU, as the fork's
+        --pickscore-reward-colocate does, and leaves the node at 4 GPUs.
     --extra-args: appended to the train argv.
 
     python scripts/run_wan22_a14b_flow_grpo_pickscore.py --num-rollout 300
@@ -38,6 +40,7 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     rollout_batch_size: int = 48
     n_samples_per_prompt: int = 16
     pickscore_gpus: float = 1.0
+    pickscore_placement: str = "dedicated"
     model_path: str = ""
     data_dir: str = "/root/datasets"
     model_dir: str = "/root/models"
@@ -109,6 +112,7 @@ def execute(args: ScriptArgs) -> None:
         "--rm-type pickscore "
         "--diffusion-pickscore-num-workers 1 "
         f"--diffusion-pickscore-num-gpus-per-worker {args.pickscore_gpus} "
+        f"--diffusion-pickscore-placement {args.pickscore_placement} "
         "--diffusion-pickscore-batch-size 8 "
         f"--diffusion-pickscore-model-path {_local(args.model_dir, PICKSCORE_MODEL)} "
         f"--diffusion-pickscore-processor-path {_local(args.model_dir, PICKSCORE_PROCESSOR)} "
@@ -129,7 +133,7 @@ def execute(args: ScriptArgs) -> None:
         "--deterministic-mode "
     )
 
-    num_gpus = 4 + math.ceil(args.pickscore_gpus)
+    num_gpus = 4 + (math.ceil(args.pickscore_gpus) if args.pickscore_placement == "dedicated" else 0)
     misc_args = (
         "--actor-num-nodes 1 "
         "--actor-num-gpus-per-node 4 "

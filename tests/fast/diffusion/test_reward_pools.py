@@ -1,6 +1,9 @@
 """The reward pools a diffusion run declares, and where Miles places them."""
 
+from types import SimpleNamespace
+
 import pytest
+import torch
 from tests.fast.diffusion.test_validation import _parse_diffusion_run
 
 from miles.ray.placement_group import _get_placement_group_layout
@@ -132,3 +135,45 @@ def test_reward_pools_flag_with_a_global_custom_reward_is_rejected_at_startup():
         _parse_diffusion_run(
             *_PICKSCORE, "--custom-rm-path", f"{__name__}.constant_reward", "--diffusion-reward-pools", "ocr"
         )
+
+
+def test_a_colocated_pickscore_pool_shares_the_first_train_gpu_and_sleeps_through_training():
+    """The fork's --pickscore-reward-colocate layout: 4 bundles, PickScore on GPU 0 beside the trainer and an engine."""
+    args = _parse_diffusion_run(
+        *_PICKSCORE, "--diffusion-pickscore-placement", "colocated", "--num-gpus-per-node", "4"
+    )
+
+    (spec,) = _reward_specs(args).values()
+    scheduling = spec.scheduling(ScalingConfig.slice_from(args))
+
+    assert (scheduling.pg_name, scheduling.pg_slot_offset) == ("rollout", 0)
+    assert spec.pool.colocated and spec.pool.needs_offload
+    assert _get_placement_group_layout(args) == (4, 0)
+
+
+def test_a_colocated_pickscore_pool_on_the_cpu_is_rejected():
+    with pytest.raises(ValueError, match="only a GPU worker shares a rollout GPU"):
+        _parse_diffusion_run(
+            *_PICKSCORE,
+            "--diffusion-pickscore-placement",
+            "colocated",
+            "--diffusion-pickscore-num-gpus-per-worker",
+            "0",
+        )
+
+
+def test_the_placement_flag_without_a_pickscore_pool_is_rejected_as_unread():
+    with pytest.raises(ValueError, match="--diffusion-pickscore-placement"):
+        _parse_diffusion_run("--global-batch-size", "64", "--diffusion-pickscore-placement", "colocated")
+
+
+def test_a_pickscore_worker_moves_its_model_to_sleep_and_back():
+    from miles.rollout.rm_hub.pickscore import PickScoreBatchScorer
+
+    moved = []
+    scorer = object.__new__(PickScoreBatchScorer)
+    scorer.scorer = SimpleNamespace(model=SimpleNamespace(to=moved.append), device=torch.device("cuda", 1))
+
+    scorer.to(torch.device("cpu"))
+
+    assert moved == [torch.device("cpu")] and scorer.scorer.device == torch.device("cpu")
