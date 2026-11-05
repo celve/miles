@@ -95,6 +95,27 @@ def test_an_ocr_worker_scores_each_image_of_a_call_on_its_own(monkeypatch):
     assert scorer.score_batch([1, 2], ['"a"', '"bb"']) == [4.0, 6.0]
 
 
+@pytest.mark.parametrize(
+    "override",
+    [dict(cluster_backend="kubernetes"), dict(worker_comm_backend="rpc"), dict(deploy_component="trainer")],
+)
+def test_reward_pools_run_only_in_one_ray_deployment(override):
+    from tests.fast.diffusion.test_validation import _supported
+
+    from miles.utils.diffusion.arguments import validate_diffusion_args
+
+    with pytest.raises(ValueError, match="a reward pool outside one Ray deployment"):
+        validate_diffusion_args(_supported(**override))
+
+
+def test_a_global_custom_reward_starts_no_pool_so_any_deployment_may_run_it():
+    from tests.fast.diffusion.test_validation import _supported
+
+    from miles.utils.diffusion.arguments import validate_diffusion_args
+
+    validate_diffusion_args(_supported(worker_comm_backend="rpc", custom_rm_path="my.rewards.score"))
+
+
 async def constant_reward(args, samples):
     return [0.5] * len(samples)
 
