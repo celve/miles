@@ -80,6 +80,19 @@ def extract_template_args(request_args: dict[str, Any]) -> dict[str, Any]:
     return args
 
 
+def _has_vision_parts(messages: list[dict[str, Any]]) -> bool:
+    """Whether any message carries an image or video part, as the Qwen vision templates detect one."""
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, list) and any(
+            isinstance(item, dict)
+            and ("image" in item or "image_url" in item or "video" in item or item.get("type") in ("image", "video"))
+            for item in content
+        ):
+            return True
+    return False
+
+
 def _build_dummy_assistant(stored_assistant: dict[str, Any]) -> dict[str, Any]:
     """Build a dummy assistant that preserves the stored turn's tool calls."""
     return {
@@ -310,6 +323,22 @@ class TITOTokenizer:
             raise ValueError(f"rendered suffix diff failed for {roles}")
         return self._encode_text(text_with[len(text_without) :])
 
+    def _tokenize_real_history_suffix(
+        self,
+        old_messages: list[dict[str, Any]],
+        new_messages: list[dict[str, Any]],
+        *,
+        template_args: dict[str, Any] | None,
+    ) -> list[int]:
+        """The appended suffix diffed against the real history instead of a dummy prefix."""
+        assert_messages_append_only_with_allowed_role(old_messages, new_messages, self.allowed_append_roles)
+        return self._tokenize_rendered_suffix(
+            old_messages,
+            new_messages[len(old_messages) :],
+            template_args=template_args,
+            add_generation_prompt=True,
+        )
+
     def tokenize_additional_messages(
         self,
         old_messages: list[dict[str, Any]],
@@ -464,6 +493,18 @@ class Qwen38SmallTITOTokenizer(Qwen3TITOTokenizer):
         consistant_kwargs=["add_vision_id", "enable_thinking", "reasoning_effort"],
     )
 
+    def tokenize_additional_messages(
+        self,
+        old_messages: list[dict[str, Any]],
+        new_messages: list[dict[str, Any]],
+        *,
+        template_args: dict[str, Any] | None = None,
+    ) -> list[int]:
+        """Image turns diff real-history renders because ``add_vision_id`` numbers images across the conversation."""
+        if _has_vision_parts(new_messages):
+            return self._tokenize_real_history_suffix(old_messages, new_messages, template_args=template_args)
+        return super().tokenize_additional_messages(old_messages, new_messages, template_args=template_args)
+
 
 class QwenNextTITOTokenizer(Qwen3TITOTokenizer):
     """Qwen3-Thinking-2507 / Qwen3-Next-Thinking — same boundary behavior as
@@ -488,13 +529,7 @@ class Qwen3VLTITOTokenizer(Qwen3TITOTokenizer):
         template_args: dict[str, Any] | None = None,
     ) -> list[int]:
         """Diff real-history renders because ``add_vision_id`` numbers images across the whole conversation."""
-        assert_messages_append_only_with_allowed_role(old_messages, new_messages, self.allowed_append_roles)
-        return self._tokenize_rendered_suffix(
-            old_messages,
-            new_messages[len(old_messages) :],
-            template_args=template_args,
-            add_generation_prompt=True,
-        )
+        return self._tokenize_real_history_suffix(old_messages, new_messages, template_args=template_args)
 
 
 # ---------------------------------------------------------------------------

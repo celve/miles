@@ -55,10 +55,14 @@ def validate_session_image_args(args) -> None:
     args.session_image_engine_settings = resolve_engine_launch_settings(args)
 
 
+# The families whose templates render image parts and whose image turns diff against the real history.
+SESSION_IMAGE_TITO_MODELS = (TITOTokenizerType.QWEN3_VL.value, TITOTokenizerType.QWEN38_SMALL.value)
+
+
 def check_session_tito_model(tito_model: str) -> None:
-    if tito_model != TITOTokenizerType.QWEN3_VL.value:
+    if tito_model not in SESSION_IMAGE_TITO_MODELS:
         raise ValueError(
-            f"--use-session-images requires --tito-model {TITOTokenizerType.QWEN3_VL.value}, got "
+            f"--use-session-images requires --tito-model {' or '.join(SESSION_IMAGE_TITO_MODELS)}, got "
             f"{tito_model!r}: 'default' drops the newline Qwen3-VL's template puts after every <|im_end|>, and "
             "'qwen3' renders Qwen3's text template, which has no image parts"
         )

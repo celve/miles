@@ -406,6 +406,47 @@ class TestTemplate:
             assert collect(env.url, session_id)[0].metadata["tito_session_mismatch"] == []
 
 
+QWEN38 = "Qwen/Qwen3.8-27B"
+
+
+@pytest.fixture(scope="module")
+def vlm38():
+    processor = load_processor(QWEN38, trust_remote_code=True)
+    if processor is None or not hasattr(processor, "_get_num_multimodal_tokens"):
+        pytest.skip(f"{QWEN38} processor unavailable")
+    tokenizer = load_tokenizer(QWEN38, trust_remote_code=True)
+    return SimpleNamespace(
+        processor=processor,
+        tokenizer=tokenizer,
+        pad_id=tokenizer.convert_tokens_to_ids(IMAGE_TOKEN),
+        merge=getattr(processor.image_processor, "merge_size", 2),
+    )
+
+
+class TestQwen38:
+    """Qwen3.8's own template, thinking off, as Harbor's computer-1 drives it."""
+
+    ARGS = {"hf_checkpoint": QWEN38, "tito_model": "qwen38small", "apply_chat_template_kwargs": {"enable_thinking": False}}
+    ENGINE = {"model_path": QWEN38, "tokenizer_path": QWEN38}
+
+    @pytest.mark.parametrize("template_kwargs", [{}, {"add_vision_id": True}])
+    def test_image_turns_after_a_model_stop_match_the_template(self, vlm38, template_kwargs):
+        with image_router(vlm38, ["clicked<|im_end|>", "done<|im_end|>"], extra_args=self.ARGS, engine=self.ENGINE) as env:
+            session_id = _create_session(env.url)
+            body = {"max_tokens": 16, "temperature": 1.0, "chat_template_kwargs": template_kwargs}
+            first = [user_turn(SHOT1, "step 1")]
+            assert _post_chat(env.url, session_id, {**body, "messages": first}).status_code == 200
+            second = first + [assistant("clicked"), user_turn(SHOT2, "step 2")]
+            assert _post_chat(env.url, session_id, {**body, "messages": second}).status_code == 200
+
+            sample = collect(env.url, session_id)[0]
+            assert sample.metadata["tito_session_mismatch"] == []
+            assert image_token_runs(sample.tokens, vlm38.pad_id) == expected_counts(vlm38, [SHOT1, SHOT2])
+            rendered = vlm38.tokenizer.decode(env.backend.calls[1]["input_ids"])
+            assert ("Picture 2: " in rendered) is bool(template_kwargs)
+            assert "<think>\n\n</think>\n\nclicked" in rendered
+
+
 class TestRepeatedAndReordered:
     def test_the_same_screenshot_twice_is_two_occurrences(self, vlm):
         with image_router(vlm, ["ok"]) as env:
@@ -738,7 +779,7 @@ class TestEngineSettings:
 
     @pytest.mark.parametrize("tito_model", ["default", "qwen3"])
     def test_another_tito_family_refuses_to_start(self, vlm, tito_model):
-        with pytest.raises(ValueError, match="requires --tito-model qwen3_vl"):
+        with pytest.raises(ValueError, match="requires --tito-model qwen3_vl or qwen38small"):
             build_server(image_server_args(tito_model=tito_model), backend_url="http://127.0.0.1:9")
 
     def test_settings_that_state_nothing_refuse_to_start(self, vlm):
