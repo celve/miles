@@ -43,6 +43,8 @@ from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
 
 from miles.dashboard.hooks import push_sandbox_reports
 from miles.rollout.agentic.agent_function import AGENT_FUNCTION_MODES, InfraAbort, call_agent_function
+from miles.rollout.agentic.credentials import provider_env_names
+from miles.rollout.agentic.remote import forwarded_env, rollout_abort_scope
 from miles.rollout.base_types import GenerateFnInput, GenerateFnOutput
 from miles.rollout.generate_utils.openai_endpoint_utils import OpenAIEndpointTracer
 from miles.rollout.session.v2.metrics import SESSION_ROLLOUT_METRICS_KEY
@@ -52,6 +54,8 @@ from miles.utils.types import Sample
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_WORKER_ENV = ("HARBOR_*", "AGENT_*", "LITE_*", *provider_env_names())
+
 
 async def generate(input: GenerateFnInput) -> GenerateFnOutput:
     assert not input.args.partial_rollout, "Partial rollout is not supported"
@@ -59,6 +63,7 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
         "agentic_tool_call.generate requires session_server_instances. "
         "Pass --use-session-server to start the session server."
     )
+    worker_options = _worker_options(input.args)
     use_v2 = input.args.use_session_server == "v2"
     collect_spec_metrics = use_v2 and input.args.sglang.common_value("speculative_algorithm") is not None
     tracer = await OpenAIEndpointTracer.create(
@@ -99,6 +104,7 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
             custom_agent_function,
             mode=input.args.custom_agent_function_mode,
             on_child_reports=push_sandbox_reports,
+            **worker_options,
             base_url=tracer.agent_base_url,
             prompt=input.sample.prompt,
             request_kwargs=build_chat_request_kwargs(input.sampling_params),
@@ -210,13 +216,41 @@ def _aborted_output(
     return GenerateFnOutput(samples=[sample] if use_v2 else sample)
 
 
+def _worker_options(args) -> dict[str, Any]:
+    if args.custom_agent_function_mode != "worker":
+        return {}
+    if not args.custom_agent_function_worker_url:
+        raise ValueError("--custom-agent-function-mode worker needs --custom-agent-function-worker-url")
+    return {
+        "worker_url": args.custom_agent_function_worker_url,
+        "extra_env": forwarded_env(args.custom_agent_function_worker_env),
+        "abort_scope": rollout_abort_scope(args),
+    }
+
+
 def _add_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--custom-agent-function-mode",
         choices=AGENT_FUNCTION_MODES,
         default="subproc",
         help="Where each agent call runs: subproc, a child process of its own so one episode's "
-        "blocking step or crash cannot stall the others; or inline, on the rollout's event loop.",
+        "blocking step or crash cannot stall the others; inline, on the rollout's event loop; or worker, "
+        "a subproc child on an agent worker (python -m miles.rollout.agentic.worker) at "
+        "--custom-agent-function-worker-url, so the agents' CPU work leaves this host.",
+    )
+    parser.add_argument(
+        "--custom-agent-function-worker-url",
+        type=str,
+        default=None,
+        help="The agent worker's URL for --custom-agent-function-mode worker.",
+    )
+    parser.add_argument(
+        "--custom-agent-function-worker-env",
+        nargs="*",
+        default=list(_DEFAULT_WORKER_ENV),
+        help="Env var names (fnmatch patterns) sent with each worker call for its agent process, so this run's "
+        "runtime env stays where they are set. Credentials are never sent by value. Paths among them must "
+        "exist on the worker.",
     )
     parser.add_argument(
         "--max-seq-len",

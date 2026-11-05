@@ -736,7 +736,7 @@ class TestTheExternalAgentIsStoppedByATakeOver:
         """That loop keeps issuing completion requests after the script that started it is gone."""
         asked: list[object] = []
 
-        async def hook(args) -> None:
+        async def hook(args, **_kwargs) -> None:
             asked.append(args)
 
         monkeypatch.setattr(hot_restart_module, "call_agent_abort_hook", hook)
@@ -751,7 +751,7 @@ class TestTheExternalAgentIsStoppedByATakeOver:
         """Stopping it first would let the fleet it is still driving accept fresh work in between."""
         controller = _FakeInferenceController(initialized=True)
 
-        async def hook(args) -> None:
+        async def hook(args, **_kwargs) -> None:
             controller.calls.append("agent_abort")
 
         monkeypatch.setattr(hot_restart_module, "call_agent_abort_hook", hook)
@@ -764,7 +764,7 @@ class TestTheExternalAgentIsStoppedByATakeOver:
         """There is no previous script, so there is no agent loop of one still running."""
         asked: list[object] = []
 
-        async def hook(args) -> None:
+        async def hook(args, **_kwargs) -> None:
             asked.append(args)
 
         monkeypatch.setattr(hot_restart_module, "call_agent_abort_hook", hook)
@@ -780,7 +780,7 @@ class TestTheExternalAgentIsStoppedByATakeOver:
     ):
         """It runs on the same bounded budget as the rest of the take-over, not on an unbounded wait."""
 
-        async def hook(args) -> None:
+        async def hook(args, **_kwargs) -> None:
             await asyncio.sleep(_STALLED_SECONDS)
 
         monkeypatch.setattr(hot_restart_module, "call_agent_abort_hook", hook)
