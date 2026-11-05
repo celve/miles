@@ -359,9 +359,10 @@ def policy_loss_function(
         if args.kl_loss_coef != 0:
             loss = loss + args.kl_loss_coef * kl_loss
 
-    if args.proximal_kl_coef != 0:
+    proximal_kl_coef = getattr(args, "proximal_kl_coef", 0.0)
+    if proximal_kl_coef != 0:
         proximal_kl = _proximal_kl(log_probs, trainer_scored_log_probs, active_tokens, sum_of_sample_mean)
-        loss = loss + args.proximal_kl_coef * proximal_kl
+        loss = loss + proximal_kl_coef * proximal_kl
 
     # make sure the gradient could backprop correctly; fp32 sum avoids fp16 inf -> nan
     if log_probs.numel() == 0:
@@ -409,7 +410,7 @@ def policy_loss_function(
 
     if args.use_kl_loss:
         reported_loss["kl_loss"] = kl_loss.clone().detach()
-    if args.proximal_kl_coef != 0:
+    if proximal_kl_coef != 0:
         reported_loss["proximal_kl"] = proximal_kl.clone().detach()
 
     if args.get_mismatch_metrics or args.use_tis:
