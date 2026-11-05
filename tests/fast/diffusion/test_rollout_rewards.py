@@ -40,6 +40,8 @@ def _rollout(monkeypatch, **overrides):
             diffusion_microgroup_size=2,
             n_samples_per_prompt=4,
             rm_type="ocr",
+            # What startup validation makes of the parser's default loss type.
+            loss_type="flow_grpo",
         )
         | overrides
     )

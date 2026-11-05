@@ -24,7 +24,7 @@ class _Args:
     wandb_always_use_train_step = False
     rollout_batch_size = 2
     global_batch_size = 2
-    loss_type = "policy_loss"
+    loss_type = "flow_grpo"
 
 
 def _fn_args(**overrides):
