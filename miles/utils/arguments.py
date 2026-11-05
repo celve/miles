@@ -3607,6 +3607,17 @@ def _resolve_sample_ownership_check(args: argparse.Namespace) -> None:
         )
 
 
+def validate_m2po_args(args) -> None:
+    """--use-m2po's launch constraints; compute_trainer_args checks them again after per-trainer overrides."""
+    if not args.use_m2po:
+        return
+    assert args.loss_type == "policy_loss", "--use-m2po applies to --loss-type policy_loss only."
+    assert args.advantage_estimator != "gspo", "--use-m2po masks tokens, but GSPO's ratio is per sequence."
+    assert args.eps_clip_c is None, "--use-m2po replaces PPO clipping, dual-clip included: drop --eps-clip-c."
+    assert args.m2po_tau > 0, f"--m2po-tau must be positive, got {args.m2po_tau}."
+    assert args.context_parallel_size == 1, "--use-m2po masks a micro-batch's tokens, which CP splits across ranks."
+
+
 def miles_validate_args(args):
     from miles.backends.training_utils.weight_update.session import weight_update_selector
 
@@ -3909,12 +3920,7 @@ def miles_validate_args(args):
     if args.use_rollout_logprobs:
         assert not args.use_tis, "use_rollout_logprobs and use_tis cannot be set at the same time."
 
-    if args.use_m2po:
-        assert args.loss_type == "policy_loss", "--use-m2po applies to --loss-type policy_loss only."
-        assert args.advantage_estimator != "gspo", "--use-m2po masks tokens, but GSPO's ratio is per sequence."
-        assert args.eps_clip_c is None, "--use-m2po replaces PPO clipping, dual-clip included: drop --eps-clip-c."
-        assert args.m2po_tau > 0, f"--m2po-tau must be positive, got {args.m2po_tau}."
-        assert args.context_parallel_size == 1, "--use-m2po masks a micro-batch's tokens, which CP splits across ranks."
+    validate_m2po_args(args)
 
     if args.get_mismatch_metrics:
         assert (
