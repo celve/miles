@@ -25,13 +25,14 @@ from typing import Any, BinaryIO, NoReturn
 from miles.rollout.agentic import rollout_limits
 from miles.rollout.agentic.errors import InfraAbort, RemoteTraceback
 from miles.rollout.agentic.remote import call_on_worker
+from miles.rollout.agentic.sandbox_start import StartFn, call_in_sandbox
 from miles.utils.logging_utils import configure_logger_raw
 
 __all__ = ["AGENT_FUNCTION_MODES", "InfraAbort", "call_agent_function", "report_to_caller"]
 
 logger = logging.getLogger(__name__)
 
-AGENT_FUNCTION_MODES = ("subproc", "inline", "worker")
+AGENT_FUNCTION_MODES = ("subproc", "inline", "worker", "sandbox")
 
 # A cancelled agent gets this long to run its own cleanup (closing its sandbox) before its process exits.
 _CANCEL_GRACE_S = 120.0
@@ -91,16 +92,18 @@ async def call_agent_function(
     mode: str,
     on_child_reports: Callable[[list[Any]], None] | None = None,
     worker_url: str | None = None,
+    sandbox_start: StartFn | None = None,
     extra_env: dict[str, str] | None = None,
     abort_scope: str | None = None,
     **kwargs: Any,
 ) -> Any:
     """Await ``fn(**kwargs)`` on this loop (``inline``), in a child process of its own (``subproc``), or in one on
-    the agent worker at ``worker_url`` (``worker``), whose ``subproc`` runs it.
+    the agent worker at ``worker_url`` (``worker``), or on the one in a sandbox ``sandbox_start`` starts for this call
+    (``sandbox``), whose ``subproc`` runs it.
 
-    Under ``subproc`` and ``worker``, ``on_child_reports`` receives each item the agent sends with
-    ``report_to_caller``, and ``extra_env`` is added to the agent process's environment. Under ``worker``, a rollout
-    abort cancels the call only if it aborts ``abort_scope`` or every scope."""
+    Under ``subproc``, ``worker`` and ``sandbox``, ``on_child_reports`` receives each item the agent sends with
+    ``report_to_caller``, and ``extra_env`` is added to the agent process's environment. Under ``worker`` and
+    ``sandbox``, a rollout abort cancels the call only if it aborts ``abort_scope`` or every scope."""
     if mode == "inline":
         return await fn(**kwargs)
     if mode == "worker":
@@ -108,6 +111,12 @@ async def call_agent_function(
             raise ValueError("--custom-agent-function-mode worker needs --custom-agent-function-worker-url")
         return await call_on_worker(
             worker_url, fn, kwargs, env=extra_env or {}, on_child_reports=on_child_reports, abort_scope=abort_scope
+        )
+    if mode == "sandbox":
+        if sandbox_start is None:
+            raise ValueError("--custom-agent-function-mode sandbox needs --custom-agent-function-sandbox-start-path")
+        return await call_in_sandbox(
+            sandbox_start, fn, kwargs, env=extra_env or {}, on_child_reports=on_child_reports, abort_scope=abort_scope
         )
     # pickled before the process starts, so an unpicklable argument fails here
     call = pickle.dumps(sys.path) + pickle.dumps((fn, kwargs, _CANCEL_GRACE_S, _LEFTOVER_CLEANUP_S))

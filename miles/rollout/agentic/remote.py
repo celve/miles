@@ -12,6 +12,7 @@ reports and outcome, and cancels it when its own task is cancelled. Every worker
 
 import asyncio
 import base64
+import contextlib
 import fnmatch
 import functools
 import json
@@ -20,7 +21,7 @@ import os
 import pickle
 import socket
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
 import httpx
@@ -38,7 +39,7 @@ _CANCEL_TIMEOUT_S = 10.0
 _SECRET_PATTERNS = ("*SECRET", "*SECRET_KEY", "*TOKEN", "*PASSWORD", "*API_KEY")
 _CREDENTIAL_NAMES = frozenset(name for spec in PROVIDER_CREDENTIALS.values() for name in spec["key_env_vars"])
 
-_inflight: dict[str, tuple[str, str | None]] = {}
+_inflight: dict[str, tuple[str | None, str | None]] = {}
 _aborted: set[str] = set()
 
 
@@ -80,8 +81,22 @@ async def cancel_inflight_calls(scope: str | None = None) -> int:
     _aborted.update(call_id for call_id, _ in calls)
     async with asyncio.TaskGroup() as group:
         for call_id, url in calls:
-            group.create_task(_cancel_on(url, call_id))
+            if url is not None:
+                group.create_task(_cancel_on(url, call_id))
     return len(calls)
+
+
+@contextlib.contextmanager
+def booting_call(abort_scope: str | None) -> Iterator[Callable[[], bool]]:
+    """Count a call whose worker is still starting among the in-flight ones, and yield whether a rollout abort has
+    reached it."""
+    call_id = uuid.uuid4().hex
+    _inflight[call_id] = (None, abort_scope)
+    try:
+        yield lambda: call_id in _aborted
+    finally:
+        _inflight.pop(call_id, None)
+        _aborted.discard(call_id)
 
 
 @functools.cache
