@@ -6,7 +6,7 @@ from miles.backends.megatron_utils.checkpoint_request import CHECKPOINT_LOAD_FIE
 from miles.utils.args.component_multi_lora import MultiLoraOnlyConfig
 from miles.utils.args.component_orchestrator import OrchestratorOnlyConfig
 from miles.utils.args.component_rollout import InferenceControllerOnlyConfig, RolloutOnlyConfig
-from miles.utils.args.component_shared import SglangFieldsConfig
+from miles.utils.args.component_shared import RewardPoolFieldsConfig, SglangFieldsConfig
 from miles.utils.args.component_trainer import TrainerOnlyConfig
 from miles.utils.args.configs.algo import AlgoConfig, AlgoRolloutOnlyConfig
 from miles.utils.args.configs.backend_fields import RawTrainerBackendConfig, TrainerBackendTraitConfig
@@ -247,6 +247,7 @@ class RolloutConfig(
     WandbConfig,
     DashboardConfig,
     SglangFieldsConfig,
+    RewardPoolFieldsConfig,
 ):
     pass
 
@@ -317,6 +318,7 @@ class AllConfig(
     DebugConfig,
     DebugRolloutOnlyConfig,
     SglangFieldsConfig,
+    RewardPoolFieldsConfig,
     SessionConfig,
     NetworkConfig,
     RewardModelConfig,
