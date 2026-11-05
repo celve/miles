@@ -52,3 +52,44 @@ def test_an_ocr_run_declares_no_gpu_and_keeps_its_two_bundles():
 
     assert all(not spec.pool.uses_gpu for spec in _reward_specs(args).values())
     assert _get_placement_group_layout(args) == (2, 0)
+
+
+def test_an_ocr_run_starts_one_cpu_pool_scoring_one_image_per_call():
+    args = _parse_diffusion_run("--global-batch-size", "64", "--diffusion-ocr-num-workers", "3")
+
+    (spec,) = _reward_specs(args).values()
+
+    assert spec.name == "reward-ocr"
+    assert (spec.pool.num_workers, spec.pool.batch_size, spec.pool.uses_gpu) == (3, 1, False)
+
+
+def test_reward_pools_flag_starts_a_pool_for_a_reward_only_some_prompts_select():
+    args = _parse_diffusion_run(*_PICKSCORE, "--diffusion-reward-pools", "ocr", "pickscore")
+
+    assert [pool.name for pool in args.reward_pools] == ["pickscore", "ocr"]
+    assert _get_placement_group_layout(args) == (5, 0)
+
+
+def test_the_reward_pools_flag_reads_the_pickscore_flags_under_an_ocr_launch():
+    args = _parse_diffusion_run(
+        *("--global-batch-size", "64", "--diffusion-reward-pools", "pickscore"),
+        *("--diffusion-pickscore-model-path", "/m", "--diffusion-pickscore-processor-path", "/p"),
+    )
+
+    assert [pool.name for pool in args.reward_pools] == ["ocr", "pickscore"]
+    with pytest.raises(ValueError, match="diffusion-pickscore-model-path"):
+        _parse_diffusion_run("--global-batch-size", "64", "--diffusion-reward-pools", "pickscore")
+
+
+def test_an_ocr_pool_in_a_video_run_is_rejected_at_startup():
+    with pytest.raises(ValueError, match="only the first frame"):
+        _parse_diffusion_run(*_PICKSCORE, "--diffusion-output-num-frames", "5", "--diffusion-reward-pools", "ocr")
+
+
+def test_an_ocr_worker_scores_each_image_of_a_call_on_its_own(monkeypatch):
+    from miles.diffusion.rollout import ocr
+
+    monkeypatch.setattr(ocr, "OcrScorer", lambda: lambda image, prompt: float(image + len(prompt)))
+    scorer = ocr.OcrBatchScorer(device=None)
+
+    assert scorer.score_batch([1, 2], ['"a"', '"bb"']) == [4.0, 6.0]
