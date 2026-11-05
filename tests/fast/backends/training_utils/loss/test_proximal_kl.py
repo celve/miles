@@ -34,7 +34,6 @@ def _setup(proximal_kl_coef):
         entropy_coef=0.0,
         kl_coef=0.0,
         observe_training_entropy=False,
-        true_on_policy_mode=False,
         use_tis=True,
         proximal_kl_coef=proximal_kl_coef,
     )
