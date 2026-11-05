@@ -352,10 +352,10 @@ def init_http_client(args):
     if args.inference_runtime_mut_state.engine_count == 0 and not args.eval_uses_snapshots:
         return
 
-    initial_engine_count = (
-        args.inference_runtime_mut_state.engine_count + args.inference_runtime_mut_state.eval_engine_count
-    )
-    _client_concurrency = args.sglang_server_concurrency * initial_engine_count
+    runtime = args.inference_runtime_mut_state
+    _client_concurrency = args.sglang_server_concurrency * runtime.engine_count
+    if runtime.eval_engine_count > 0:
+        _client_concurrency += args.eval_server_concurrency * runtime.eval_engine_count
     _client_concurrency = max(_client_concurrency, args.sglang_server_concurrency)
 
     # Optionally initialize distributed POST via Ray without changing interfaces
