@@ -51,6 +51,8 @@ Args:
         sgl-project/sglang#47480). 0 runs on an older SGLang.
     --drop-zero-std-groups: with ``--rollout-path session``, refuse groups whose rewards are all equal, which GRPO
         gives zero advantage, and keep sampling groups until the batch is full of live ones.
+    --use-tis: correct the train/rollout mismatch with truncated importance sampling instead of taking the PPO ratio
+        against the engine's log-probs (``--use-rollout-logprobs``).
     --media-refs: with ``--rollout-path session``, hand the trainer each retained
         screenshot as a file under ``--output-dir``/media instead of pixel tensors; the
         trainer rebuilds the pixels with SGLang's token-space processor, which the
@@ -188,6 +190,9 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     freeze_vision_model: Literal["auto", "on", "off"] = "auto"
     media_refs: bool = False
     drop_zero_std_groups: bool = False
+    # Truncated importance sampling against the engine's log-probs on a recomputed old policy, in place of
+    # --use-rollout-logprobs (Miles refuses the two together).
+    use_tis: bool = False
     # Keeps the resent screenshot's ViT embedding (~42 MB at 1080p) for 64 desktops.
     vlm_cache_size_mb: int = 4096
     # megatron by default because LIN-2046 measured FSDP training Qwen3-VL with linear
@@ -367,9 +372,9 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
         "--entropy-coef 0.00 "
         "--eps-clip 0.2 "
         "--eps-clip-high 0.28 "
-        # The recorder's whole purpose: the importance ratio is taken against the
+        # Without --use-tis, the recorder's whole purpose: the importance ratio is taken against the
         # logprobs the engine reported, not against a trainer recomputation.
-        "--use-rollout-logprobs "
+        + ("--use-tis " if args.use_tis else "--use-rollout-logprobs ")
     )
 
     optimizer_args = (

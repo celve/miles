@@ -261,3 +261,11 @@ def test_dead_groups_are_dropped_only_when_asked(monkeypatch, tmp_path):
 
     assert "--dynamic-sampling-filter-path miles.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std" in dropping
     assert "--dynamic-sampling-filter-path miles.rollout.filter_hub.dynamic_sampling_filters.check_no_aborted" in keeping
+
+
+def test_tis_replaces_the_rollout_logprob_ratio(monkeypatch, tmp_path):
+    tis, _ = _train_command(monkeypatch, tmp_path, rollout_path="session", use_tis=True)
+    default, _ = _train_command(monkeypatch, tmp_path, rollout_path="session")
+
+    assert "--use-tis" in tis and "--use-rollout-logprobs" not in tis
+    assert "--use-rollout-logprobs" in default and "--use-tis" not in default
