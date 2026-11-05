@@ -199,7 +199,8 @@ class AlgoConfig(BaseConfig):
             help=(
                 "Skip the standalone Megatron actor forward-only pass. With --use-rollout-logprobs, those log-"
                 "probs remain the old-policy baseline; otherwise detached training log-probs are reused and the"
-                " actor importance log-ratio is exactly 0. This requires a single optimizer step. The skipped "
+                " actor importance log-ratio is exactly 0. With several optimizer steps per rollout only the first"
+                " step's samples skip the pass; the later steps' are still scored before training. The skipped "
                 "pass's rollout/log_probs metric is not emitted. Custom model providers and the before-train-"
                 "step hook must not make the training forward differ from the skipped forward."
             )

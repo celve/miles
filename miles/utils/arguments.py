@@ -1743,17 +1743,6 @@ def validate_skip_actor_forward_only(args) -> None:
     ]
     assert not incompatible_options, f"{option} is incompatible with: {', '.join(incompatible_options)}"
 
-    assert args.num_steps_per_rollout in (None, 1), (
-        f"{option} requires exactly one optimizer step per rollout; "
-        f"got --num-steps-per-rollout {args.num_steps_per_rollout}"
-    )
-    if not args.use_dynamic_global_batch_size and not args.multi_lora:
-        samples_per_rollout = args.rollout_batch_size * args.n_samples_per_prompt
-        assert args.global_batch_size == samples_per_rollout, (
-            f"{option} requires exactly one optimizer step for {samples_per_rollout} rollout samples; "
-            f"got --global-batch-size {args.global_batch_size}"
-        )
-
 
 def validate_async_off_policy_correction(args) -> None:
     """Require an explicit behavior-policy choice for async PPO training.

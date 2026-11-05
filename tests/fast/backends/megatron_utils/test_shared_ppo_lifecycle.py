@@ -643,16 +643,53 @@ def test_skip_actor_forward_only_consumes_preloaded_rollout_replay_during_traini
     assert queued_top_indices == []
 
 
-def test_skip_actor_forward_only_rejects_multiple_optimizer_steps(actor_module, monkeypatch):
+def test_skip_actor_forward_only_scores_only_later_optimizer_steps_before_training(actor_module, monkeypatch):
     worker = _actor_reuse_worker(actor_module, skip_actor_forward_only=True)
+    _patch_actor_reuse_dependencies(actor_module, monkeypatch, num_microbatches=[1, 1])
+    order = Mock()
+    order.attach_mock(actor_module.compute_advantages_and_returns, "advantages")
+    order.attach_mock(actor_module.log_rollout_data, "log_rollout_data")
+    order.attach_mock(worker._compute_log_prob, "log_probs")
+    order.attach_mock(actor_module.train, "train")
+    later_step_scores = [None, object()]
+    worker._compute_log_prob.return_value = {"log_probs": later_step_scores}
+    rollout_data = {"num_rollouts": [1, 1], "total_lengths": [1, 1]}
+
+    worker._train_actor(7, rollout_data, witness_info=None, attempt=0)
+
+    assert [name for name, _args, _kwargs in order.mock_calls] == [
+        "advantages",
+        "log_rollout_data",
+        "log_probs",
+        "train",
+    ]
+    assert worker._compute_log_prob.call_args.kwargs == {"rollout_id": 7, "first_step": 1}
+    assert rollout_data["log_probs"] is later_step_scores
+
+
+def test_skip_actor_forward_only_with_rollout_log_probs_runs_no_pass_over_several_steps(actor_module, monkeypatch):
+    worker = _actor_reuse_worker(actor_module, skip_actor_forward_only=True, use_rollout_logprobs=True)
     _patch_actor_reuse_dependencies(actor_module, monkeypatch, num_microbatches=[1, 1])
     rollout_data = {"num_rollouts": [1, 1], "total_lengths": [1, 1]}
 
-    with pytest.raises(AssertionError, match="requires 1 optimizer step"):
+    worker._train_actor(7, rollout_data, witness_info=None, attempt=0)
+
+    worker._compute_log_prob.assert_not_called()
+    actor_module.train.assert_called_once()
+
+
+def test_skip_actor_forward_only_over_several_steps_refuses_replay(actor_module, monkeypatch):
+    worker = _actor_reuse_worker(actor_module, skip_actor_forward_only=True)
+    _patch_actor_reuse_dependencies(actor_module, monkeypatch, num_microbatches=[1, 1])
+    manager = RoutingReplayManager()
+    manager.enabled = True
+    monkeypatch.setattr(actor_module, "all_replay_managers", [manager])
+    rollout_data = {"num_rollouts": [1, 1], "total_lengths": [1, 1]}
+
+    with pytest.raises(AssertionError, match="does not support replay managers"):
         worker._train_actor(7, rollout_data, witness_info=None, attempt=0)
 
     worker._compute_log_prob.assert_not_called()
-    actor_module.compute_advantages_and_returns.assert_not_called()
     actor_module.train.assert_not_called()
 
 
