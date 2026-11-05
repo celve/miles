@@ -8,6 +8,7 @@ rejected here, before any worker starts, rather than failing inside one.
 from miles.backends.fsdp_utils.arguments import FSDPArgs
 from miles.backends.sglang_utils.sglang_api_client import WorkerType
 from miles.diffusion.algorithms import ALGORITHMS
+from miles.diffusion.rollout import step_strategy
 from miles.diffusion.train.pipeline_config import get_train_pipeline_config, resolve_model_family
 from miles.utils.args.configs.algo import AlgoConfig
 from miles.utils.args.configs.backend_fields import TrainerBackendTraitConfig
@@ -43,8 +44,17 @@ _UNSUPPORTED = [
     ("fully async or partial rollout", lambda a: a.fully_async or a.partial_rollout),
     ("dynamic sampling filters", lambda a: a.dynamic_sampling_filter_path is not None),
     (
-        "a reward other than --rm-type ocr or a --custom-rm-path",
-        lambda a: a.custom_rm_path is None and a.rm_type != "ocr",
+        "a reward other than --rm-type ocr, --rm-type pickscore or a --custom-rm-path",
+        lambda a: a.custom_rm_path is None and a.rm_type not in ("ocr", "pickscore"),
+    ),
+    (
+        "--rm-type pickscore without --diffusion-pickscore-model-path and --diffusion-pickscore-processor-path",
+        lambda a: a.rm_type == "pickscore"
+        and not (a.diffusion_pickscore_model_path and a.diffusion_pickscore_processor_path),
+    ),
+    (
+        "the OCR reward on video (--diffusion-output-num-frames > 1); it reads only the first frame",
+        lambda a: a.rm_type == "ocr" and a.diffusion_output_num_frames != 1,
     ),
     (
         "the output store or the Mooncake object store",
@@ -139,6 +149,7 @@ _UNREAD_DEFAULTS = {
     },
 }
 _PRECISION_FLAGS = {"--fp16", "--bf16", "--keep-fp32-master"}
+_PICKSCORE_FLAGS = sorted(name for name in DiffusionConfig.model_fields if name.startswith("diffusion_pickscore_"))
 
 
 def _default(name: str):
@@ -165,13 +176,39 @@ def validate_diffusion_args(args) -> None:
             f"--model-kind diffusion with --loss-type {args.loss_type} never reads: " + ", ".join(unread) + hint
         )
     _derive_hooks(args)
+    _check_step_strategy_flags(args)
+    if args.rm_type != "pickscore":
+        if unread_pickscore := [flag for flag in _PICKSCORE_FLAGS if vars(args)[flag] != _default(flag)]:
+            raise ValueError(
+                "without --rm-type pickscore no PickScore pool is built, so these are never read: "
+                + ", ".join(f"--{flag.replace('_', '-')}" for flag in unread_pickscore)
+            )
     if args.diffusion_lora_rank <= 0 or args.diffusion_num_sde_steps <= 0:
         raise ValueError("--diffusion-lora-rank and --diffusion-num-sde-steps must be positive")
 
     if args.diffusion_model_family is None:
         args.diffusion_model_family = resolve_model_family(args.hf_checkpoint)
+    config = get_train_pipeline_config(args.diffusion_model_family)
     if args.diffusion_lora_target_modules is None:
-        args.diffusion_lora_target_modules = get_train_pipeline_config(args.diffusion_model_family).lora_target_modules
+        args.diffusion_lora_target_modules = config.lora_target_modules
+    if (args.diffusion_guidance_scale_2 is None) != (config.guidance_scale_2_component is None):
+        raise ValueError(
+            f"family {config.model_family} guides {config.guidance_scale_2_component} with "
+            "--diffusion-guidance-scale-2, which the engine otherwise replaces by its own default, so pass it"
+            if config.guidance_scale_2_component
+            else f"family {config.model_family} has no second guidance scale; drop --diffusion-guidance-scale-2"
+        )
+    if len(config.components) > 1 and args.diffusion_step_strategy_path == f"{step_strategy.__name__}.sde_window":
+        raise ValueError(
+            f"family {config.model_family} routes timesteps to the components {list(config.components)}, which every "
+            "DP rank must forward in lockstep; sde_window draws each request's steps apart, so use "
+            "epoch_global_random_choice"
+        )
+    if algorithm.uses_ema and len(config.components) > 1:
+        raise ValueError(
+            f"--loss-type {args.loss_type} keeps an EMA of one adapter, but family {config.model_family} trains "
+            f"the components {list(config.components)}"
+        )
 
 
 def validate_diffusion_batch_size(args) -> None:
@@ -184,6 +221,16 @@ def validate_diffusion_batch_size(args) -> None:
         raise ValueError("--num-steps-per-rollout must divide --rollout-batch-size x --n-samples-per-prompt")
     if num_images % args.global_batch_size:
         raise ValueError("--global-batch-size must divide --rollout-batch-size x --n-samples-per-prompt")
+
+
+def _check_step_strategy_flags(args) -> None:
+    """A built-in step strategy reads only some of the step flags; a custom one may read any."""
+    module, _, name = args.diffusion_step_strategy_path.rpartition(".")
+    if module != step_strategy.__name__ or name not in step_strategy.FLAGS_READ:
+        return
+    flags = [flag for flag in step_strategy.STEP_FLAGS if flag not in step_strategy.FLAGS_READ[name]]
+    if unread := [f"--{flag.replace('_', '-')}" for flag in flags if vars(args)[flag] != _default(flag)]:
+        raise ValueError(f"the {name} step strategy never reads: " + ", ".join(unread))
 
 
 def _derive_hooks(args) -> None:

@@ -1,7 +1,8 @@
 """Colocated LoRA weight sync to sglang.multimodal_gen, driven by the common `WeightUpdater`.
 
 Each training rank all-gathers the adapter's A/B pairs and hands its own engine CUDA-IPC handles; the engine
-merges ``W + alpha/r * B @ A`` into its weights (``weight_update_mode=lora_merge``).
+merges ``W + alpha/r * B @ A`` into its weights (``weight_update_mode=lora_merge``). Every trained component
+(``transformer``, ``transformer_2``) is sent to the engine's component of the same name.
 """
 
 import logging
@@ -26,7 +27,6 @@ from miles.utils import async_utils
 
 logger = logging.getLogger(__name__)
 
-DIT_COMPONENT = "transformer"
 # PEFT appends the adapter name and ".weight" after lora_A / lora_B.
 _PEFT_LORA_SUFFIX = re.compile(r"\.(lora_[AB])(?:\.[^.]+)?(?:\.weight)?$")
 
@@ -38,26 +38,28 @@ def to_hf_name(train_name: str) -> str:
 
 
 class DiffusionLoraWeightIterator(HfWeightIteratorBase):
-    """Streams the PEFT adapter of an FSDP2 DiT; one unit per LoRA module, its A and B together, since the
-    engine merges each module from both halves."""
+    """Streams the PEFT adapters of the FSDP2 DiT components (``self.model`` maps component to module); one unit
+    per LoRA module, its A and B together, named ``<component>/<hf name>``, since the engine merges each module
+    from both halves."""
 
     def _iter_hf_param_units(self, weights, *, materialize: bool):
         raise NotImplementedError("the diffusion engine keeps its base weights; only the LoRA adapter is synced")
 
     def _iter_hf_adapter_units(self, adapter, *, materialize: bool) -> Iterator[list[tuple[str, torch.Tensor]]]:
-        halves: dict[str, list[tuple[str, torch.Tensor]]] = {}
-        for name, param in self.model.state_dict().items():
-            if ".lora_A" not in name and ".lora_B" not in name:
-                continue
-            full = gather_full_param(param)
-            hf_name = to_hf_name(name)
-            module = halves.setdefault(hf_name.rsplit(".lora_", 1)[0], [])
-            module.append((hf_name, full))
-            if len(module) == 2:
-                del halves[hf_name.rsplit(".lora_", 1)[0]]
-                if materialize:
-                    yield module
-        assert not halves, f"LoRA modules missing an A or B half: {sorted(halves)}"
+        for component, model in self.model.items():
+            halves: dict[str, list[tuple[str, torch.Tensor]]] = {}
+            for name, param in model.state_dict().items():
+                if ".lora_A" not in name and ".lora_B" not in name:
+                    continue
+                full = gather_full_param(param)
+                hf_name = f"{component}/{to_hf_name(name)}"
+                module = halves.setdefault(hf_name.rsplit(".lora_", 1)[0], [])
+                module.append((hf_name, full))
+                if len(module) == 2:
+                    del halves[hf_name.rsplit(".lora_", 1)[0]]
+                    if materialize:
+                        yield module
+            assert not halves, f"LoRA modules missing an A or B half: {sorted(halves)}"
 
 
 class DiffusionLoraFromTensor(WeightTransferProtocol):
@@ -105,16 +107,18 @@ class DiffusionLoraFromTensor(WeightTransferProtocol):
     def send_bucket(self, bucket: list[tuple[str, torch.Tensor]]) -> None:
         # Handles must name GPUs by UUID: each engine sees only its own GPU, as device 0.
         monkey_patch_torch_reductions()
-        by_dtype: dict[torch.dtype, list[tuple[str, torch.Tensor]]] = {}
+        by_target: dict[tuple[str, torch.dtype], list[tuple[str, torch.Tensor]]] = {}
         for name, tensor in bucket:
-            by_dtype.setdefault(tensor.dtype, []).append((name.split(":", 1)[-1], tensor))
-        flats = [FlattenedTensorBucket(named_tensors=tensors) for tensors in by_dtype.values()]
+            component, hf_name = name.split(":", 1)[-1].split("/", 1)
+            by_target.setdefault((component, tensor.dtype), []).append((hf_name, tensor))
+        components = [component for component, _ in by_target]
+        flats = [FlattenedTensorBucket(named_tensors=tensors) for tensors in by_target.values()]
         serialized = [
             MultiprocessingSerializer.serialize(
-                {DIT_COMPONENT: {"flattened_tensor": flat.get_flattened_tensor(), "metadata": flat.get_metadata()}},
+                {component: {"flattened_tensor": flat.get_flattened_tensor(), "metadata": flat.get_metadata()}},
                 output_str=True,
             )
-            for flat in flats
+            for component, flat in zip(components, flats, strict=True)
         ]
 
         is_src = dist.get_rank() == self._gather_src
@@ -133,7 +137,7 @@ class DiffusionLoraFromTensor(WeightTransferProtocol):
                         "update_lora_weights_from_tensor",
                         serialized_named_tensors=[tensors[index] for _, tensors in gathered],
                         payload_gpu_uuids=[gpu_uuid for gpu_uuid, _ in gathered],
-                        target_module=DIT_COMPONENT,
+                        target_module=components[index],
                         lora_rank=self.args.diffusion_lora_rank,
                         lora_alpha=self.args.diffusion_lora_alpha,
                     )

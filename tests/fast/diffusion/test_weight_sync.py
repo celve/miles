@@ -34,7 +34,10 @@ class _TwoBucketIterator(HfWeightIteratorBase):
 
     def _iter_hf_adapter_units(self, adapter, *, materialize):
         for module in ("blocks.0.attn.to_q", "blocks.1.attn.to_q"):
-            yield [(f"{module}.lora_A", torch.ones(2, 4)), (f"{module}.lora_B", torch.ones(4, 2))]
+            yield [
+                (f"transformer/{module}.lora_A", torch.ones(2, 4)),
+                (f"transformer/{module}.lora_B", torch.ones(4, 2)),
+            ]
 
 
 @pytest.fixture
@@ -50,7 +53,7 @@ def single_rank(tmp_path, monkeypatch):
     dist.destroy_process_group()
 
 
-def _updater():
+def _updater(model=None, iterator_factory=_TwoBucketIterator.build):
     args = Namespace(
         model_kind="diffusion",
         update_weight_buffer_size=1,
@@ -64,11 +67,11 @@ def _updater():
     )
     return WeightUpdater(
         args,
-        torch.nn.Linear(1, 1),
+        torch.nn.Linear(1, 1) if model is None else model,
         weights_getter=lambda: None,
         model_name="sd3",
         quantization_config=None,
-        iterator_factory=_TwoBucketIterator.build,
+        iterator_factory=iterator_factory,
         parallel_state=None,
         is_lora=True,
         lora_sync_config={"r": 2, "lora_alpha": 4},
@@ -109,3 +112,38 @@ def test_a_failed_bucket_stops_the_sync(single_rank):
     with pytest.raises(RuntimeError, match="rejected bucket 2"):
         updater.update_weights(weight_version=1)
     assert len(engine.calls) == 2
+
+
+def _peft_adapter(value: float) -> torch.nn.Module:
+    """The state-dict names PEFT gives one LoRA module: ``to_q.lora_A.default.weight``."""
+    lora = torch.nn.Module()
+    lora.lora_A = torch.nn.ModuleDict({"default": torch.nn.Linear(4, 2, bias=False)})
+    lora.lora_B = torch.nn.ModuleDict({"default": torch.nn.Linear(2, 4, bias=False)})
+    torch.nn.init.constant_(lora.lora_A["default"].weight, value)
+    torch.nn.init.constant_(lora.lora_B["default"].weight, value)
+    model = torch.nn.Module()
+    model.to_q = lora
+    return model
+
+
+def _sent(call) -> dict[str, list[str]]:
+    (payload,) = call["serialized_named_tensors"]
+    return {component: [meta.name for meta in body["metadata"]] for component, body in payload.items()}
+
+
+@pytest.mark.parametrize("components", [["transformer"], ["transformer", "transformer_2"]])
+def test_each_component_adapter_reaches_the_engine_component_of_its_name(single_rank, monkeypatch, components):
+    # The payload stays readable in-process; a CUDA IPC handle cannot be reopened by the process that made it.
+    monkeypatch.setattr(weight_sync.MultiprocessingSerializer, "serialize", lambda obj, output_str: obj)
+    models = {component: _peft_adapter(index + 1.0) for index, component in enumerate(components)}
+    updater = _updater(models, iterator_factory=weight_sync.DiffusionLoraWeightIterator.build)
+    updater.args.update_weight_buffer_size = 1 << 30
+    engine = _Engine("engine")
+    updater.reconnect_if_needed(_engines(engine, "gen-1"))
+
+    assert updater.update_weights(weight_version=1)
+
+    assert [call["target_module"] for call in engine.calls] == components
+    assert [_sent(call) for call in engine.calls] == [
+        {component: ["to_q.lora_A", "to_q.lora_B"]} for component in components
+    ]

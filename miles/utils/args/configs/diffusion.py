@@ -22,6 +22,15 @@ class DiffusionConfig(BaseConfig):
     diffusion_negative_prompt: A[str | None, Arg(help="Negative prompt for classifier-free guidance.")] = None
     diffusion_height: A[int, Arg(help="Rollout image height.")] = 512
     diffusion_width: A[int, Arg(help="Rollout image width.")] = 512
+    diffusion_output_num_frames: A[int, Arg(help="Frames per rollout sample; 1 for an image, more for a video.")] = 1
+    diffusion_flow_shift: A[
+        float | None,
+        Arg(help="The engine scheduler's flow shift (server arg `flow_shift`); the model's own if unset."),
+    ] = None
+    diffusion_guidance_scale_2: A[
+        float | None,
+        Arg(help="Guidance scale of the component a two-expert family (Wan2.2) denoises low-noise steps with."),
+    ] = None
     diffusion_sde_type: A[
         str,
         Arg(choices=["sde", "ode"], help="Sampler the engine runs: `sde` for Flow-GRPO, `ode` for --loss-type nft."),
@@ -35,6 +44,9 @@ class DiffusionConfig(BaseConfig):
         Arg(help="Function `(args, sample, num_steps, seed) -> (sde_steps, returned_latents)` choosing SDE steps."),
     ] = "miles.diffusion.rollout.step_strategy.sde_window"
     diffusion_num_sde_steps: A[int, Arg(help="SDE steps per image; each becomes one train pair.")] = 10
+    diffusion_sde_candidate_steps: A[
+        str | None, Arg(help="'1,2,3': the steps epoch_global_random_choice draws a rollout's SDE steps from.")
+    ] = None
     diffusion_sde_window_range: A[
         str | None, Arg(help="'lo,hi' range the SDE window is drawn from; the whole schedule when unset.")
     ] = None
@@ -43,6 +55,20 @@ class DiffusionConfig(BaseConfig):
     ] = 8
     diffusion_dit_precision: A[str | None, Arg(help="Rollout DiT precision passed to the engine (fp16/bf16).")] = None
     diffusion_ocr_num_workers: A[int, Arg(help="CPU PaddleOCR reward actors.")] = 4
+    diffusion_pickscore_model_path: A[str | None, Arg(help="PickScore model (yuvalkirstain/PickScore_v1).")] = None
+    diffusion_pickscore_processor_path: A[
+        str | None, Arg(help="PickScore's CLIP processor (laion/CLIP-ViT-H-14-laion2B-s32B-b79K).")
+    ] = None
+    diffusion_pickscore_num_workers: A[int, Arg(help="PickScore reward actors.")] = 1
+    diffusion_pickscore_num_gpus_per_worker: A[
+        float, Arg(help="GPUs per PickScore actor, scheduled outside the train and rollout GPUs.")
+    ] = 1.0
+    diffusion_pickscore_batch_size: A[
+        int, Arg(help="Samples per PickScore actor call, and frames per PickScore forward.")
+    ] = 8
+    diffusion_pickscore_num_frames: A[
+        int | None, Arg(help="Evenly spaced frames PickScore scores per video, averaged; every frame when unset.")
+    ] = None
 
     # training
     diffusion_model_family: A[

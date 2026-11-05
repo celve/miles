@@ -7,8 +7,17 @@ None asks the engine for every latent. Point ``--diffusion-step-strategy-path`` 
 from argparse import Namespace
 
 import numpy as np
+import torch
 
 from miles.utils.types import Sample
+
+# The step-selection flags each strategy here reads; startup rejects the others under it.
+FLAGS_READ = {
+    "sde_window": {"diffusion_num_sde_steps", "diffusion_sde_window_range"},
+    "epoch_global_random_choice": {"diffusion_num_sde_steps", "diffusion_sde_candidate_steps"},
+    "ode_and_return_last": set(),
+}
+STEP_FLAGS = ("diffusion_num_sde_steps", "diffusion_sde_window_range", "diffusion_sde_candidate_steps")
 
 
 def sde_window(args: Namespace, sample: Sample, num_steps: int, seed: int) -> tuple[list[int], list[int]]:
@@ -22,9 +31,36 @@ def sde_window(args: Namespace, sample: Sample, num_steps: int, seed: int) -> tu
     return steps, sorted(set(steps) | {step + 1 for step in steps})
 
 
+def epoch_global_random_choice(
+    args: Namespace, sample: Sample, num_steps: int, seed: int
+) -> tuple[list[int], list[int]]:
+    """--diffusion-num-sde-steps steps drawn from --diffusion-sde-candidate-steps once per rollout (every
+    --rollout-batch-size prompt groups), so each rollout trains the same steps on every image."""
+    candidates = _candidate_steps(args.diffusion_sde_candidate_steps, num_steps=num_steps)
+    if args.diffusion_num_sde_steps >= len(candidates):
+        steps = sorted(candidates)
+    else:
+        epoch = int(sample.group_index or 0) // args.rollout_batch_size
+        generator = torch.Generator().manual_seed(epoch + args.rollout_seed)
+        selected = torch.randperm(len(candidates), generator=generator)[: args.diffusion_num_sde_steps]
+        steps = sorted(candidates[index] for index in selected.tolist())
+    return steps, sorted(set(steps) | {step + 1 for step in steps})
+
+
 def ode_and_return_last(args: Namespace, sample: Sample, num_steps: int, seed: int) -> tuple[None, list[int]]:
     """DiffusionNFT: a pure ODE rollout that returns only the final, clean latent."""
     return None, [num_steps]
+
+
+def _candidate_steps(raw: str | None, *, num_steps: int) -> list[int]:
+    if raw is None:
+        raise ValueError("epoch_global_random_choice needs --diffusion-sde-candidate-steps, e.g. '1,2,3'")
+    candidates = [int(step) for step in raw.split(",")]
+    if out_of_range := [step for step in candidates if not 0 <= step < num_steps]:
+        raise ValueError(
+            f"--diffusion-sde-candidate-steps {out_of_range} out of range for a {num_steps}-step schedule"
+        )
+    return candidates
 
 
 def _window_range(raw: str | None, *, num_steps: int) -> tuple[int, int]:

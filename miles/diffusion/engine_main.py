@@ -7,6 +7,8 @@ import os
 
 # `ServerGroupConfig.resolve` adds this text-engine key to a group's overrides; multimodal_gen sleeps whole engines.
 _MILES_INJECTED_TEXT_ARGS = {"enable_memory_saver"}
+# PipelineConfig fields, which `ServerArgs.from_kwargs` reads from the same keyword arguments.
+_PIPELINE_CONFIG_ARGS = {"dit_precision", "vae_precision", "flow_shift"}
 
 
 def _pin_gpu(base_gpu_id: int) -> None:
@@ -26,7 +28,7 @@ def main() -> None:
     from sglang.multimodal_gen.runtime.launch_server import launch_server
     from sglang.multimodal_gen.runtime.server_args import ServerArgs
 
-    accepted = {field.name for field in dataclasses.fields(ServerArgs)} | {"dit_precision", "vae_precision"}
+    accepted = {field.name for field in dataclasses.fields(ServerArgs)} | _PIPELINE_CONFIG_ARGS
     if unknown := sorted(cli.server_args.keys() - accepted - _MILES_INJECTED_TEXT_ARGS):
         raise ValueError(f"sglang.multimodal_gen does not take these server args: {unknown}")
     launch_server(ServerArgs.from_kwargs(**{k: v for k, v in cli.server_args.items() if k in accepted}))

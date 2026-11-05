@@ -17,13 +17,29 @@ function, data source and converter hooks; Miles' default rollout and perf panel
 | Piece | Where |
 | --- | --- |
 | Engine | `sglang.multimodal_gen`, launched by the inference engine spec (`miles/diffusion/engine.py`) and served through the Miles router |
-| Rollout | `miles.diffusion.rollout.rollout_fn.DiffusionRolloutFn`: SDE-sampled trajectories from `/rollout/generate`, scored through `rm_hub` by `--rm-type ocr` (CPU PaddleOCR) or a `--custom-rm-path`, per microgroup or per group under `--group-rm` |
+| Rollout | `miles.diffusion.rollout.rollout_fn.DiffusionRolloutFn`: SDE-sampled trajectories from `/rollout/generate`, scored through `rm_hub` by `--rm-type ocr` (CPU PaddleOCR), `--rm-type pickscore` (PickScore actors on their own GPU) or a `--custom-rm-path`, per microgroup or per group under `--group-rm` |
 | Train data | `miles.diffusion.conversion`: rewards through the text runs' post-process boundary (`--reward-key`, `--custom-reward-post-process-path`, `--disable-rewards-normalization`), Flow-GRPO advantages, one train pair per SDE step, one row per image in the DP split |
-| Trainer | `miles.diffusion.train.actor.DiffusionFSDPTrainRayActor`: FSDP2 DiT with a PEFT LoRA adapter, Flow-GRPO loss, KL to the LoRA base |
+| Trainer | `miles.diffusion.train.actor.DiffusionFSDPTrainRayActor`: one FSDP2 DiT per denoiser component with a PEFT LoRA adapter, Flow-GRPO loss, KL to the LoRA base |
 | Weight sync | LoRA A/B pairs over CUDA IPC, merged by the engine (`lora_merge`) |
 
-Supported today: SD3 family, LoRA, colocated GPUs, FSDP, the `sde` sampler and the OCR reward. Under
-`--deterministic-mode` a 2-rollout run reproduces miles_diffusion's metric series bit for bit on the same image.
+Supported today: the SD3 and Wan2.2 families, LoRA, colocated GPUs, FSDP, the `sde` sampler and the OCR and PickScore
+rewards. Under `--deterministic-mode` a 2-rollout run reproduces miles_diffusion's metric series bit for bit on the same image.
 `tests/e2e/fsdp/test_sd35_medium_flow_grpo_ocr_2xGPU.py` checks that series against a recorded standard, with
 tolerances that absorb engine, torch and PaddleOCR differences between images; `MILES_DIFFUSION_PARITY_EXACT=1`
 makes it exact, the parity check on the recording image.
+
+## Wan2.2-T2V-A14B
+
+Flow-GRPO with LoRA on both experts of Wan2.2-T2V-A14B, 5-frame 480x480 videos, PickScore reward, ported from
+miles_diffusion's 5-GPU recipe at `d608b4ec`: four GPUs run the trainer and the engines, a fifth runs PickScore.
+
+```bash
+python scripts/run_wan22_a14b_flow_grpo_pickscore.py --num-rollout 300
+```
+
+The family (`wan2_2`) trains two components: `transformer` denoises timesteps from 875 up, guided by
+`--diffusion-guidance-scale`, and `transformer_2` the rest, guided by `--diffusion-guidance-scale-2`. Each rollout draws
+one SDE step (`epoch_global_random_choice`), so each trains one expert; `train/log_prob_mean_abs_diff_<component>`
+names it. The cross-attention norms are read in fp32 through their own FSDP2 groups. PickScore (`--rm-type pickscore`)
+scores every frame and averages them. `tests/e2e/fsdp/test_wan22_a14b_flow_grpo_pickscore_4xGPU.py` runs a 4-GPU proxy
+of the recipe that scores PickScore on CPU.

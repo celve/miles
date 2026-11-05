@@ -39,10 +39,13 @@ class MetricBuffer:
     """MEAN takes a local sum and the item count behind it, so the reduction weights items, not ranks.
     The schema fixes the packing order every rank agrees on."""
 
-    def __init__(self, *, group, device: torch.device) -> None:
+    def __init__(self, *, group, device: torch.device, components: tuple[str, ...] = ()) -> None:
         self._group = group
         self._device = device
-        self._mean_keys = sorted(key for key, op in SCHEMA.items() if op is MetricReduce.MEAN)
+        # With several components, the log-prob gap is also kept per component.
+        per_component = {f"log_prob_mean_abs_diff_{c}": MetricReduce.MEAN for c in components if len(components) > 1}
+        self._schema = SCHEMA | per_component
+        self._mean_keys = sorted(key for key, op in self._schema.items() if op is MetricReduce.MEAN)
         self._sums = {key: self._scalar(0.0) for key in self._mean_keys}
         self._counts = dict.fromkeys(self._mean_keys, 0.0)
         self._replicated: dict[str, torch.Tensor] = {}
@@ -53,12 +56,12 @@ class MetricBuffer:
         return value.detach().reshape(()).to(device=self._device, dtype=torch.float64)
 
     def emit_mean(self, key: str, total: torch.Tensor, count: int) -> None:
-        assert SCHEMA[key] is MetricReduce.MEAN, key
+        assert self._schema[key] is MetricReduce.MEAN, key
         self._sums[key] = self._sums[key] + self._scalar(total)
         self._counts[key] += float(count)
 
     def emit_replicated(self, key: str, value: torch.Tensor) -> None:
-        assert SCHEMA[key] is MetricReduce.REPLICATED, key
+        assert self._schema[key] is MetricReduce.REPLICATED, key
         self._replicated[key] = self._scalar(value)
 
     def reduce(self) -> dict[str, float]:

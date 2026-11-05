@@ -9,6 +9,7 @@ import httpx
 
 from miles.diffusion.algorithms import get_algorithm
 from miles.diffusion.rollout.ocr import OcrRewardPool
+from miles.diffusion.rollout.pickscore import PickScorePool
 from miles.diffusion.rollout.response import parse_rollout_response
 from miles.rollout.base_types import (
     BaseRolloutFn,
@@ -38,8 +39,7 @@ class DiffusionRolloutFn(BaseRolloutFn):
         self.algorithm = get_algorithm(args.loss_type)
         self.sampling_params = build_sampling_params(args)
         self.semaphore: asyncio.Semaphore | None = None
-        self.reward_pool = OcrRewardPool(num_workers=args.diffusion_ocr_num_workers) if args.rm_type == "ocr" else None
-        self.reward_kwargs = {"ocr_pool": self.reward_pool} if self.reward_pool is not None else {}
+        self.reward_kwargs = _build_reward_pools(args, _selected_rm_types(args, self.data_source))
         self.client = httpx.AsyncClient(limits=httpx.Limits(max_keepalive_connections=0), timeout=httpx.Timeout(None))
 
     async def __call__(self, input: RolloutFnInput) -> RolloutFnTrainOutput:
@@ -108,8 +108,37 @@ class DiffusionRolloutFn(BaseRolloutFn):
 
     async def dispose(self) -> None:
         await self.client.aclose()
-        if self.reward_pool is not None:
-            self.reward_pool.shutdown()
+        for pool in self.reward_kwargs.values():
+            pool.shutdown()
+
+
+def _selected_rm_types(args: Namespace, data_source) -> set[str]:
+    """The launch reward and every reward a prompt's metadata `rm_type` overrides it with; a global custom reward
+    takes every sample, so it selects only the launch reward's pool."""
+    if args.custom_rm_path is not None:
+        return {args.rm_type}
+    overrides = {
+        str(metadata.get("rm_type")).strip() for _, metadata, _ in data_source.dataset if metadata.get("rm_type")
+    }
+    return {args.rm_type} | overrides
+
+
+def _build_reward_pools(args: Namespace, rm_types: set[str]) -> dict[str, OcrRewardPool | PickScorePool]:
+    """The scorers of every built-in reward the run can select, owned by the rollout and handed to `rm_hub` through
+    its kwargs; each reward reads its own pool."""
+    pools: dict[str, OcrRewardPool | PickScorePool] = {}
+    if "ocr" in rm_types and args.diffusion_output_num_frames != 1:
+        raise ValueError("a prompt selects the OCR reward, which reads only the first frame, in a video run")
+    if "ocr" in rm_types:
+        pools["ocr_pool"] = OcrRewardPool(num_workers=args.diffusion_ocr_num_workers)
+    if "pickscore" in rm_types:
+        if args.rm_type != "pickscore":
+            raise ValueError(
+                "a prompt selects the PickScore reward, whose flags only --rm-type pickscore accepts; launch with "
+                "--rm-type pickscore and let the other prompts override it"
+            )
+        pools["pickscore_pool"] = PickScorePool(args)
+    return pools
 
 
 def build_sampling_params(args: Namespace) -> dict[str, Any]:
@@ -130,9 +159,11 @@ def build_sampling_params(args: Namespace) -> dict[str, Any]:
         "rollout_video_dtype": "keep",
         "rollout_return_denoising_env": True,
         "rollout_return_dit_trajectory": True,
-        "num_frames": 1,
+        "num_frames": args.diffusion_output_num_frames,
         "extra_sampling_params": {"quality": args.diffusion_quality},
     }
+    if args.diffusion_guidance_scale_2 is not None:
+        params["extra_sampling_params"]["guidance_scale_2"] = args.diffusion_guidance_scale_2
     if args.diffusion_negative_prompt is not None:
         params["negative_prompt"] = args.diffusion_negative_prompt
     return params

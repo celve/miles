@@ -74,10 +74,13 @@ class FlowGRPO(DiffusionAlgorithm):
             adv_clip_max=args.diffusion_adv_clip_max,
             device=torch.device("cuda", torch.cuda.current_device()),
         )
-        new_pred = actor.noise_pred(batch.latents, batch.timesteps, batch.pos_cond, batch.neg_cond)
+        component = actor.component_for(batch.timesteps)
+        new_pred = actor.noise_pred(component, batch.latents, batch.timesteps, batch.pos_cond, batch.neg_cond)
         ref_pred = None
         if args.diffusion_kl_beta > 0:
-            ref_pred = actor.lora_base_noise_pred(batch.latents, batch.timesteps, batch.pos_cond, batch.neg_cond)
+            ref_pred = actor.lora_base_noise_pred(
+                component, batch.latents, batch.timesteps, batch.pos_cond, batch.neg_cond
+            )
         return flow_grpo_loss(
             batch,
             new_pred=new_pred,
@@ -86,6 +89,7 @@ class FlowGRPO(DiffusionAlgorithm):
             clip_range=args.eps_clip,
             kl_beta=args.diffusion_kl_beta,
             metrics=metrics,
+            component=component if len(actor.pipeline_config.components) > 1 else None,
         )
 
 

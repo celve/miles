@@ -11,7 +11,8 @@ from safetensors.torch import save
 from miles.diffusion.rollout.data_source import DiffusionPromptDataSource
 from miles.diffusion.rollout.ocr import image_to_rgb_uint8, ocr_reward, ocr_target_text
 from miles.diffusion.rollout.response import parse_rollout_response
-from miles.diffusion.rollout.step_strategy import sde_window
+from miles.diffusion.rollout.rollout_fn import build_sampling_params
+from miles.diffusion.rollout.step_strategy import epoch_global_random_choice, sde_window
 from miles.ray.rollout.rollout_executor import RolloutExecutor
 from miles.utils.simple_checkpointer import save_simple_checkpoint
 
@@ -191,3 +192,61 @@ def test_a_label_key_carries_each_rows_label_to_its_samples(tmp_path):
     groups = DiffusionPromptDataSource(args).get_samples(2)
 
     assert [[s.label for s in g] for g in groups] == [["A", "A"], ["B", "B"]]
+
+
+def _request_args(**overrides):
+    values = dict(
+        diffusion_width=480,
+        diffusion_height=480,
+        diffusion_num_steps=10,
+        diffusion_guidance_scale=4.0,
+        diffusion_sde_type="sde",
+        diffusion_noise_level=0.9,
+        diffusion_quality="exact",
+        diffusion_negative_prompt=None,
+        diffusion_output_num_frames=1,
+        diffusion_guidance_scale_2=None,
+    )
+    return Namespace(**(values | overrides))
+
+
+def test_an_image_request_keeps_one_frame_and_one_guidance_scale():
+    params = build_sampling_params(_request_args())
+
+    assert params["num_frames"] == 1 and params["extra_sampling_params"] == {"quality": "exact"}
+
+
+def test_a_video_request_carries_its_frames_and_the_second_guidance_scale():
+    params = build_sampling_params(_request_args(diffusion_output_num_frames=5, diffusion_guidance_scale_2=3.0))
+
+    assert params["num_frames"] == 5
+    assert params["extra_sampling_params"] == {"quality": "exact", "guidance_scale_2": 3.0}
+
+
+def _choice(group_index, *, num_sde_steps=1, candidates="1,2,3"):
+    args = Namespace(
+        diffusion_sde_candidate_steps=candidates,
+        diffusion_num_sde_steps=num_sde_steps,
+        rollout_batch_size=4,
+        rollout_seed=42,
+    )
+    return epoch_global_random_choice(args, SimpleNamespace(group_index=group_index), 10, seed=group_index)
+
+
+def test_one_rollout_draws_one_sde_step_for_all_its_groups_seeded_by_the_rollout():
+    rollouts = [[_choice(group_index) for group_index in range(rollout * 4, rollout * 4 + 4)] for rollout in range(4)]
+
+    for rollout, choices in enumerate(rollouts):
+        (choice,) = {(tuple(steps), tuple(latents)) for steps, latents in choices}
+        step = [1, 2, 3][torch.randperm(3, generator=torch.Generator().manual_seed(rollout + 42))[0].item()]
+        assert choice == ((step,), (step, step + 1))
+
+
+def test_drawing_every_candidate_takes_them_all_in_order():
+    assert _choice(0, num_sde_steps=3, candidates="3,1,2") == ([1, 2, 3], [1, 2, 3, 4])
+
+
+@pytest.mark.parametrize("candidates,message", [(None, "needs --diffusion-sde-candidate-steps"), ("1,10", r"\[10\]")])
+def test_candidate_steps_must_be_given_and_inside_the_schedule(candidates, message):
+    with pytest.raises(ValueError, match=message):
+        _choice(0, candidates=candidates)

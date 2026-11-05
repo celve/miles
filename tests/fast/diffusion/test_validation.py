@@ -13,6 +13,8 @@ from miles.diffusion.arguments import (
     validate_diffusion_batch_size,
     validate_diffusion_sglang_config,
 )
+from miles.diffusion.train import pipeline_config
+from miles.diffusion.train.pipeline_config import SD3TrainPipelineConfig
 from miles.utils.args.configs.diffusion import DiffusionConfig
 
 
@@ -300,6 +302,127 @@ def test_a_flow_grpo_flag_nft_never_reads_is_rejected(override, flag):
 def test_an_nft_flag_flow_grpo_never_reads_is_rejected(override, flag):
     with pytest.raises(ValueError, match=f"--loss-type flow_grpo never reads: .*{flag}"):
         validate_diffusion_args(_supported(**override))
+
+
+class _TwoExperts(SD3TrainPipelineConfig):
+    model_family = "two_experts"
+    name_patterns = ("two-experts",)
+    components = ("transformer", "transformer_2")
+    guidance_scale_2_component = "transformer_2"
+
+
+@pytest.fixture
+def two_experts(monkeypatch):
+    monkeypatch.setitem(pipeline_config._REGISTRY, "two_experts", _TwoExperts)
+    return dict(diffusion_model_family="two_experts", diffusion_guidance_scale_2=3.0)
+
+
+_GLOBAL_STEPS = dict(
+    diffusion_step_strategy_path="miles.diffusion.rollout.step_strategy.epoch_global_random_choice",
+    diffusion_sde_candidate_steps="1,2,3",
+    diffusion_num_sde_steps=1,
+)
+
+
+def test_an_ema_algorithm_is_rejected_for_a_family_of_several_components(two_experts):
+    validate_diffusion_args(_supported(**(two_experts | _GLOBAL_STEPS)))
+    with pytest.raises(ValueError, match="EMA of one adapter"):
+        validate_diffusion_args(_nft(**two_experts))
+
+
+def test_a_family_of_several_components_rejects_per_request_sde_windows(two_experts):
+    with pytest.raises(ValueError, match="sde_window draws each request's steps apart"):
+        validate_diffusion_args(_supported(**two_experts))
+
+
+def test_the_second_guidance_scale_is_required_exactly_by_a_family_that_guides_with_it(two_experts):
+    with pytest.raises(ValueError, match="so pass it"):
+        validate_diffusion_args(_supported(**(two_experts | _GLOBAL_STEPS | dict(diffusion_guidance_scale_2=None))))
+    with pytest.raises(ValueError, match="no second guidance scale"):
+        validate_diffusion_args(_supported(diffusion_guidance_scale_2=3.0))
+
+
+_PICKSCORE = dict(
+    rm_type="pickscore",
+    diffusion_pickscore_model_path="/models/PickScore_v1",
+    diffusion_pickscore_processor_path="/models/CLIP-ViT-H-14",
+)
+
+
+def test_the_pickscore_reward_needs_its_model_and_processor():
+    validate_diffusion_args(_supported(**_PICKSCORE))
+    with pytest.raises(ValueError, match="pickscore-model-path"):
+        validate_diffusion_args(_supported(**(_PICKSCORE | dict(diffusion_pickscore_model_path=None))))
+
+
+def test_a_pickscore_flag_without_the_pickscore_reward_is_rejected():
+    with pytest.raises(ValueError, match="--diffusion-pickscore-num-frames"):
+        validate_diffusion_args(_supported(diffusion_pickscore_num_frames=3))
+
+
+def test_a_text_run_rejects_the_pickscore_reward():
+    from tests.fast.fixtures.args_fixtures import parse_fsdp_test_config
+
+    with pytest.raises(ValueError, match="--rm-type pickscore"):
+        parse_fsdp_test_config("--rm-type", "pickscore")
+
+
+def _wan(**overrides):
+    recipe = dict(
+        hf_checkpoint="/models/Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+        diffusion_guidance_scale_2=3.0,
+        diffusion_output_num_frames=5,
+        diffusion_flow_shift=3.0,
+        diffusion_step_strategy_path="miles.diffusion.rollout.step_strategy.epoch_global_random_choice",
+        diffusion_sde_candidate_steps="1,2,3",
+        diffusion_num_sde_steps=1,
+    )
+    return _supported(**(_PICKSCORE | recipe | overrides))
+
+
+def test_the_wan22_recipe_passes_and_trains_both_experts():
+    args = _wan()
+
+    validate_diffusion_args(args)
+
+    assert args.diffusion_model_family == "wan2_2" and "attn2.to_q" in args.diffusion_lora_target_modules
+    with pytest.raises(ValueError, match="guides transformer_2"):
+        validate_diffusion_args(_wan(diffusion_guidance_scale_2=None))
+
+
+@pytest.mark.parametrize(
+    "override,flag",
+    [
+        (dict(diffusion_sde_candidate_steps="1,2,3"), "--diffusion-sde-candidate-steps"),
+        (
+            dict(
+                diffusion_step_strategy_path="miles.diffusion.rollout.step_strategy.epoch_global_random_choice",
+                diffusion_sde_candidate_steps="1,2,3",
+                diffusion_sde_window_range="7,9",
+            ),
+            "--diffusion-sde-window-range",
+        ),
+    ],
+)
+def test_a_step_flag_the_built_in_strategy_never_reads_is_rejected(override, flag):
+    with pytest.raises(ValueError, match=f"never reads: {flag}"):
+        validate_diffusion_args(_supported(**override))
+
+
+def test_a_custom_step_strategy_may_read_any_step_flag():
+    validate_diffusion_args(
+        _supported(diffusion_step_strategy_path="my_pkg.strategy", diffusion_sde_candidate_steps="1,2,3")
+    )
+
+
+def test_nft_never_reads_the_candidate_steps():
+    with pytest.raises(ValueError, match="--diffusion-sde-candidate-steps"):
+        validate_diffusion_args(_nft(diffusion_sde_candidate_steps="1,2,3"))
+
+
+def test_the_ocr_reward_is_rejected_on_video():
+    with pytest.raises(ValueError, match="only the first frame"):
+        validate_diffusion_args(_supported(diffusion_output_num_frames=5))
 
 
 def test_flow_grpo_rejects_ode_rollouts():
