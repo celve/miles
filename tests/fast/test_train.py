@@ -41,6 +41,7 @@ def _make_args(**overrides: Any) -> SimpleNamespace:
         offload_rollout=False,
         offload_rollout_level="",
         offload_train=False,
+        reward_pools=[],
         save_interval=None,
         save_trigger_sentinel=None,
         skip_eval_before_train=False,
@@ -199,6 +200,34 @@ class TestFinalEval:
         assert "update_weights:1" in events
         assert "update_weights:2" not in events
         assert "onload_weights" not in events[events.index("actor_train:2") :]
+
+
+class TestColocatedRewardPools:
+    async def test_a_pool_that_shares_training_gpus_sleeps_with_the_engines_and_wakes_after_them(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        events: list[str] = []
+        args = _make_args(num_rollout=2, offload_rollout=True, reward_pools=[SimpleNamespace(needs_offload=True)])
+        _install_driver_fakes(monkeypatch, args, events)
+
+        await with_disposer(train_driver.train, _startup_info(args))
+
+        first = events[events.index("generate_done:0") : events.index("generate_start:1")]
+        engine_offload = next(index for index, event in enumerate(first) if event.startswith("offload:"))
+        assert engine_offload < first.index("offload_reward_pools") < first.index("actor_train:0")
+        assert first.index("onload_kv") < first.index("onload_reward_pools")
+        assert events.count("offload_reward_pools") == 2 and events.count("onload_reward_pools") == 1
+
+    async def test_a_run_whose_pools_never_share_training_gpus_never_asks_them_to_sleep(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        events: list[str] = []
+        args = _make_args(num_rollout=2, offload_rollout=True, reward_pools=[SimpleNamespace(needs_offload=False)])
+        _install_driver_fakes(monkeypatch, args, events)
+
+        await with_disposer(train_driver.train, _startup_info(args))
+
+        assert "offload_reward_pools" not in events and "onload_reward_pools" not in events
 
 
 class TestWeightEqualityCheck:

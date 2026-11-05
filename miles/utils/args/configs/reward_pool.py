@@ -1,6 +1,7 @@
 from typing import Any
 
 import pydantic
+from typing_extensions import Self
 
 from miles.backends.sglang_utils.sglang_config import rollout_slot_needs_offload
 from miles.utils.pydantic_utils import FrozenStrictBaseModel
@@ -24,6 +25,13 @@ class RewardPoolConfig(FrozenStrictBaseModel):
     colocated: bool = False
     # Set at parse from the pool's slots by the engines' rule: the pool sleeps while training holds its GPUs.
     needs_offload: bool = False
+
+    @pydantic.model_validator(mode="after")
+    def _colocate_only_a_gpu_pool(self) -> Self:
+        assert (
+            self.uses_gpu or not self.colocated
+        ), f"the {self.name} reward pool scores on the CPU, so has no GPU to share"
+        return self
 
 
 class RewardPoolScalingConfig(FrozenStrictBaseModel):

@@ -36,6 +36,17 @@ class _Handle:
         self.cluster.calls.append((self.cell_index, list(prompts)))
         return [float(len(prompt)) for prompt in prompts]
 
+    async def sleep(self):
+        self._lifecycle("sleep")
+
+    async def wake(self):
+        self._lifecycle("wake")
+
+    def _lifecycle(self, method):
+        if self.generation != self.cluster.generation[self.cell_index] or self.cell_index in self.cluster.dead:
+            raise WorkerUnreachableError("actor died")
+        self.cluster.calls.append((self.cell_index, method))
+
     async def wait_ready(self, *, timeout):
         pass
 
@@ -169,3 +180,15 @@ async def test_a_worker_torn_down_before_its_first_call_is_restarted_by_that_cal
 
     assert scores == [2.0, 1.0]
     assert cluster.operations == [("suspend", "reward-pickscore-00000"), ("resume", "reward-pickscore-00000")]
+
+
+async def test_sleep_and_wake_reach_every_worker_and_restart_one_that_died():
+    cluster = _Cluster(num_workers=2)
+    client = _client(cluster, _config())
+    cluster.dead.add(1)
+
+    await client.sleep()
+    await client.wake()
+
+    assert sorted(cluster.calls) == [(0, "sleep"), (0, "wake"), (1, "sleep"), (1, "wake")]
+    assert [op for op, _ in cluster.operations] == ["suspend", "resume"]

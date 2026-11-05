@@ -80,6 +80,7 @@ class OrchestratorConfig(
     WandbConfig,
     DashboardConfig,
     SglangFieldsConfig,
+    RewardPoolFieldsConfig,
 ):
     pass
 
