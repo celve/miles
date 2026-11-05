@@ -141,6 +141,7 @@ def aggregate_forward_results(
     data_iterator: DataIterator,
     args: Namespace,
     store_prefix: str = "",
+    first_microbatch: int = 0,
 ) -> dict[str, list]:
     rollout_data = {}
     if not forward_data_store:
@@ -153,15 +154,15 @@ def aggregate_forward_results(
             assert isinstance(batch_result[key], list), f"Expected list for key {key}, got {type(batch_result[key])}"
             values += batch_result[key]
 
-        # Handle dynamic batch size: restore original order
-        if args.use_dynamic_batch_size and hasattr(
-            data_iterator, "micro_batch_indices"
-        ):  # config-access-exempt: only dynamic-batch iterators expose micro-batch indices
-            origin_values = [None] * len(values)
-            origin_indices = sum(data_iterator.micro_batch_indices, [])
+        micro_batch_indices = data_iterator.micro_batch_indices
+        if micro_batch_indices is not None:
+            origin_values = [None] * sum(len(indices) for indices in micro_batch_indices)
+            origin_indices = sum(micro_batch_indices[first_microbatch:], [])
             for value, origin_index in zip(values, origin_indices, strict=False):
                 origin_values[origin_index] = value
             values = origin_values
+        elif first_microbatch:
+            values = [None] * (first_microbatch * data_iterator.micro_batch_size) + values
 
         rollout_data[key] = values
 

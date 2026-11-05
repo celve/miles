@@ -450,6 +450,10 @@ class DataIterator:
         self.offset = 0
         return self
 
+    def skip_microbatches(self, count: int) -> "DataIterator":
+        self.offset += count if self.micro_batch_indices is not None else count * self.micro_batch_size
+        return self
+
 
 def get_num_rollouts(args: Namespace, rollout_data: RolloutBatch, num_steps: int) -> list[int]:
     """Per-step rollout counts (total across DP); one entry per training step."""

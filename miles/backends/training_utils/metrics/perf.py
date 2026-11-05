@@ -35,7 +35,7 @@ def log_perf_data_raw(
     if ("perf/actor_train_time" in log_dict) and (compute_total_fwd_flops is not None):
         total_fwd_flops = compute_total_fwd_flops(seq_lens=timer_instance.seq_lens)
 
-        if "perf/log_probs_time" in log_dict:
+        if "perf/log_probs_time" in log_dict and not args.skip_actor_forward_only:
             log_dict["perf/log_probs_tflops"] = total_fwd_flops / log_dict["perf/log_probs_time"]
 
         if "perf/ref_log_probs_time" in log_dict:

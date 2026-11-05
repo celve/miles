@@ -134,6 +134,48 @@ def test_reused_training_log_probs_match_an_explicit_detached_baseline(
     assert reuse_metrics["pg_clipfrac"].item() == 0.0
 
 
+@pytest.mark.parametrize("advantage_estimator", ["grpo", "gspo"])
+def test_skip_actor_forward_only_keeps_scores_of_samples_the_pass_did_score(process_group, advantage_estimator):
+    parallel_state = make_parallel_state()
+    parallel_state.tp = GroupInfo(rank=0, size=1, group=dist.group.WORLD)
+    args = make_args(
+        advantage_estimator=advantage_estimator,
+        entropy_coef=0.0,
+        kl_coef=0.0,
+        observe_training_entropy=False,
+        true_on_policy_mode=False,
+        use_tis=True,
+    )
+    inputs = make_inputs(
+        seed=31, batch_size=3, prompt_lens=[6, 9, 5], response_lens=[4, 7, 3], vocab_size=32, args=args
+    )
+    training_log_probs = get_log_probs_and_entropy(
+        deep_clone(inputs["policy_logits"]),
+        args=args,
+        unconcat_tokens=deep_clone(inputs["unconcat_tokens"]),
+        total_lengths=list(inputs["total_lens"]),
+        response_lengths=list(inputs["response_lens"]),
+        with_entropy=False,
+    )["log_probs"]
+    later_step_scores = [log_prob.detach() - 0.1 for log_prob in training_log_probs]
+
+    mixed_batch = make_batch(inputs, "policy_loss")
+    mixed_batch["log_probs"] = [later_step_scores[0], None, later_step_scores[2]]
+    mixed_loss, mixed_metrics, mixed_grad = _run_policy_loss(args, mixed_batch, inputs, skip_actor_forward_only=True)
+
+    baseline_batch = make_batch(inputs, "policy_loss")
+    baseline_batch["log_probs"] = [later_step_scores[0], training_log_probs[1].detach(), later_step_scores[2]]
+    baseline_loss, baseline_metrics, baseline_grad = _run_policy_loss(
+        args, baseline_batch, inputs, skip_actor_forward_only=False
+    )
+
+    assert torch.equal(mixed_loss, baseline_loss)
+    assert torch.equal(mixed_grad, baseline_grad)
+    for key in baseline_metrics:
+        assert torch.equal(mixed_metrics[key], baseline_metrics[key]), key
+    assert mixed_metrics["ppo_kl"].item() != 0.0
+
+
 def test_skip_actor_forward_only_preserves_rollout_log_probs_as_old_policy(process_group):
     parallel_state = make_parallel_state()
     parallel_state.tp = GroupInfo(rank=0, size=1, group=dist.group.WORLD)
