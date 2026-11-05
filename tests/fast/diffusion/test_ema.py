@@ -144,3 +144,53 @@ def test_the_ema_steps_once_per_rollout_after_its_optimizer_steps(monkeypatch, u
     actor._train_core(5, [[{}], [{}], [{}], [{}]])
 
     assert calls == [("step", 0, 2), ("step", 2, 2)] + ([("ema", 2)] if uses_ema else [])
+
+
+def _checkpointing_actor(tmp_path, *, no_save_optim=False, no_load_optim=False, value=4.0):
+    actor = object.__new__(diffusion_actor.DiffusionFSDPTrainRayActor)
+    actor.model = _model(value)
+    actor.ema = _ema(actor.model)
+    backend = SimpleNamespace(
+        save=str(tmp_path), load=str(tmp_path), no_save_optim=no_save_optim, no_load_optim=no_load_optim
+    )
+    actor.args = SimpleNamespace(backend=backend)
+    return actor
+
+
+def test_the_ema_is_on_disk_before_the_checkpoint_writes_its_tracker(tmp_path, monkeypatch, single_rank_gloo):
+    actor = _checkpointing_actor(tmp_path)
+    seen = []
+    monkeypatch.setattr(
+        diffusion_actor.checkpoint,
+        "save",
+        lambda a, iteration: seen.append((tmp_path / "iter_0000004" / "ema").exists()),
+    )
+
+    actor._save_checkpoint(3)
+
+    assert seen == [True]
+
+
+def test_no_save_optim_leaves_the_ema_out_of_the_checkpoint(tmp_path, monkeypatch, single_rank_gloo):
+    actor = _checkpointing_actor(tmp_path, no_save_optim=True)
+    saved = []
+    monkeypatch.setattr(diffusion_actor.checkpoint, "save", lambda a, iteration: saved.append(iteration))
+
+    actor._save_checkpoint(3)
+
+    assert saved == [3] and not (tmp_path / "iter_0000004" / "ema").exists()
+
+
+@pytest.mark.parametrize("no_load_optim,expected", [(False, 4.0), (True, 9.0)])
+def test_a_resume_loads_the_saved_ema_unless_no_load_optim(
+    tmp_path, monkeypatch, single_rank_gloo, no_load_optim, expected
+):
+    monkeypatch.setattr(diffusion_actor.checkpoint, "save", lambda a, iteration: None)
+    _checkpointing_actor(tmp_path, value=4.0)._save_checkpoint(3)
+    resumed = _checkpointing_actor(tmp_path, no_load_optim=no_load_optim, value=1.0)
+    with torch.no_grad():
+        resumed.model.weight.fill_(9.0)
+
+    resumed._load_ema(4)
+
+    assert resumed.ema.state[resumed.model.weight]["ema"].eq(expected).all()
