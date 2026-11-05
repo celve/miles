@@ -106,6 +106,8 @@ async def train(startup_info: OrchestratorStartupInfo, *, disposer: Disposer):
         else:
             await eval_dispatcher.dispatch(args.start_rollout_id - 1)
 
+    offloads_reward_pools = any(pool.needs_offload for pool in args.reward_pools)
+
     # train loop.
     # note that for async training, one can change the position of the sync operation(ray.get).
     for rollout_id in range(args.start_rollout_id, args.num_rollout):
@@ -124,6 +126,8 @@ async def train(startup_info: OrchestratorStartupInfo, *, disposer: Disposer):
                 if "weight" in args.offload_rollout_level:
                     offload_tags.append(GPU_MEMORY_TYPE_WEIGHTS)
                 await inference_controller.offload(tags=offload_tags)
+            if offloads_reward_pools:
+                await rollout_executor.offload_reward_pools()
 
         if args.use_critic:
             values = await critic_model.train(rollout_id, rollout_data_pack)
@@ -163,6 +167,8 @@ async def train(startup_info: OrchestratorStartupInfo, *, disposer: Disposer):
             await update_weights(args, actor_model, rollout_executor, inference_controller, rollout_id=rollout_id)
             if args.offload_rollout:
                 await inference_controller.onload_kv()
+            if offloads_reward_pools:
+                await rollout_executor.onload_reward_pools()
 
         if eval_due:
             await inference_controller.prepare_eval()

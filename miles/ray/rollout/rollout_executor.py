@@ -174,6 +174,12 @@ class RolloutExecutor(DedicatedRpcLoopWorker):
 
         self._metric_checker = MetricChecker.maybe_create(args)
 
+    async def offload_reward_pools(self) -> None:
+        await asyncio.gather(*(pool.sleep() for pool in self._reward_pools.values() if pool.needs_offload))
+
+    async def onload_reward_pools(self) -> None:
+        await asyncio.gather(*(pool.wake() for pool in self._reward_pools.values() if pool.needs_offload))
+
     async def get_init_state(self) -> str:
         return self._init_once.state.value
 

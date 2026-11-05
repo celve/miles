@@ -44,6 +44,10 @@ class RewardPoolClient:
     def name(self) -> str:
         return self._config.name
 
+    @property
+    def needs_offload(self) -> bool:
+        return self._config.needs_offload
+
     async def score(self, outputs: list, prompts: list[str]) -> list[float]:
         """Scores in input order; each chunk of `batch_size` samples is one worker call."""
         size = self._config.batch_size
@@ -52,9 +56,15 @@ class RewardPoolClient:
         ]
         workers = [self._take_next_worker() for _ in chunks]
         results = await asyncio.gather(
-            *(self._score_on(worker, *chunk) for worker, chunk in zip(workers, chunks, strict=True))
+            *(self._call(worker, "score_batch", *chunk) for worker, chunk in zip(workers, chunks, strict=True))
         )
         return [float(score) for chunk in results for score in chunk]
+
+    async def sleep(self) -> None:
+        await asyncio.gather(*(self._call(index, "sleep") for index in range(self._config.num_workers)))
+
+    async def wake(self) -> None:
+        await asyncio.gather(*(self._call(index, "wake") for index in range(self._config.num_workers)))
 
     async def ensure_healthy(self) -> None:
         """Restart every worker whose cell is down, so a rollout starts on a whole pool."""
@@ -74,18 +84,18 @@ class RewardPoolClient:
         self._next_worker += 1
         return index
 
-    async def _score_on(self, index: int, outputs: list, prompts: list[str]) -> list[float]:
+    async def _call(self, index: int, method: str, *args):
         for attempt in itertools.count():
             seen_restarts = self._num_restarts[index]
             try:
                 handle = await self._handle(index)
-                return await handle.score_batch(outputs, prompts)
+                return await getattr(handle, method)(*args)  # config-access-exempt: worker method chosen by caller
             except WorkerUnreachableError:
                 if attempt >= self._max_restarts_per_call:
                     raise
                 logger.warning(
-                    f"Reward worker {reward_worker_name(self.name, cell_index=index)} is unreachable; restarting "
-                    f"it and resending the batch (restart {attempt + 1}/{self._max_restarts_per_call})",
+                    f"Reward worker {reward_worker_name(self.name, cell_index=index)} is unreachable in {method}; "
+                    f"restarting it and calling it again (restart {attempt + 1}/{self._max_restarts_per_call})",
                     exc_info=True,
                 )
                 await self._restart(index, seen_restarts=seen_restarts)

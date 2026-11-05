@@ -191,3 +191,26 @@ class TestColocatedRewardPools:
 
 def _scaling_of(reward_scaling: RewardScalingConfig) -> ScalingConfig:
     return ScalingConfig(sglang_scaling=SglangScalingConfig(groups={}), reward_scaling=reward_scaling)
+
+
+class _MovableScorer(RecordingScorer):
+    def to(self, device):
+        self.device = device
+
+
+def test_a_sleeping_worker_moves_its_scorer_to_the_cpu_and_back_to_its_gpu(monkeypatch):
+    monkeypatch.setattr(torch.accelerator, "set_device_index", lambda index: None)
+    monkeypatch.setattr(torch.accelerator, "empty_cache", lambda: None)
+    pool = _pool("pickscore", uses_gpu=True).model_copy(update=dict(scorer_path=f"{__name__}._MovableScorer"))
+    worker = RewardWorker(args=make_rollout_config(), pool=pool, gpu_ids=[2])
+
+    worker.sleep()
+    asleep = worker._scorer.device
+    worker.wake()
+
+    assert asleep == torch.device("cpu") and worker._scorer.device.index == 2
+
+
+def test_only_a_gpu_pool_can_be_colocated():
+    with pytest.raises(ValueError, match="scores on the CPU"):
+        _pool("ocr", uses_gpu=False).model_validate(_pool("ocr", uses_gpu=False).model_dump() | dict(colocated=True))
