@@ -66,7 +66,7 @@ Usage:
     python3 scripts/run_qwen3_vl_4b_harbor_cua.py --harbor-env-type e2b --mode eval
     python3 scripts/run_qwen3_vl_4b_harbor_cua.py --harbor-env-type e2b --rollout-path session
     python3 scripts/run_qwen3_vl_4b_harbor_cua.py --harbor-env-type e2b --rollout-path session --media-refs
-    python3 scripts/run_qwen3_vl_4b_harbor_cua.py --model-name qwen3.8-27b --num-gpus-per-node 8 --harbor-env-type e2b \
+    python3 scripts/run_qwen3_vl_4b_harbor_cua.py --model-name qwen3.8-27b --num-gpus-per-node 8 --eval-num-gpus 0 --harbor-env-type e2b \
         --rollout-path session --skip-prepare --data-dir <train.jsonl and eval.jsonl> --harbor-tasks-dir <task dirs>
 """
 
