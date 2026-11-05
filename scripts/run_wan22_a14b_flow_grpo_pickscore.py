@@ -1,5 +1,6 @@
 """Flow-GRPO on Wan2.2-T2V-A14B with the PickScore reward: LoRA r64 on both experts, 5-frame 480x480 videos, 4 GPUs
-colocated (FSDP DP=4 and four sglang.multimodal_gen engines time-sharing them) plus a fifth GPU for PickScore.
+colocated (FSDP DP=4 and four sglang.multimodal_gen engines time-sharing them) plus a fifth GPU, the PickScore reward
+pool's, which Miles appends to the placement group after the rollout GPUs.
 
 Ported from radixark/miles_diffusion at d608b4ec (scripts/run_diffusion_grpo_wan22_pickscore_5gpu.py), which the fork
 has not run to a full curve. Each rollout draws one SDE step from steps 1-3 (epoch_global_random_choice), so it trains
@@ -11,7 +12,7 @@ Args:
     --num-rollout: rollouts to train; each is --rollout-batch-size prompts x --n-samples-per-prompt videos.
     --model-path: a local Wan2.2-T2V-A14B-Diffusers directory; downloaded to --model-dir when empty.
     --save-interval: rollouts between checkpoints; 0 saves none.
-    --pickscore-gpus: GPUs of the PickScore actor; 0 scores on CPU and leaves the node at the 4 train GPUs.
+    --pickscore-gpus: 1 gives the PickScore worker its own GPU; 0 scores on the CPU and leaves the node at 4 GPUs.
     --extra-args: appended to the train argv.
 
     python scripts/run_wan22_a14b_flow_grpo_pickscore.py --num-rollout 300

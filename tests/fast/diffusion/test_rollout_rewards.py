@@ -6,7 +6,7 @@ import pytest
 import torch
 from tests.fast.fixtures.args_fixtures import parser_defaults
 
-from miles.rollout.base_types import RolloutFnConstructorInput
+from miles.rollout.base_types import RolloutFnConstructorInput, RolloutFnTrainInput
 from miles.rollout.diffusion_rollout import rollout_fn
 from miles.utils.args.custom_function import CustomFunctionConfig
 from miles.utils.args.custom_view import ImmutableNamespace
@@ -30,7 +30,7 @@ class _FakeOcrPool:
         pass
 
 
-def _rollout(monkeypatch, *, prompt_metadata=(), **overrides):
+def _rollout(monkeypatch, *, prompt_metadata=(), reward_pools=None, **overrides):
     args = Namespace(
         **parser_defaults()
         | dict(
@@ -52,7 +52,9 @@ def _rollout(monkeypatch, *, prompt_metadata=(), **overrides):
         lambda raw: [DiffusionRollout(generated_output=torch.zeros(3, 1, 4, 4)) for _ in range(raw)],
     )
     data_source = SimpleNamespace(dataset=[("p", metadata, None) for metadata in prompt_metadata])
-    fn = rollout_fn.DiffusionRolloutFn(RolloutFnConstructorInput(args=args, data_source=data_source))
+    fn = rollout_fn.DiffusionRolloutFn(
+        RolloutFnConstructorInput(args=args, data_source=data_source, reward_pools=reward_pools or {})
+    )
     fn.semaphore = asyncio.Semaphore(1)
 
     async def post(payload):
@@ -101,20 +103,26 @@ async def test_a_custom_reward_replaces_ocr_without_receiving_the_ocr_pool(monke
 
 
 class _FakePickScorePool:
-    def __init__(self, args):
+    """Stands in for the executor's client of the `pickscore` reward pool."""
+
+    def __init__(self):
         self.calls = []
+        self.health_checks = 0
 
     async def score(self, outputs, prompts):
         self.calls.append(len(outputs))
         return [0.25] * len(outputs)
 
-    def shutdown(self):
-        pass
+    async def ensure_healthy(self):
+        self.health_checks += 1
+
+
+def _pickscore_pools():
+    return {"pickscore": _FakePickScorePool()}
 
 
 async def test_pickscore_scores_each_microgroup_in_one_batched_call(monkeypatch):
-    monkeypatch.setattr(rollout_fn, "PickScorePool", _FakePickScorePool)
-    fn, reward_calls = _rollout(monkeypatch, rm_type="pickscore")
+    fn, reward_calls = _rollout(monkeypatch, rm_type="pickscore", reward_pools=_pickscore_pools())
 
     group = await fn._generate_group(_group())
 
@@ -125,7 +133,7 @@ async def test_pickscore_scores_each_microgroup_in_one_batched_call(monkeypatch)
 async def test_a_sample_that_overrides_the_reward_leaves_the_pickscore_batch():
     from miles.rollout.rm_hub import batched_async_rm
 
-    pool = _FakePickScorePool(None)
+    pool = _FakePickScorePool()
     args = Namespace(**parser_defaults() | dict(rm_type="pickscore", custom_rm_path=None))
     samples = [Sample(index=0, prompt="p"), Sample(index=1, prompt="p", metadata={"rm_type": "deterministic_random"})]
     for sample in samples:
@@ -138,8 +146,9 @@ async def test_a_sample_that_overrides_the_reward_leaves_the_pickscore_batch():
 
 
 async def test_a_prompt_that_overrides_pickscore_with_ocr_is_scored_on_an_ocr_pool(monkeypatch):
-    monkeypatch.setattr(rollout_fn, "PickScorePool", _FakePickScorePool)
-    fn, _ = _rollout(monkeypatch, rm_type="pickscore", prompt_metadata=[{}, {"rm_type": "ocr"}])
+    fn, _ = _rollout(
+        monkeypatch, rm_type="pickscore", prompt_metadata=[{}, {"rm_type": "ocr"}], reward_pools=_pickscore_pools()
+    )
     group = _group()
     for sample in group[2:]:
         sample.metadata = {"rm_type": "ocr"}
@@ -156,13 +165,17 @@ def test_a_prompt_cannot_select_pickscore_under_another_launch_reward(monkeypatc
 
 
 def test_a_prompt_cannot_select_the_ocr_reward_in_a_video_run(monkeypatch):
-    monkeypatch.setattr(rollout_fn, "PickScorePool", _FakePickScorePool)
     with pytest.raises(ValueError, match="only the first frame"):
-        _rollout(monkeypatch, rm_type="pickscore", diffusion_output_num_frames=5, prompt_metadata=[{"rm_type": "ocr"}])
+        _rollout(
+            monkeypatch,
+            rm_type="pickscore",
+            diffusion_output_num_frames=5,
+            prompt_metadata=[{"rm_type": "ocr"}],
+            reward_pools=_pickscore_pools(),
+        )
 
 
 def test_a_global_custom_reward_builds_no_pool_for_the_overrides_it_replaces(monkeypatch):
-    monkeypatch.setattr(rollout_fn, "PickScorePool", _FakePickScorePool)
     fn, _ = _rollout(
         monkeypatch,
         rm_type="pickscore",
@@ -172,3 +185,19 @@ def test_a_global_custom_reward_builds_no_pool_for_the_overrides_it_replaces(mon
     )
 
     assert fn.reward_kwargs == {}
+
+
+async def test_every_rollout_first_checks_that_each_reward_pool_is_whole_and_dispose_leaves_the_pools_alone(
+    monkeypatch,
+):
+    """The executor owns the pools' workers; the rollout only restarts what died, never shuts them down."""
+    pools = _pickscore_pools()
+    fn, _ = _rollout(monkeypatch, rm_type="pickscore", reward_pools=pools)
+    fn.data_source.get_samples = lambda num_groups: [_group()]
+
+    await fn(RolloutFnTrainInput(rollout_id=0))
+    await fn(RolloutFnTrainInput(rollout_id=1))
+    await fn.dispose()
+
+    assert pools["pickscore"].health_checks == 2
+    assert fn.reward_kwargs["pickscore_pool"] is pools["pickscore"]
