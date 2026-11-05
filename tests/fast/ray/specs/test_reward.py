@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from argparse import Namespace
+
 import pytest
 import torch
 from tests.fast.ray.rollout.conftest import make_rollout_config
@@ -8,7 +10,8 @@ from miles.backends.sglang_utils.sglang_scaling_config import SglangScalingConfi
 from miles.ray.rollout.reward_worker import RewardWorker
 from miles.ray.specs.reward import REWARD_WORKER_CLASS, RewardPoolSpec, reward_cell_id, reward_worker_name
 from miles.ray.utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST
-from miles.utils.args.configs.reward_pool import RewardPoolConfig, RewardScalingConfig
+from miles.utils.args.configs import reward_pool as reward_pool_module
+from miles.utils.args.configs.reward_pool import RewardPoolConfig, RewardScalingConfig, compute_reward_pools
 from miles.utils.args.configs.scaling import ScalingConfig
 from miles.utils.function_registry import load_function
 from miles.utils.misc import NodeProbeMixin
@@ -139,3 +142,52 @@ class TestRewardWorker:
 
 def test_a_run_that_declares_no_pool_has_no_reward_spec():
     assert RewardPoolSpec.create(make_rollout_config()) == []
+
+
+class TestColocatedRewardPools:
+    @staticmethod
+    def _args(**overrides) -> Namespace:
+        values = dict(
+            rollout_num_gpus=4,
+            eval_num_gpus=0,
+            offload_rollout=True,
+            colocate=True,
+            debug_rollout_only=False,
+            starts_inference_engines=True,
+            actor_num_nodes=1,
+            actor_num_gpus_per_node=4,
+        )
+        return Namespace(**(values | overrides))
+
+    def test_a_colocated_pool_takes_the_first_rollout_slots_adds_no_gpu_and_sleeps_with_the_engines(self, monkeypatch):
+        colocated = _pool("pickscore", uses_gpu=True).model_copy(update=dict(colocated=True))
+        monkeypatch.setattr(
+            reward_pool_module, "_declare_reward_pools", lambda args: [colocated, _pool("hps", uses_gpu=True)]
+        )
+
+        pools, scaling = compute_reward_pools(self._args())
+
+        assert {name: (pool.gpu_offset, pool.num_gpus) for name, pool in scaling.pools.items()} == {
+            "pickscore": (0, 0),
+            "hps": (4, 1),
+        }
+        assert [(pool.name, pool.needs_offload) for pool in pools] == [("pickscore", True), ("hps", False)]
+        assert _spec(pools[0]).scheduling(_scaling_of(scaling)).pg_slot_offset == 0
+
+    def test_a_colocated_pool_never_sleeps_when_rollout_is_not_offloaded(self, monkeypatch):
+        colocated = _pool("pickscore", uses_gpu=True).model_copy(update=dict(colocated=True))
+        monkeypatch.setattr(reward_pool_module, "_declare_reward_pools", lambda args: [colocated])
+
+        (pool,), _ = compute_reward_pools(self._args(offload_rollout=False))
+
+        assert not pool.needs_offload
+
+    def test_a_colocated_pool_larger_than_the_rollout_gpus_is_rejected(self):
+        colocated = _pool("pickscore", uses_gpu=True, num_workers=3).model_copy(update=dict(colocated=True))
+
+        with pytest.raises(AssertionError, match="rollout GPUs hold only 2 more"):
+            RewardScalingConfig.resolve([colocated], gpu_offset=2, num_rollout_gpus=2)
+
+
+def _scaling_of(reward_scaling: RewardScalingConfig) -> ScalingConfig:
+    return ScalingConfig(sglang_scaling=SglangScalingConfig(groups={}), reward_scaling=reward_scaling)

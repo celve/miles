@@ -186,12 +186,8 @@ class ServerGroupConfig(FrozenStrictBaseModel):
             f"configures the output store of every engine"
         )
 
-        rollout_pg_offset = _compute_rollout_offset(args)
-        megatron_num_gpus = _compute_megatron_num_gpus(args)
-
         gpu_offset = offset_cursor.gpu
-        group_abs_start = rollout_pg_offset + gpu_offset
-        needs_offload = args.offload_rollout and group_abs_start < megatron_num_gpus
+        needs_offload = rollout_slot_needs_offload(args, gpu_offset=gpu_offset)
 
         num_gpus_per_engine = x if (x := raw.num_gpus_per_engine) is not None else default_gpus_per_engine
         overrides = {
@@ -475,6 +471,11 @@ def _compute_eval_raw_model(raw: _RawModelConfig, args) -> _RawModelConfig:
             ],
         )
     )
+
+
+def rollout_slot_needs_offload(args, *, gpu_offset: int) -> bool:
+    """Whether what starts at this slot of the rollout view shares its GPU with training, and so sleeps around it."""
+    return args.offload_rollout and _compute_rollout_offset(args) + gpu_offset < _compute_megatron_num_gpus(args)
 
 
 def _compute_rollout_offset(args) -> int:
