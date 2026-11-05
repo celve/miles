@@ -68,6 +68,13 @@ _UNSUPPORTED = [
         lambda a: a.use_output_store or str(a.object_store_backend).lower().endswith("mooncake"),
     ),
     ("fault tolerance (--use-fault-tolerance)", lambda a: a.use_fault_tolerance),
+    (
+        # Reward batches are float video tensors (~110 MB for a Wan microgroup), never sent over the RPC transport.
+        "a reward pool outside one Ray deployment (--cluster-backend other than ray, --worker-comm-backend rpc, or "
+        "--deploy-component other than all)",
+        lambda a: bool(declared_reward_pool_names(a))
+        and (a.cluster_backend != "ray" or a.worker_comm_backend == "rpc" or a.deploy_component != "all"),
+    ),
     ("--delay-split-train-data-by-dp", lambda a: a.delay_split_train_data_by_dp),
     ("independent data parallelism (--indep-dp)", lambda a: a.indep_dp),
     (
