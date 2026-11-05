@@ -19,7 +19,16 @@ class RewardWorker:
             torch.accelerator.set_device_index(device.index)
         else:
             device = torch.device("cpu")
+        self._device = device
         self._scorer = load_function(pool.scorer_path)(device=device, **pool.scorer_kwargs)
 
     def score_batch(self, outputs: list, prompts: list[str]) -> list[float]:
         return self._scorer.score_batch(outputs, prompts)
+
+    def sleep(self) -> None:
+        """Moves the scorer off its GPU while training holds it."""
+        self._scorer.to(torch.device("cpu"))
+        torch.accelerator.empty_cache()
+
+    def wake(self) -> None:
+        self._scorer.to(self._device)

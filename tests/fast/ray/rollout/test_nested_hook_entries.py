@@ -175,3 +175,24 @@ async def test_the_executor_hands_its_reward_pools_to_the_train_and_eval_rollout
         finally:
             if hasattr(executor, "use_legacy_rollout_v1"):
                 await executor.dispose()
+
+
+async def test_the_executor_sleeps_and_wakes_only_the_pools_that_share_training_gpus():
+    class Pool:
+        def __init__(self, needs_offload):
+            self.needs_offload, self.calls = needs_offload, []
+
+        async def sleep(self):
+            self.calls.append("sleep")
+
+        async def wake(self):
+            self.calls.append("wake")
+
+    executor = RolloutExecutor.__new__(RolloutExecutor)
+    executor._reward_pools = {"pickscore": Pool(True), "ocr": Pool(False)}
+
+    await executor.offload_reward_pools()
+    await executor.onload_reward_pools()
+
+    assert executor._reward_pools["pickscore"].calls == ["sleep", "wake"]
+    assert executor._reward_pools["ocr"].calls == []
