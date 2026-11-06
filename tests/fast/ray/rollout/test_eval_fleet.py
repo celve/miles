@@ -374,7 +374,7 @@ def fleet_states(monkeypatch):
     monkeypatch.setattr(
         eval_fleet_mod,
         "GenerateState",
-        lambda args, reward_pools=None: built.append(args) or SimpleNamespace(args=args),
+        lambda args, reward_pools=None: built.append(args) or SimpleNamespace(args=args, reward_pools=reward_pools),
     )
     return built
 
@@ -383,11 +383,12 @@ def make_session(controller, *, info=None):
     return make_session_over(FakeControllerProvider([controller]), info=info)
 
 
-def make_session_over(provider, *, info=None):
+def make_session_over(provider, *, info=None, reward_pools=None):
     return RolloutExecutorEvalFleet(
         make_config(),
         info=info or _FLEET_INFO,
         inference_controller_provider=provider,
+        reward_pools=reward_pools,
     )
 
 
@@ -414,6 +415,13 @@ class TestRolloutExecutorEvalFleet:
 
         assert controller.calls == [dict(weight_version="5")]
         assert len(fleet_states) == 1
+
+    def test_its_state_scores_on_the_run_reward_pools(self, fleet_states):
+        pools = {"judge": object()}
+
+        session = make_session_over(FakeControllerProvider([FakeInferenceController([])]), reward_pools=pools)
+
+        assert session._state.reward_pools is pools
 
     def test_builds_its_state_against_the_fleet_router(self, fleet_states):
         """The executor generates against the eval router and the fleet's gpu sizing, not the rollout ones."""
