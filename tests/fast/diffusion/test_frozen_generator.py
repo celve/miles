@@ -94,6 +94,20 @@ def test_an_engine_within_one_node_after_the_trainer_is_accepted(tmp_path):
     _parse(tmp_path, "--use-miles-router", policy_gpus=5)
 
 
+_INFERENCE_DEPLOYMENT = (
+    *("--run-uuid", "0b7e8f4a3c2d4e5f", "--deploy-component", "inference"),
+    *("--deploy-instance-id", "west", "--inference-controller-addr", "controller:8000"),
+    *("--worker-comm-backend", "rpc", "--use-miles-router"),
+)
+
+
+def test_an_inference_deployment_places_engines_from_its_own_first_gpu(tmp_path):
+    _parse(tmp_path, *_INFERENCE_DEPLOYMENT, policy_gpus=6)
+
+    with pytest.raises(ValueError, match="an engine on GPUs 7-8"):
+        _parse(tmp_path, *_INFERENCE_DEPLOYMENT, policy_gpus=7)
+
+
 def _launched_server_args(*, update_weights, overrides=None, num_gpus_per_engine=4):
     args = SimpleNamespace(
         hf_checkpoint="/models/policy",

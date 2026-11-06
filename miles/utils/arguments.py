@@ -390,10 +390,6 @@ def parse_args_and_get_parser(
         from miles.diffusion.arguments import validate_diffusion_sglang_config
 
         validate_diffusion_sglang_config(sglang)
-    else:
-        from miles.diffusion.arguments import validate_frozen_diffusion_models
-
-        validate_frozen_diffusion_models(sglang, sglang_scaling, args)
     raw_megatron = resolve_megatron_config(args, base_args=backend_values if backend == "megatron" else {})
     check_output_store_args(args, sglang=sglang, megatron=raw_megatron)
     reward_pools, reward_scaling = compute_reward_pools(args)
@@ -411,7 +407,12 @@ def parse_args_and_get_parser(
         ),
     }
     values.update(RouterConfig.from_args(args))
-    return AllConfig.model_validate(values), parser
+    config = AllConfig.model_validate(values)
+    if args.model_kind != "diffusion":
+        from miles.diffusion.arguments import validate_frozen_diffusion_models
+
+        validate_frozen_diffusion_models(config)
+    return config, parser
 
 
 def _validate_argument_ownership(
