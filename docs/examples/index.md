@@ -54,3 +54,4 @@ Not fully verified — for experimental and development use.
 - **[swe-agent-harbor-daytona](https://github.com/radixark/miles/tree/main/examples/experimental/swe-agent-harbor-daytona)**: The `swe-agent-harbor-docker` pipeline with task sandboxes hosted on Daytona instead of local Docker.
 - **[tau-bench](https://github.com/radixark/miles/tree/main/examples/experimental/tau-bench)**: Training in an agentic multi-turn tool use environment (Tau-bench).
 - **[verifiers](https://github.com/radixark/miles/tree/main/examples/experimental/verifiers)**: Training on a Prime Intellect Verifiers environment instead of a Miles prompt dataset.
+- **[video_gen_agent](https://github.com/radixark/miles/tree/main/examples/experimental/video_gen_agent)**: An environment where a planner learns to turn video requests into clips from a frozen video generator it calls as a tool.

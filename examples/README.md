@@ -50,6 +50,7 @@ Not fully verified — for experimental and development use.
 - **[swe-agent-harbor-daytona](./experimental/swe-agent-harbor-daytona)**: The `swe-agent-harbor-docker` pipeline with task sandboxes hosted on Daytona instead of local Docker.
 - **[tau-bench](./experimental/tau-bench)**: Training in an agentic multi-turn tool use environment (Tau-bench).
 - **[verifiers](./experimental/verifiers)**: Training on a Prime Intellect Verifiers environment instead of a Miles prompt dataset.
+- **[video_gen_agent](./experimental/video_gen_agent)**: An environment where a planner learns to turn video requests into clips from a frozen video generator it calls as a tool.
 
 <!-- docs:exclude:start -->
 ## These READMEs are the documentation site
