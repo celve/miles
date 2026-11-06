@@ -861,7 +861,8 @@ def _check_multimodal_token_space_processing_args(args, *, sglang: SglangConfig)
             "--multimodal-token-space-processing needs the SGLang engines to expand media placeholders in token "
             "space; set --sglang-enable-token-space-processor."
         )
-    if _compute_rollout_external(args):
+    # Read once resolved: by now custom_inference_engine_provider_path also names Miles' own engine provider.
+    if args.rollout_external:
         raise ValueError(
             "--multimodal-token-space-processing builds the trainer's processor from the server args Miles "
             "launches its engines with, which external engines do not share."

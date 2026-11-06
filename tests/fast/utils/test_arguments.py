@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from tests.fast.fixtures.args_fixtures import parse_megatron_test_config
+from tests.fast.fixtures.args_fixtures import parse_fsdp_test_config, parse_megatron_test_config
 from tests.fast.fixtures.megatron_config_fixtures import encode_megatron_config, write_megatron_config_trainers
 from tests.fast.fixtures.sglang_config_fixtures import make_sglang_config
 
@@ -4014,7 +4014,7 @@ class TestMultimodalTokenSpaceProcessingArgs:
 
     @staticmethod
     def _args(**overrides):
-        return SimpleNamespace(
+        args = SimpleNamespace(
             **{
                 "multimodal_token_space_processing": True,
                 "rollout_external_engine_addrs": None,
@@ -4024,6 +4024,8 @@ class TestMultimodalTokenSpaceProcessingArgs:
                 **overrides,
             }
         )
+        args.rollout_external = _compute_rollout_external(args)
+        return args
 
     @pytest.mark.parametrize(
         ("engine_overrides", "external_engines", "match"),
@@ -4055,6 +4057,20 @@ class TestMultimodalTokenSpaceProcessingArgs:
     def test_the_session_server_with_the_miles_router_passes(self):
         args = self._args(use_session_server="v2", use_miles_router=True)
         _check_multimodal_token_space_processing_args(args, sglang=make_sglang_config(**self._SUPPORTED))
+
+    def test_a_launch_on_miles_own_engines_parses(self):
+        config = parse_fsdp_test_config(
+            "--hf-checkpoint",
+            "Qwen/Qwen3-VL-2B-Instruct",
+            "--rollout-num-gpus",
+            "1",
+            "--multimodal-token-space-processing",
+            "--sglang-enable-token-space-processor",
+            "--use-session-server",
+            "v2",
+            "--use-miles-router",
+        )
+        assert config.multimodal_token_space_processing
 
     def test_a_custom_inference_engine_provider_is_rejected(self):
         args = self._args(custom_inference_engine_provider_path="my.provider.fn")
