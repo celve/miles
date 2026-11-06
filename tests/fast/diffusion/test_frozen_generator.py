@@ -6,7 +6,7 @@ import shlex
 import sys
 from types import ModuleType, SimpleNamespace
 
-import imageio.v3 as iio
+import av
 import msgpack
 import pytest
 import torch
@@ -25,8 +25,8 @@ from miles.utils.test_utils.uvicorn_thread_server import UvicornThreadServer
 _GENERATOR = {"worker_type": "regular", "num_gpus": 2, "num_gpus_per_engine": 2, "engine_kind": "diffusion"}
 
 
-def _sglang_yaml(*, generator_first=False, update_weights=False, generator_groups=(_GENERATOR,)) -> str:
-    policy = ["  - name: policy", "    server_groups:", "      - {worker_type: regular, num_gpus: 1}"]
+def _sglang_yaml(*, generator_first=False, update_weights=False, generator_groups=(_GENERATOR,), policy_gpus=1) -> str:
+    policy = ["  - name: policy", "    server_groups:", f"      - {{worker_type: regular, num_gpus: {policy_gpus}}}"]
     generator = [
         "  - name: generator",
         "    model_path: /models/Wan2.2-TI2V-5B-Diffusers",
@@ -38,11 +38,12 @@ def _sglang_yaml(*, generator_first=False, update_weights=False, generator_group
     return "\n".join(["sglang:", *models]) + "\n"
 
 
-def _parse(tmp_path, *extra, **yaml_options):
+def _parse(tmp_path, *extra, policy_gpus=1, **yaml_options):
     config_path = tmp_path / "sglang.yaml"
-    config_path.write_text(_sglang_yaml(**yaml_options))
+    config_path.write_text(_sglang_yaml(policy_gpus=policy_gpus, **yaml_options))
+    rollout_gpus = str(policy_gpus + 2)
     return parse_fsdp_test_config(
-        *("--rollout-num-gpus", "3", "--num-gpus-per-node", "8", "--sglang-config", str(config_path)), *extra
+        *("--rollout-num-gpus", rollout_gpus, "--num-gpus-per-node", "8", "--sglang-config", str(config_path)), *extra
     )
 
 
@@ -81,6 +82,16 @@ def test_a_frozen_diffusion_model_outside_the_supported_layout_is_rejected(tmp_p
 def test_a_frozen_diffusion_model_on_gpus_shared_with_training_is_rejected(tmp_path):
     with pytest.raises(ValueError, match="GPUs shared with training"):
         _parse(tmp_path, "--use-miles-router", "--colocate", "--actor-num-gpus-per-node", "3")
+
+
+def test_an_engine_across_a_node_boundary_is_rejected(tmp_path):
+    # One trainer GPU and six policy GPUs put the two-GPU generator engine on GPUs 7 and 8.
+    with pytest.raises(ValueError, match="an engine on GPUs 7-8, across nodes of 8 GPUs"):
+        _parse(tmp_path, "--use-miles-router", policy_gpus=6)
+
+
+def test_an_engine_within_one_node_after_the_trainer_is_accepted(tmp_path):
+    _parse(tmp_path, "--use-miles-router", policy_gpus=5)
 
 
 def _launched_server_args(*, update_weights, overrides=None, num_gpus_per_engine=4):
@@ -209,7 +220,9 @@ def test_a_clip_is_generated_behind_the_router_and_stored_by_its_sha256(generato
 
     with open(path, "rb") as f:
         assert os.path.basename(path) == f"{hashlib.sha256(f.read()).hexdigest()}.mp4"
-    assert iio.imread(path, plugin="pyav").shape == (9, 32, 48, 3)
+    with av.open(path) as container:
+        frames = [frame.to_ndarray(format="rgb24") for frame in container.decode(video=0)]
+    assert len(frames) == 9 and frames[0].shape == (32, 48, 3)
     assert os.listdir(tmp_path) == [os.path.basename(path)]
     (body,) = seen
     assert body["rollout"] is False and body["rollout_video_dtype"] == "uint8"

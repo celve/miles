@@ -3,6 +3,7 @@ import dataclasses
 from typing import Any
 
 from miles.backends.sglang_utils.sglang_api_client import SGLangApiClient
+from miles.diffusion.clip import save_clip
 from miles.diffusion.rollout.response import parse_rollout_response
 from miles.utils.http_utils import GeneralHttpClientProvider
 
@@ -107,7 +108,4 @@ class DiffusionApiClient(SGLangApiClient):
                 f"asked for {num_frames} frames of {width}x{height}, the engine generated {video.shape[1]} frames of "
                 f"{video.shape[3]}x{video.shape[2]}; pick a frame count and size the model takes as they are"
             )
-        # Deferred: imageio-ffmpeg comes with sglang's diffusion extra, which text-only runs need not install.
-        from miles.diffusion.clip import save_clip
-
         return await asyncio.to_thread(save_clip, video, fps=fps, output_dir=output_dir)

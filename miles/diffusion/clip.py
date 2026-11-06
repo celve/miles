@@ -4,7 +4,7 @@ import hashlib
 import os
 import tempfile
 
-import imageio_ffmpeg
+import av
 import torch
 
 
@@ -30,17 +30,9 @@ def _encode_mp4(video: torch.Tensor, *, fps: int, path: str) -> None:
     channels, _, height, width = video.shape
     if video.dtype != torch.uint8 or channels != 3:
         raise ValueError(f"expected a uint8 RGB clip [3, F, H, W], got {video.dtype} {tuple(video.shape)}")
-    frames = video.permute(1, 2, 3, 0).contiguous().numpy()
-    writer = imageio_ffmpeg.write_frames(
-        path,
-        size=(width, height),
-        fps=fps,
-        codec="libx264",
-        pix_fmt_out="yuv420p",
-        macro_block_size=1,
-        output_params=["-f", "mp4"],
-    )
-    writer.send(None)
-    for frame in frames:
-        writer.send(frame)
-    writer.close()
+    with av.open(path, mode="w", format="mp4") as container:
+        stream = container.add_stream("libx264", rate=fps)
+        stream.width, stream.height, stream.pix_fmt = width, height, "yuv420p"
+        for frame in video.permute(1, 2, 3, 0).contiguous().numpy():
+            container.mux(stream.encode(av.VideoFrame.from_ndarray(frame, format="rgb24")))
+        container.mux(stream.encode())
