@@ -1,9 +1,11 @@
 from typing import Any
 
 import pydantic
+import yaml
 from typing_extensions import Self
 
 from miles.backends.sglang_utils.sglang_config import rollout_slot_needs_offload
+from miles.utils.file_arg_utils import resolve_file_arg
 from miles.utils.pydantic_utils import FrozenStrictBaseModel
 
 
@@ -90,9 +92,33 @@ def compute_reward_pools(args) -> tuple[list[RewardPoolConfig], RewardScalingCon
 
 
 def _declare_reward_pools(args) -> list[RewardPoolConfig]:
+    pools = _declare_diffusion_reward_pools(args) + _read_reward_pool_config(args)
+    names = [pool.name for pool in pools]
+    assert len(names) == len(set(names)), f"reward pool names must be unique, got {names}"
+    return pools
+
+
+def _declare_diffusion_reward_pools(args) -> list[RewardPoolConfig]:
     if args.model_kind != "diffusion":
         return []
     # Local import: the diffusion package pulls in optional dependencies text runs never install.
     from miles.diffusion.rewards import declare_reward_pools
 
     return declare_reward_pools(args)
+
+
+def _read_reward_pool_config(args) -> list[RewardPoolConfig]:
+    if args.reward_pool_config is None:
+        return []
+    if args.cluster_backend != "ray" or args.worker_comm_backend == "rpc" or args.deploy_component != "all":
+        # As for diffusion pools: a split deployment would place reward GPUs in a release that holds no rollout view.
+        raise ValueError(
+            "--reward-pool-config needs one Ray deployment: --cluster-backend ray, a Ray --worker-comm-backend and "
+            "--deploy-component all"
+        )
+    entries = yaml.safe_load(resolve_file_arg(args.reward_pool_config)) or []
+    assert isinstance(entries, list), f"--reward-pool-config must hold a list of pools, got {type(entries).__name__}"
+    for entry in entries:
+        derived = {"num_gpus_per_node", "needs_offload"} & set(entry)
+        assert not derived, f"--reward-pool-config sets {sorted(derived)}, which Miles derives from the run"
+    return [RewardPoolConfig(**entry, num_gpus_per_node=args.num_gpus_per_node) for entry in entries]

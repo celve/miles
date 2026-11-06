@@ -22,7 +22,7 @@ class RewardWorker:
         self._device = device
         self._scorer = load_function(pool.scorer_path)(device=device, **pool.scorer_kwargs)
 
-    def score_batch(self, outputs: list, prompts: list[str]) -> list[float]:
+    def score_batch(self, outputs: list, prompts: list[str]) -> list[float | None]:
         return self._scorer.score_batch(outputs, prompts)
 
     def sleep(self) -> None:

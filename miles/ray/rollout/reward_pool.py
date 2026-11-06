@@ -48,8 +48,9 @@ class RewardPoolClient:
     def needs_offload(self) -> bool:
         return self._config.needs_offload
 
-    async def score(self, outputs: list, prompts: list[str]) -> list[float]:
-        """Scores in input order; each chunk of `batch_size` samples is one worker call."""
+    async def score(self, outputs: list, prompts: list[str]) -> list[float | None]:
+        """Scores in input order; each chunk of `batch_size` samples is one worker call. A scorer's None, for an
+        output it could not score, stays None so the missing-reward filter drops the sample's group."""
         size = self._config.batch_size
         chunks = [
             (outputs[start : start + size], prompts[start : start + size]) for start in range(0, len(outputs), size)
@@ -58,7 +59,7 @@ class RewardPoolClient:
         results = await asyncio.gather(
             *(self._call(worker, "score_batch", *chunk) for worker, chunk in zip(workers, chunks, strict=True))
         )
-        return [float(score) for chunk in results for score in chunk]
+        return [None if score is None else float(score) for chunk in results for score in chunk]
 
     async def sleep(self) -> None:
         await asyncio.gather(*(self._call(index, "sleep") for index in range(self._config.num_workers)))

@@ -526,7 +526,10 @@ class RolloutExecutor(DedicatedRpcLoopWorker):
 
         fn_args = _compute_rollout_function_config(self.args, self.args.eval_function_path)
         self._eval_fleet = RolloutExecutorEvalFleet(
-            fn_args, info=eval_fleet_info, inference_controller_provider=self._inference_controller_provider
+            fn_args,
+            info=eval_fleet_info,
+            inference_controller_provider=self._inference_controller_provider,
+            reward_pools=self._reward_pools,
         )
 
 
