@@ -2,7 +2,7 @@ import asyncio
 import logging
 import time
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, TypeVar
@@ -12,6 +12,7 @@ from miles.ray.rollout.debug_data import RolloutDataInjectionUtil, load_debug_ro
 from miles.ray.rollout.eval_fleet import EvalFleetInfo, RolloutExecutorEvalFleet
 from miles.ray.rollout.metrics import log_eval_rollout_data, log_eval_skip, log_rollout_data
 from miles.ray.rollout.output_snapshotter import _RolloutExecutorOutputSnapshotter
+from miles.ray.rollout.reward_pool import RewardPoolClient
 from miles.ray.rollout.rollout_data_conversion import postprocess_rollout_data
 from miles.ray.rollout.router_manager import resolve_router_addrs, wait_session_server_ready
 from miles.ray.rollout.train_data_conversion import (
@@ -80,6 +81,7 @@ class RolloutExecutor(DedicatedRpcLoopWorker):
         router_providers: Sequence[BaseWorkerProvider],
         session_server_provider: BaseWorkerProvider | None,
         inference_controller_provider: BaseWorkerProvider,
+        reward_pools: Mapping[str, RewardPoolClient] | None = None,
     ):
         self._init_once = InitOnce(type(self).__name__)
         self._disposed = False
@@ -95,6 +97,7 @@ class RolloutExecutor(DedicatedRpcLoopWorker):
         self._router_providers = router_providers
         self._session_server_provider = session_server_provider
         self._inference_controller_provider = inference_controller_provider
+        self._reward_pools = dict(reward_pools or {})
         self._output_snapshotter = _RolloutExecutorOutputSnapshotter(args=args)
         # Output store refs of each rollout's trained and dropped samples, deleted once it has trained.
         # Every rollout get() began is here until its release, so one left at dispose was never trained.
@@ -134,7 +137,9 @@ class RolloutExecutor(DedicatedRpcLoopWorker):
                 self.eval_generate_rollout = None
             else:
                 fn_args = _compute_rollout_function_config(args, self.args.rollout_function_path)
-                rollout_input = RolloutFnConstructorInput(args=fn_args, data_source=self.data_source)
+                rollout_input = RolloutFnConstructorInput(
+                    args=fn_args, data_source=self.data_source, reward_pools=self._reward_pools
+                )
                 self.generate_rollout = load_rollout_function(rollout_input, self.args.rollout_function_path)
                 if self.args.eval_function_path == self.args.rollout_function_path:
                     # Reuse the instance so train and eval share one state (and stateful
@@ -142,7 +147,9 @@ class RolloutExecutor(DedicatedRpcLoopWorker):
                     self.eval_generate_rollout = self.generate_rollout
                 else:
                     fn_args = _compute_rollout_function_config(args, self.args.eval_function_path)
-                    eval_input = RolloutFnConstructorInput(args=fn_args, data_source=self.data_source)
+                    eval_input = RolloutFnConstructorInput(
+                        args=fn_args, data_source=self.data_source, reward_pools=self._reward_pools
+                    )
                     self.eval_generate_rollout = load_rollout_function(eval_input, self.args.eval_function_path)
         else:
             self.generate_rollout = load_function(self.args.rollout_function_path)
@@ -161,6 +168,12 @@ class RolloutExecutor(DedicatedRpcLoopWorker):
         self._eval_fleet: RolloutExecutorEvalFleet | None = None
 
         self._metric_checker = MetricChecker.maybe_create(args)
+
+    async def offload_reward_pools(self) -> None:
+        await asyncio.gather(*(pool.sleep() for pool in self._reward_pools.values() if pool.needs_offload))
+
+    async def onload_reward_pools(self) -> None:
+        await asyncio.gather(*(pool.wake() for pool in self._reward_pools.values() if pool.needs_offload))
 
     async def get_init_state(self) -> str:
         return self._init_once.state.value

@@ -27,6 +27,7 @@ from miles.dashboard.args import validate_dashboard_args
 from miles.ray.specs.train import external_trainer_controller_addrs
 from miles.rollout.checkpoint_eval import is_checkpoint_eval_fn
 from miles.utils.args.configs.fault_tolerance import _DEFAULT_FT_API_SERVER_PORT
+from miles.utils.args.configs.reward_pool import compute_reward_pools
 from miles.utils.args.configs.router import RouterConfig
 from miles.utils.args.custom_function import add_user_provided_function_arguments, resolve_custom_function_configs
 from miles.utils.args.runtime import AllConfig
@@ -393,6 +394,7 @@ def parse_args_and_get_parser(
         raise ValueError("engine_kind diffusion server groups need --model-kind diffusion, which trains a DiT")
     raw_megatron = resolve_megatron_config(args, base_args=backend_values if backend == "megatron" else {})
     check_output_store_args(args, sglang=sglang, megatron=raw_megatron)
+    reward_pools, reward_scaling = compute_reward_pools(args)
     values = {name: value for name, value in vars(args).items() if name in AllConfig.model_fields} | {
         "raw_megatron": raw_megatron,
         "raw_fsdp": FsdpArgsNamespace(**backend_values) if backend == "fsdp" else None,
@@ -400,6 +402,8 @@ def parse_args_and_get_parser(
         "sglang": sglang,
         "sglang_scaling": sglang_scaling,
         "sglang_model_routers": None,
+        "reward_pools": reward_pools,
+        "reward_scaling": reward_scaling,
         "init_expected_num_cells": _compute_init_expected_num_cells(
             args, sglang=sglang, sglang_scaling=sglang_scaling
         ),

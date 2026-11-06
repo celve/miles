@@ -384,6 +384,25 @@ class TestCreatePlacementGroups:
         assert requested == [5]
         assert pgs["rollout"].pg_reordered_gpu_ids == [102, 103, 104]
 
+    @pytest.mark.parametrize("colocate,expected", [(True, 5), (False, 9)])
+    def test_reward_gpus_join_the_one_group_as_the_tail_of_the_rollout_view(self, monkeypatch, colocate, expected):
+        """Like eval GPUs, a GPU reward pool's bundles are appended to the shared group, never a group of their own."""
+        from miles.ray.placement_group import create_placement_groups
+        from miles.utils.args.configs.reward_pool import RewardPoolConfig, RewardScalingConfig
+
+        requested: list[int] = []
+        self._patched(monkeypatch, requested)
+        args = self._args(colocate=colocate, use_critic=False, actor_num_gpus_per_node=4, rollout_num_gpus=4)
+        pool = RewardPoolConfig(
+            name="pickscore", scorer_path="x.Y", num_workers=1, uses_gpu=True, batch_size=8, num_gpus_per_node=8
+        )
+        args.reward_scaling = RewardScalingConfig.resolve([pool], gpu_offset=4)
+
+        pgs = create_placement_groups(args)
+
+        assert requested == [expected]
+        assert len(pgs["rollout"].pg_reordered_gpu_ids) == 5
+
     def test_a_trainer_deployment_hands_the_rollout_entry_no_bundle(self, monkeypatch):
         """Its release installs no engine, so a rollout entry over the trainer's bundles would double-book them."""
         from miles.ray.placement_group import create_placement_groups

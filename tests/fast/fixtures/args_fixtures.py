@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from miles.backends.megatron_utils.megatron_config import resolve_megatron_config
 from miles.backends.sglang_utils.sglang_config import SglangConfig
+from miles.utils.args.configs.reward_pool import compute_reward_pools
 from miles.utils.args.configs.router import RouterConfig
 from miles.utils.args.runtime import AllConfig, TrainerConfig
 from miles.utils.arguments import _compute_init_expected_num_cells, get_miles_extra_args_provider, parse_args
@@ -79,6 +80,7 @@ def parser_defaults() -> dict[str, Any]:
 def resolve_parse_boundary_configs(args: Namespace) -> Namespace:
     args.raw_megatron = resolve_megatron_config(args, base_args={})
     args.sglang, args.sglang_scaling = SglangConfig.parse_args(args)
+    args.reward_pools, args.reward_scaling = compute_reward_pools(args)
     vars(args).update(RouterConfig.from_args(args))
     args.init_expected_num_cells = _compute_init_expected_num_cells(
         args, sglang=args.sglang, sglang_scaling=args.sglang_scaling

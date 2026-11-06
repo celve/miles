@@ -51,6 +51,8 @@ class FakeRolloutExecutor:
         self.report_eval_skip = FakeRemoteMethod(self._report_eval_skip)
         self.released: list[int] = []
         self.release = FakeRemoteMethod(self._release)
+        self.offload_reward_pools = FakeRemoteMethod(self._offload_reward_pools)
+        self.onload_reward_pools = FakeRemoteMethod(self._onload_reward_pools)
 
     async def _get(self, rollout_id: int) -> RolloutDataPack:
         self.events.append(f"generate_start:{rollout_id}")
@@ -71,6 +73,12 @@ class FakeRolloutExecutor:
 
     async def _release(self, rollout_id: int) -> None:
         self.released.append(rollout_id)
+
+    async def _offload_reward_pools(self) -> None:
+        self.events.append("offload_reward_pools")
+
+    async def _onload_reward_pools(self) -> None:
+        self.events.append("onload_reward_pools")
 
     async def dispose(self) -> None:
         if self._disposed:
