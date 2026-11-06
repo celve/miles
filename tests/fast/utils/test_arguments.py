@@ -255,6 +255,36 @@ EXTERNAL_ARGS = [
 ]
 
 
+class TestM2poValidation:
+    def _validated(self, extra, context_parallel_size=1):
+        parser = argparse.ArgumentParser()
+        get_miles_extra_args_provider()(parser)
+        args = parser.parse_args(extra + ["--num-rollout", "1"] + REQUIRED_ARGS)
+        args.context_parallel_size = context_parallel_size
+        miles_validate_args(args)
+        return args
+
+    def test_m2po_takes_the_papers_threshold_by_default(self):
+        assert self._validated(["--use-m2po", "--use-tis"]).m2po_tau == 0.04
+
+    @pytest.mark.parametrize(
+        ("extra", "message"),
+        [
+            (["--eps-clip-c", "3.0"], "drop --eps-clip-c"),
+            (["--advantage-estimator", "gspo"], "per sequence"),
+            (["--loss-type", "sft_loss"], "policy_loss only"),
+            (["--m2po-tau", "0"], "must be positive"),
+        ],
+    )
+    def test_m2po_refuses_what_it_would_silently_ignore(self, extra, message):
+        with pytest.raises(AssertionError, match=message):
+            self._validated(["--use-m2po", *extra])
+
+    def test_m2po_refuses_context_parallelism(self):
+        with pytest.raises(AssertionError, match="CP splits"):
+            self._validated(["--use-m2po", "--use-tis"], context_parallel_size=2)
+
+
 class TestMaxConsecutiveAbortedGroups:
     def _validated(self, extra):
         parser = argparse.ArgumentParser()
