@@ -180,3 +180,30 @@ def test_qwen35_and_qwen36_preserve_family_tool_argument_serialization(family, e
     assert f"<parameter=nothing>\n{expected_nothing}\n</parameter>" in rendered
     assert "<parameter=array>\n[1, 2]\n</parameter>" in rendered
     assert '<parameter=object>\n{"a": 1}\n</parameter>' in rendered
+
+
+@pytest.mark.parametrize(
+    "family", [TITOTokenizerType.QWEN35, TITOTokenizerType.QWEN36, TITOTokenizerType.QWEN38_SMALL]
+)
+def test_qwen_templates_render_video_url_parts_in_user_and_tool_turns(family):
+    template_path, kwargs = resolve_fixed_chat_template(family)
+    with open(template_path, encoding="utf-8") as template_file:
+        chat_template = template_file.read()
+    clip = {"type": "video_url", "video_url": {"url": "/media/clip.mp4"}}
+    rendered = apply_chat_template_from_str(
+        chat_template,
+        [
+            {"role": "user", "content": [{"type": "text", "text": "make a clip"}, clip]},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"type": "function", "function": {"name": "generate", "arguments": {"prompt": "a"}}}],
+            },
+            {"role": "tool", "content": [clip, {"type": "text", "text": "clip 1"}]},
+        ],
+        add_generation_prompt=True,
+        **kwargs,
+    )
+    video = "<|vision_start|><|video_pad|><|vision_end|>"
+    assert rendered.count(video) == 2
+    assert f"<tool_response>\n{video}clip 1\n</tool_response>" in rendered

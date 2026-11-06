@@ -31,6 +31,7 @@ from miles.rollout.session.token_space import engine_input_ids
 from miles.rollout.session.v2.core import SessionCoreV2
 from miles.rollout.session.v2.session_state import SessionRegistryV2
 from miles.utils.chat_template_utils import get_tito_tokenizer
+from miles.utils.media_refs import collect_media_refs
 from miles.utils.types import Sample
 
 MODEL = "Qwen/Qwen3.8-27B"
@@ -148,22 +149,23 @@ class TokenSpaceEngine:
         ]
         self.return_prompt = return_prompt
         self.bodies: list[dict] = []
-        self.pixel_values: list[torch.Tensor] = []
+        self.features: list[dict] = []  # the processor output of each request with media
         self.prompts: list[list[int]] = []  # the prompt each request ran
 
     async def do_proxy(self, request, path, *, body, headers):
         payload = json.loads(body)
         self.bodies.append(payload)
         prompt_ids = payload["input_ids"]
-        paths = _image_urls(payload["messages"])
-        if paths:
+        media = collect_media_refs(payload["messages"], None)
+        if media:
             output = await self.core.process(
-                image_data=paths,
+                image_data=media.get("images"),
+                video_data=media.get("videos"),
                 input_ids=prompt_ids,
                 mm_token_expansion_start_len=payload.get("mm_token_expansion_start_len", 0),
             )
             prompt_ids = output["input_ids"][0].tolist()
-            self.pixel_values.append(output["pixel_values"])
+            self.features.append(output)
         self.prompts.append(prompt_ids)
         choice = {
             "index": 0,
@@ -271,7 +273,7 @@ def test_images_flow_through_the_session_server_in_token_space(
     (train_inputs,) = compute_multimodal_train_inputs(
         engine_args, [sample.multimodal_inputs], [torch.tensor(sample.tokens)], device=torch.device("cpu")
     )
-    assert torch.equal(train_inputs["pixel_values"], engine.pixel_values[-1])
+    assert torch.equal(train_inputs["pixel_values"], engine.features[-1]["pixel_values"])
     assert train_inputs["image_grid_thw"].shape[0] == 2
 
 
