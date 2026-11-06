@@ -280,3 +280,43 @@ def validate_diffusion_sglang_config(sglang) -> None:
                 f"--model-kind diffusion serves regular single-GPU engine groups, got {group.worker_type.value} "
                 f"with {group.num_gpus_per_engine} GPUs per engine"
             )
+
+
+def validate_frozen_diffusion_models(sglang, args) -> None:
+    """A text run may serve diffusion models frozen, as tools, from regular engine groups on GPUs of their own."""
+    for index, model in enumerate(sglang.models):
+        kinds = {group.engine_kind for group in model.server_groups}
+        if "diffusion" not in kinds:
+            continue
+        unsupported = [
+            what
+            for what, violated in [
+                ("update_weights: true; a text run trains no diffusion model, so set update_weights: false",
+                 model.update_weights),
+                ("engine_kind text groups beside its diffusion groups", len(kinds) > 1),
+                # The first model's router is the run's default router, which the text rollout sends its requests to.
+                ("the first place in --sglang-config, whose router serves the text policy", index == 0),
+                ("a router other than --use-miles-router", not args.use_miles_router),
+                *(
+                    (f"a {group.worker_type.value} group; diffusion engines serve as regular", True)
+                    for group in model.server_groups
+                    if group.worker_type != WorkerType.REGULAR
+                ),
+                *(
+                    (f"engines of {group.num_gpus_per_engine} GPUs, beyond one node of {args.num_gpus_per_node}", True)
+                    for group in model.server_groups
+                    if group.num_gpus_per_engine > args.num_gpus_per_node
+                ),
+                *(
+                    ("GPUs shared with training, where the engines would have to sleep", True)
+                    for group in model.server_groups
+                    if group.needs_offload
+                ),
+            ]
+            if violated
+        ]
+        if unsupported:
+            raise ValueError(
+                f"model {model.name!r} serves engine_kind diffusion in a text run, which does not support: "
+                + "; ".join(unsupported)
+            )

@@ -390,8 +390,10 @@ def parse_args_and_get_parser(
         from miles.diffusion.arguments import validate_diffusion_sglang_config
 
         validate_diffusion_sglang_config(sglang)
-    elif any(group.engine_kind == "diffusion" for model in sglang.models for group in model.server_groups):
-        raise ValueError("engine_kind diffusion server groups need --model-kind diffusion, which trains a DiT")
+    else:
+        from miles.diffusion.arguments import validate_frozen_diffusion_models
+
+        validate_frozen_diffusion_models(sglang, args)
     raw_megatron = resolve_megatron_config(args, base_args=backend_values if backend == "megatron" else {})
     check_output_store_args(args, sglang=sglang, megatron=raw_megatron)
     reward_pools, reward_scaling = compute_reward_pools(args)

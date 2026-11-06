@@ -1,4 +1,4 @@
-"""Entry point of one sglang.multimodal_gen server process, pinned to its GPU before CUDA initializes."""
+"""Entry point of one sglang.multimodal_gen server process, pinned to its GPUs before CUDA initializes."""
 
 import argparse
 import dataclasses
@@ -11,10 +11,11 @@ _MILES_INJECTED_TEXT_ARGS = {"enable_memory_saver"}
 _PIPELINE_CONFIG_ARGS = {"dit_precision", "vae_precision", "flow_shift"}
 
 
-def _pin_gpu(base_gpu_id: int) -> None:
+def _pin_gpus(base_gpu_id: int, num_gpus: int) -> None:
+    gpu_ids = range(base_gpu_id, base_gpu_id + num_gpus)
     visible = os.environ.get("CUDA_VISIBLE_DEVICES")
-    physical = visible.split(",")[base_gpu_id] if visible else str(base_gpu_id)
-    os.environ["CUDA_VISIBLE_DEVICES"] = physical
+    physical = [visible.split(",")[gpu_id] for gpu_id in gpu_ids] if visible else [str(gpu_id) for gpu_id in gpu_ids]
+    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(physical)
 
 
 def main() -> None:
@@ -23,7 +24,7 @@ def main() -> None:
     parser.add_argument("--server-args", type=json.loads, required=True)
     cli = parser.parse_args()
 
-    _pin_gpu(cli.base_gpu_id)
+    _pin_gpus(cli.base_gpu_id, cli.server_args.get("num_gpus", 1))
 
     from sglang.multimodal_gen.runtime.launch_server import launch_server
     from sglang.multimodal_gen.runtime.server_args import ServerArgs
