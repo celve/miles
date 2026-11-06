@@ -12,6 +12,7 @@ import pytest
 import torch
 from fastapi import FastAPI, Request, Response
 from safetensors.torch import save
+from tests.fast.fixtures.args_fixtures import parse_fsdp_test_config
 
 from miles.diffusion import engine_main
 from miles.diffusion.api_client import DiffusionApiClient
@@ -20,7 +21,6 @@ from miles.router.config import MilesRouterConfig
 from miles.router.router import MilesRouter
 from miles.utils.http_utils import find_available_port
 from miles.utils.test_utils.uvicorn_thread_server import UvicornThreadServer
-from tests.fast.fixtures.args_fixtures import parse_fsdp_test_config
 
 _GENERATOR = {"worker_type": "regular", "num_gpus": 2, "num_gpus_per_engine": 2, "engine_kind": "diffusion"}
 
@@ -61,7 +61,12 @@ def test_a_text_run_serves_a_frozen_diffusion_model_beside_its_policy(tmp_path):
         (dict(generator_first=True), ("--use-miles-router",), "the first place"),
         (dict(), (), "--use-miles-router"),
         (
-            dict(generator_groups=({**_GENERATOR, "num_gpus": 1, "num_gpus_per_engine": 1}, {**_GENERATOR, "num_gpus": 1, "num_gpus_per_engine": 1, "engine_kind": "text"})),
+            dict(
+                generator_groups=(
+                    {**_GENERATOR, "num_gpus": 1, "num_gpus_per_engine": 1},
+                    {**_GENERATOR, "num_gpus": 1, "num_gpus_per_engine": 1, "engine_kind": "text"},
+                )
+            ),
             ("--use-miles-router",),
             "engine_kind text groups",
         ),

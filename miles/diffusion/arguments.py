@@ -291,8 +291,10 @@ def validate_frozen_diffusion_models(sglang, args) -> None:
         unsupported = [
             what
             for what, violated in [
-                ("update_weights: true; a text run trains no diffusion model, so set update_weights: false",
-                 model.update_weights),
+                (
+                    "update_weights: true; a text run trains no diffusion model, so set update_weights: false",
+                    model.update_weights,
+                ),
                 ("engine_kind text groups beside its diffusion groups", len(kinds) > 1),
                 # The first model's router is the run's default router, which the text rollout sends its requests to.
                 ("the first place in --sglang-config, whose router serves the text policy", index == 0),
