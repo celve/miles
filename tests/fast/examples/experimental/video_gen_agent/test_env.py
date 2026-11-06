@@ -40,6 +40,7 @@ def options(monkeypatch, tmp_path):
     _CountingGenerator.requests = []
     monkeypatch.setenv("AGENT_VIDEO_GEN_GENERATOR", f"{__name__}._CountingGenerator")
     monkeypatch.setenv("AGENT_VIDEO_GEN_FAKE_DIR", str(tmp_path / "clips"))
+    monkeypatch.setenv("AGENT_VIDEO_GEN_SUBMITTED_DIR", str(tmp_path / "kept"))
     (tmp_path / "clips").mkdir()
     return monkeypatch
 
@@ -93,9 +94,11 @@ async def test_generate_then_submit_records_the_clip_and_states_the_budget(optio
     ]
     (request,) = _CountingGenerator.requests
     assert request == ClipRequest("fox in snow", "blur", 7, 5.0, 832, 480, 16)
-    clip_path = str(Path(os.environ["AGENT_VIDEO_GEN_FAKE_DIR"]) / "1.mp4")
     video_gen = result["video_gen"]
-    assert video_gen["submitted"] == {"clip_id": "clip_1", "path": clip_path, "prompt": "fox in snow"}
+    submitted_path = Path(video_gen["submitted"].pop("path"))
+    assert video_gen["submitted"] == {"clip_id": "clip_1", "prompt": "fox in snow"}
+    assert submitted_path.parent == Path(os.environ["AGENT_VIDEO_GEN_SUBMITTED_DIR"])
+    assert submitted_path.read_bytes() == (Path(os.environ["AGENT_VIDEO_GEN_FAKE_DIR"]) / "1.mp4").read_bytes()
     assert video_gen["request"] == REQUEST and video_gen["turns"] == 2
     assert [c["clip_id"] for c in video_gen["clips"]] == ["clip_1"]
     assert result["agent_metrics"]["total_tool_time"] >= 0
@@ -150,6 +153,8 @@ async def test_bad_calls_are_answered_without_spending_a_generation(options):
             _call("generate", {"prompt": "x", "seconds": -1}),
             _call("render", {}),
             _call("submit", {}),
+            _call("submit", {"clip_id": []}),
+            _call("submit", {"clip_id": {"id": "clip_1"}}),
         ],
         [_call("generate", {"prompt": "x"})],
         [_call("submit", {"clip_id": "clip_1"})],
@@ -165,6 +170,8 @@ async def test_bad_calls_are_answered_without_spending_a_generation(options):
         "Error: seconds must be a positive number",
         "Error: unknown tool 'render'; the tools are generate and submit",
         "Error: unknown clip_id None; generated clips: none yet",
+        "Error: unknown clip_id []; generated clips: none yet",
+        "Error: unknown clip_id {'id': 'clip_1'}; generated clips: none yet",
     ]
     assert all(r.endswith("Generations left: 3. Turns left: 7.") for r in replies)
     assert len(_CountingGenerator.requests) == 1
@@ -214,7 +221,6 @@ async def test_clip_observations_return_the_clip_as_a_video_part(options):
 @pytest.mark.asyncio
 async def test_submitted_clip_is_copied_out_by_content_hash(options, tmp_path):
     kept = tmp_path / "kept"
-    options.setenv("AGENT_VIDEO_GEN_SUBMITTED_DIR", str(kept))
     _script(options, [_call("generate", {"prompt": "x"})], [_call("submit", {"clip_id": "clip_1"})])
 
     first = (await _run())["video_gen"]["submitted"]["path"]
@@ -228,15 +234,23 @@ async def test_submitted_clip_is_copied_out_by_content_hash(options, tmp_path):
 
 def test_options_come_from_the_environment(monkeypatch):
     monkeypatch.setenv("AGENT_VIDEO_GEN_GENERATOR", "some.generator")
+    monkeypatch.setenv("AGENT_VIDEO_GEN_SUBMITTED_DIR", "/kept")
     monkeypatch.setenv("AGENT_VIDEO_GEN_MAX_SECONDS", "2.5")
     monkeypatch.setenv("AGENT_VIDEO_GEN_FPS", "24")
     monkeypatch.setenv("AGENT_VIDEO_GEN_CLIP_OBSERVATIONS", "1")
 
     assert env.VideoGenEnvOptions.from_env() == env.VideoGenEnvOptions(
-        generator="some.generator", max_seconds=2.5, fps=24, clip_observations=True
+        generator="some.generator", submitted_dir="/kept", max_seconds=2.5, fps=24, clip_observations=True
     )
+    monkeypatch.setenv("AGENT_VIDEO_GEN_MAX_GENERATIONS", "4")
+    with pytest.raises(ValueError, match="MAX_GENERATIONS is at most 3, got 4"):
+        env.VideoGenEnvOptions.from_env()
     monkeypatch.setenv("AGENT_VIDEO_GEN_MAX_GENERATIONS", "0")
     with pytest.raises(ValueError, match="MAX_GENERATIONS must be positive"):
+        env.VideoGenEnvOptions.from_env()
+    monkeypatch.delenv("AGENT_VIDEO_GEN_MAX_GENERATIONS")
+    monkeypatch.delenv("AGENT_VIDEO_GEN_SUBMITTED_DIR")
+    with pytest.raises(ValueError, match="SUBMITTED_DIR must name"):
         env.VideoGenEnvOptions.from_env()
     monkeypatch.delenv("AGENT_VIDEO_GEN_GENERATOR")
     with pytest.raises(ValueError, match="GENERATOR must name"):

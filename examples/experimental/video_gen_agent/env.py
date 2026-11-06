@@ -10,14 +10,14 @@ kept sample, and ``examples.experimental.video_gen_agent.reward.reward_func`` sc
 Run-wide options come from ``AGENT_VIDEO_GEN_*`` env vars, which worker and sandbox modes forward by default:
 
   AGENT_VIDEO_GEN_GENERATOR        import path of a zero-argument callable returning a ``ClipGenerator`` (required)
-  AGENT_VIDEO_GEN_MAX_GENERATIONS  generations per episode (default 3)
+  AGENT_VIDEO_GEN_SUBMITTED_DIR    a durable dir submitted clips are copied to, out of the run media dir that
+                                   is deleted at run end (required)
+  AGENT_VIDEO_GEN_MAX_GENERATIONS  generations per episode, at most 3 (default 3)
   AGENT_VIDEO_GEN_MAX_TURNS        policy turns per episode (default 8)
   AGENT_VIDEO_GEN_MAX_SECONDS      longest clip in seconds; longer requests are cut to it (default 5)
   AGENT_VIDEO_GEN_WIDTH / _HEIGHT / _FPS  every clip's shape (default 832x480 at 16 fps)
   AGENT_VIDEO_GEN_TIMEOUT_S        a generation slower than this is an outage (default 600)
   AGENT_VIDEO_GEN_CLIP_OBSERVATIONS  1 to return each clip as a video_url part; needs video through TITO (default 0)
-  AGENT_VIDEO_GEN_SUBMITTED_DIR    a durable dir submitted clips are copied to, out of the run media dir that
-                                   is deleted at run end (default: not copied)
 """
 
 import asyncio
@@ -37,6 +37,7 @@ from miles.utils.function_registry import load_function
 from miles.utils.http_utils import post
 
 _ENV_PREFIX = "AGENT_VIDEO_GEN_"
+_GENERATIONS_LIMIT = 3
 
 TOOLS = [
     {
@@ -87,6 +88,12 @@ class VideoGenEnvOptions:
     def __post_init__(self) -> None:
         if not self.generator:
             raise ValueError(f"{_ENV_PREFIX}GENERATOR must name the clip generator's import path")
+        if not self.submitted_dir:
+            raise ValueError(f"{_ENV_PREFIX}SUBMITTED_DIR must name a durable dir for submitted clips")
+        if self.max_generations > _GENERATIONS_LIMIT:
+            raise ValueError(
+                f"{_ENV_PREFIX}MAX_GENERATIONS is at most {_GENERATIONS_LIMIT}, got {self.max_generations}"
+            )
         for name in ("max_generations", "max_turns", "max_seconds", "width", "height", "fps", "timeout_s"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{_ENV_PREFIX}{name.upper()} must be positive, got {getattr(self, name)}")
@@ -233,11 +240,12 @@ def _clip_request(
 
 
 def _submit(episode: _Episode, arguments: dict) -> str:
-    clip = episode.clips.get(arguments.get("clip_id"))
+    clip_id = arguments.get("clip_id")
+    clip = episode.clips.get(clip_id) if isinstance(clip_id, str) else None
     if clip is None:
         known = ", ".join(episode.clips) or "none yet"
-        return f"Error: unknown clip_id {arguments.get('clip_id')!r}; generated clips: {known}. {episode.budget()}"
-    path = _keep(clip.path, episode.options.submitted_dir) if episode.options.submitted_dir else clip.path
+        return f"Error: unknown clip_id {clip_id!r}; generated clips: {known}. {episode.budget()}"
+    path = _keep(clip.path, episode.options.submitted_dir)
     episode.submitted = {"clip_id": clip.clip_id, "path": path, "prompt": clip.request.prompt}
     return f"Submitted {clip.clip_id}."
 

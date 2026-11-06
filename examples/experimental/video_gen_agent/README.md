@@ -32,6 +32,8 @@ export AGENT_VIDEO_GEN_SUBMITTED_DIR=/root/shared_data/video_gen/submitted
 
 `make_requests.py` reads one request per line, such as VBench's `prompts/all_dimension.txt`, and splits them into `train.jsonl` and `heldout.jsonl` by a hash of each request, so the split is the same in every run.
 
+Score without `--group-rm`: under session v2 it hands the reward step a group of episodes, each a list of samples, which neither `reward.py` nor Miles' batched reward setter takes.
+
 The env reads its options from `AGENT_VIDEO_GEN_*` environment variables, listed in `env.py`. `--custom-agent-function-mode worker` and `sandbox` forward them by default; there, the generator's clip directory and the submitted-clip directory must be shared paths that the agent's host can reach.
 
 Clips go back to the planner as text only until video works through the session server. `AGENT_VIDEO_GEN_CLIP_OBSERVATIONS=1` adds each clip as a `video_url` part, which the session server rejects today.
