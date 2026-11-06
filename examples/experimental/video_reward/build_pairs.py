@@ -11,7 +11,8 @@ output directory gets `pairs.jsonl` and `derived/`, the clips made for the rewar
   reads text instead of watching.
 - `mismatch`: a clip against another request's clip, a plain text-alignment check.
 
-Every pair but `seed` has a known answer, `expected`: the honest clip. A and B are shuffled with a fixed seed.
+Every pair but `seed` has a known answer, `expected`: the honest clip. The pairs, and A and B within each, are
+shuffled with a fixed seed.
 """
 
 import argparse
@@ -58,6 +59,8 @@ def main() -> None:
     for item, other in _pair_up(requests, count=_NUM_MISMATCH, rng=rng):
         pairs.append(_pair("mismatch", item, f"{item['id']}_s1.mp4", f"{other['id']}_s0.mp4", honest=0))
 
+    # Shuffled before numbering, so neither a pair's id nor its place in the set tells a labeller its kind.
+    rng.shuffle(pairs)
     with (args.out / "pairs.jsonl").open("w") as file:
         for index, pair in enumerate(pairs):
             if rng.random() < 0.5:

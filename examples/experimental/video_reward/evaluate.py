@@ -74,7 +74,7 @@ def _key(request_id: str, clip: str) -> str:
 def _report(pairs: list[dict], labels: dict, cache: dict) -> str:
     known_kinds = " | ".join(f"{kind} (known)" for kind in _KINDS[1:])
     rows = [f"| scorer | human agreement | {known_kinds} | s/clip p50 | s/clip p90 | load s |"]
-    rows.append("|" + " --- |" * (len(_KINDS) + 5))
+    rows.append("|" + " --- |" * (len(_KINDS) + 4))
     for name, result in cache.items():
         scores = result["scores"]
         human = [(pair, labels[pair["pair_id"]]) for pair in pairs if labels.get(pair["pair_id"]) in ("A", "B")]
