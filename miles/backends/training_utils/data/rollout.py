@@ -8,6 +8,10 @@ import torch.nn.functional as F
 
 from miles.backends.training_utils.data.context_parallel import slice_log_prob_with_cp, slice_with_cp
 from miles.backends.training_utils.data.multimodal import expand_multimodal_rollout_data_in_place
+from miles.backends.training_utils.data.token_space_media_process import (
+    RolloutEngineProcessorArgs,
+    compute_multimodal_train_inputs,
+)
 from miles.backends.training_utils.parallel import get_parallel_state
 from miles.platforms import current_platform
 from miles.utils.audit_utils.witness.allocator import WitnessInfo
@@ -29,6 +33,14 @@ def _rollout_logprob_dtype(args: Namespace) -> torch.dtype:
         if args.backend.fp16:
             return torch.float16
     return torch.float32
+
+
+def _media_dtype(args: Namespace) -> torch.dtype | None:
+    if args.backend.fp16:
+        return torch.float16
+    if args.backend.bf16:
+        return torch.bfloat16
+    return None
 
 
 def get_rollout_data(
@@ -68,7 +80,15 @@ def get_rollout_data(
             for t, sid in zip(rollout_data["tokens"], seq_witness_ids, strict=True)
         ]
 
-    if "multimodal_train_inputs" in rollout_data:
+    if "multimodal_inputs" in rollout_data:
+        rollout_data["multimodal_train_inputs"] = compute_multimodal_train_inputs(
+            RolloutEngineProcessorArgs.from_sglang_config(args.sglang),
+            rollout_data.pop("multimodal_inputs"),
+            rollout_data["tokens"],
+            device=current_platform.current_device(),
+            dtype=_media_dtype(args),
+        )
+    elif "multimodal_train_inputs" in rollout_data:
         # Move multimodal training tensors to the device in advance
         rollout_data["multimodal_train_inputs"] = [
             (

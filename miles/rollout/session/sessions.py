@@ -43,6 +43,7 @@ from miles.rollout.session.anthropic_adapter import _validate_anthropic_features
 from miles.rollout.session.config import SessionServerConfig
 from miles.rollout.session.core import JSON_MEDIA_TYPE, SessionCore, _render_json
 from miles.rollout.session.errors import SessionError
+from miles.rollout.session.image_expansion import build_image_token_counter
 from miles.rollout.session.linear_trajectory import SessionRegistry
 from miles.rollout.session.types import CreateSessionRequest
 from miles.utils.chat_template_utils import get_tito_tokenizer
@@ -83,6 +84,7 @@ def setup_session_routes(app, backend, config: SessionServerConfig, *, use_addit
         else connect_output_store(config.output_store_backend_config)
     )
 
+    image_token_counter = build_image_token_counter(config, tokenizer)
     use_v2 = config.use_session_server == "v2"
     if use_v2:
         from miles.rollout.session.v2.core import SessionCoreV2
@@ -96,6 +98,7 @@ def setup_session_routes(app, backend, config: SessionServerConfig, *, use_addit
             config.instance_id,
             use_addition_r3=use_addition_r3,
             output_store=output_store,
+            image_token_counter=image_token_counter,
         )
     else:
         registry = SessionRegistry(tokenizer, tito_tokenizer=tito_tokenizer, message_matcher=message_matcher)
@@ -106,6 +109,7 @@ def setup_session_routes(app, backend, config: SessionServerConfig, *, use_addit
             config.instance_id,
             use_addition_r3=use_addition_r3,
             output_store=output_store,
+            image_token_counter=image_token_counter,
         )
 
     @app.exception_handler(SessionError)

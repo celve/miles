@@ -36,11 +36,12 @@ _ARGS_TO_CONFIG_FIELD = {
     "rollout_top_logprobs_num": "rollout_top_logprobs_num",
     "rollout_sampling_logprobs_mode": "rollout_sampling_logprobs_mode",
     "rollout_temperature": "rollout_temperature",
+    "multimodal_token_space_processing": "multimodal_token_space_processing",
 }
 
 _CALL_SITE_FIELDS = ("host", "port", "instance_id", "backend_url")
 # Derived from several args, tested on their own below.
-_DERIVED_FIELDS = ("output_store_backend_config",)
+_DERIVED_FIELDS = ("output_store_backend_config", "run_media_dir")
 _ROUTER_DERIVED_FIELDS = ("routing_key_header",)
 
 _DISTINCT_ARGS_VALUES = dict(
@@ -68,6 +69,9 @@ _DISTINCT_ARGS_VALUES = dict(
     rollout_top_logprobs_num=32,
     rollout_sampling_logprobs_mode="support",
     rollout_temperature=0.7,
+    multimodal_token_space_processing=True,
+    shared_media_dir="/fake/media",
+    run_uuid="fakerun",
     use_output_store=False,
     **sglang_router_args("manual"),
 )
@@ -124,6 +128,18 @@ class TestComputeSessionServerConfig:
             backend_url="http://10.0.0.2:3000",
         )
         assert config.use_session_server is flag_value
+
+    def test_session_media_go_under_this_runs_directory(self):
+        config = compute_session_server_config(
+            _make_args(), host="10.0.0.1", port=5001, instance_id="abc", backend_url="http://10.0.0.2:3000"
+        )
+        assert config.run_media_dir == "/fake/media/fakerun"
+
+    def test_no_shared_media_dir_means_no_session_media_dir(self):
+        config = compute_session_server_config(
+            _make_args(shared_media_dir=None), host="10.0.0.1", port=5001, instance_id="abc", backend_url="http://x"
+        )
+        assert config.run_media_dir is None
 
     def test_the_output_store_config_deletes_only_and_leaves_the_host_to_the_server(self):
         store_args = dict(
@@ -206,6 +222,8 @@ _COMPLETE_CONFIG_KWARGS = dict(
     rollout_sampling_logprobs_mode="selected",
     rollout_temperature=1.0,
     output_store_backend_config=None,
+    multimodal_token_space_processing=False,
+    run_media_dir=None,
 )
 
 

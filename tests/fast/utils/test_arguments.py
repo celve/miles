@@ -14,18 +14,22 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from tests.fast.fixtures.args_fixtures import parse_megatron_test_config
+from tests.fast.fixtures.args_fixtures import parse_fsdp_test_config, parse_megatron_test_config
 from tests.fast.fixtures.megatron_config_fixtures import encode_megatron_config, write_megatron_config_trainers
+from tests.fast.fixtures.sglang_config_fixtures import make_sglang_config
 
 from miles.backends.fsdp_utils.arguments import build_fsdp_parser
 from miles.backends.megatron_utils.megatron_config import MegatronConfig, get_megatron_arg_parser
 from miles.backends.sglang_utils.arguments import add_sglang_arguments, collect_eval_sglang_overrides
 from miles.backends.sglang_utils.arguments import validate_args as validate_sglang_args
+from miles.backends.sglang_utils.sglang_api_client import WorkerType
+from miles.backends.sglang_utils.sglang_config import ModelConfig, ServerGroupConfig, SglangConfig
 from miles.backends.torchtitan_utils.arguments import build_torchtitan_parser
 from miles.utils.args.configs.router import RouterConfig
 from miles.utils.args.trainer_utils import compute_trainer_ckpt_load_config
 from miles.utils.arguments import (
     FULLY_ASYNC_ROLLOUT_PATH,
+    _check_multimodal_token_space_processing_args,
     _compute_custom_inference_engine_provider_path,
     _compute_rollout_external,
     _maybe_apply_dumper_overrides,
@@ -3986,3 +3990,107 @@ def test_native_backends_own_the_mtp_detach_heads_argument(
     assert native_args is not None
     assert native_args.mtp_detach_heads is detach_heads
     assert "mtp_detach_heads" not in args.model_fields
+
+
+class TestMultimodalTokenSpaceProcessingArgs:
+    """The trainer rebuilds the rollout engines' media features, so it must reject settings it cannot follow."""
+
+    _SUPPORTED = {
+        "enable_token_space_processor": True,
+        "rl_on_policy_target": None,
+        "true_on_policy_contract": None,
+        "decrypted_config_file": None,
+        "model_path": "/ckpt",
+        "tokenizer_path": None,
+        "tokenizer_mode": "auto",
+        "tokenizer_backend": "huggingface",
+        "revision": None,
+        "model_config_parser": "auto",
+        "json_model_override_args": "{}",
+        "image_processor_backend": "auto",
+        "disable_fast_image_processor": False,
+        "mm_process_config": None,
+    }
+
+    @staticmethod
+    def _args(**overrides):
+        args = SimpleNamespace(
+            **{
+                "multimodal_token_space_processing": True,
+                "rollout_external_engine_addrs": None,
+                "custom_inference_engine_provider_path": None,
+                "use_session_server": False,
+                "use_miles_router": False,
+                **overrides,
+            }
+        )
+        args.rollout_external = _compute_rollout_external(args)
+        return args
+
+    @pytest.mark.parametrize(
+        ("engine_overrides", "external_engines", "match"),
+        [
+            ({"enable_token_space_processor": False}, None, "--sglang-enable-token-space-processor"),
+            ({}, ["10.0.0.1:30000"], "external engines"),
+            ({"rl_on_policy_target": "fsdp"}, None, "--sglang-rl-on-policy-target"),
+            ({"true_on_policy_contract": "qwen3_dense_v1"}, None, "--sglang-true-on-policy-contract"),
+            ({"decrypted_config_file": "/ckpt/override.json"}, None, "--sglang-decrypted-config-file"),
+        ],
+    )
+    def test_settings_the_trainer_cannot_follow_are_rejected(self, engine_overrides, external_engines, match):
+        args = self._args(rollout_external_engine_addrs=external_engines)
+        sglang = make_sglang_config(**{**self._SUPPORTED, **engine_overrides})
+
+        with pytest.raises(ValueError, match=match):
+            _check_multimodal_token_space_processing_args(args, sglang=sglang)
+
+    def test_supported_settings_pass(self):
+        _check_multimodal_token_space_processing_args(self._args(), sglang=make_sglang_config(**self._SUPPORTED))
+
+    @pytest.mark.parametrize("use_session_server", [True, "v2"])
+    def test_the_session_server_without_the_miles_router_is_rejected(self, use_session_server):
+        args = self._args(use_session_server=use_session_server)
+
+        with pytest.raises(ValueError, match="needs --use-miles-router"):
+            _check_multimodal_token_space_processing_args(args, sglang=make_sglang_config(**self._SUPPORTED))
+
+    def test_the_session_server_with_the_miles_router_passes(self):
+        args = self._args(use_session_server="v2", use_miles_router=True)
+        _check_multimodal_token_space_processing_args(args, sglang=make_sglang_config(**self._SUPPORTED))
+
+    def test_a_launch_on_miles_own_engines_parses(self):
+        config = parse_fsdp_test_config(
+            "--hf-checkpoint",
+            "Qwen/Qwen3-VL-2B-Instruct",
+            "--rollout-num-gpus",
+            "1",
+            "--multimodal-token-space-processing",
+            "--sglang-enable-token-space-processor",
+            "--use-session-server",
+            "v2",
+            "--use-miles-router",
+        )
+        assert config.multimodal_token_space_processing
+
+    def test_a_custom_inference_engine_provider_is_rejected(self):
+        args = self._args(custom_inference_engine_provider_path="my.provider.fn")
+
+        with pytest.raises(ValueError, match="external engines"):
+            _check_multimodal_token_space_processing_args(args, sglang=make_sglang_config(**self._SUPPORTED))
+
+    @pytest.mark.parametrize(
+        "group_override",
+        [{"mm_process_config": {"image": {"do_rescale": False}}}, {"image_processor_backend": "pil"}],
+    )
+    def test_engine_groups_that_disagree_on_the_processor_are_rejected(self, group_override):
+        groups = [
+            ServerGroupConfig(worker_type=WorkerType.REGULAR, num_gpus_per_engine=1, needs_offload=False),
+            ServerGroupConfig(
+                worker_type=WorkerType.REGULAR, num_gpus_per_engine=1, needs_offload=False, overrides=group_override
+            ),
+        ]
+        model = ModelConfig(name="default", model_path=None, server_groups=groups, update_weights=True)
+        sglang = SglangConfig(models=[model], base_args=self._SUPPORTED)
+
+        with pytest.raises(ValueError, match=f"same processor settings: Field '{next(iter(group_override))}'"):
+            _check_multimodal_token_space_processing_args(self._args(), sglang=sglang)

@@ -84,6 +84,26 @@ def normalize_tool_arguments(messages: list[dict], format: Literal["dict", "json
     return normalized
 
 
+def _video_parts_as_sglang_renders(messages: list[dict]) -> list[dict]:
+    """*messages* with each ``video_url`` part as ``{"type": "video"}``.
+
+    SGLang's chat route rewrites them so before rendering (``process_content_for_template_format``),
+    and the Qwen templates match only ``video``.
+    """
+    return [
+        (
+            {**msg, "content": [_template_part(part) for part in msg["content"]]}
+            if isinstance(msg.get("content"), list)
+            else msg
+        )
+        for msg in messages
+    ]
+
+
+def _template_part(part):
+    return {"type": "video"} if isinstance(part, dict) and part.get("type") == "video_url" else part
+
+
 # Building the adapter generates its schema; every turn canonicalizes tools, so build it once.
 _TOOLS_ADAPTER = TypeAdapter(list[Tool])
 
@@ -130,7 +150,7 @@ def apply_chat_template_from_str(
         )
         return rendered[0]
 
-    messages = normalize_tool_arguments(messages, "dict")
+    messages = _video_parts_as_sglang_renders(normalize_tool_arguments(messages, "dict"))
     tool_defs = extract_tool_dicts(tools)
     try:
         return _render(tool_defs)
@@ -181,7 +201,7 @@ def apply_chat_template(
             **kwargs,
         )
 
-    messages = normalize_tool_arguments(messages, "dict")
+    messages = _video_parts_as_sglang_renders(normalize_tool_arguments(messages, "dict"))
     tool_defs = extract_tool_dicts(tools)
     render_kwargs = dict(add_generation_prompt=add_generation_prompt, **kwargs)
 

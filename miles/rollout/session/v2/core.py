@@ -49,6 +49,7 @@ class SessionCoreV2(SessionCore):
         *,
         use_addition_r3=False,
         output_store=None,
+        image_token_counter=None,
     ):
         super().__init__(
             backend,
@@ -57,6 +58,7 @@ class SessionCoreV2(SessionCore):
             session_server_instance_id,
             use_addition_r3=use_addition_r3,
             output_store=output_store,
+            image_token_counter=image_token_counter,
         )
         # Import-path only in production: function_registry is process-local.
         self.sample_picker = load_function(config.session_sample_picker_path, sync_required=True)
@@ -204,7 +206,7 @@ class SessionCoreV2(SessionCore):
             if session.closing:
                 raise SessionNotFoundError(f"session not found: session_id={session_id}")
 
-            client_args = parse_chat_request(body)
+            client_args = self._store_message_media(parse_chat_request(body))
             prepared, attach_parent = prepare_token_ids_and_request_args(
                 session,
                 client_args,
@@ -218,8 +220,11 @@ class SessionCoreV2(SessionCore):
             prompt_token_ids = request_body["input_ids"]
             logger.debug("Using TITO input_ids: %d tokens", len(prompt_token_ids))
 
-            checkpoint_token_ids = attach_parent.token_ids if attach_parent is not None else []
-            self._maybe_request_addition_r3(request_body, checkpoint_token_ids, prompt_token_ids)
+            self._prepare_engine_request(
+                request_body,
+                checkpoint_token_ids=attach_parent.token_ids if attach_parent is not None else [],
+                checkpoint_record=attach_parent.record if attach_parent is not None else None,
+            )
             _add_session_extra_key(request_body, session)
 
             # orjson: the body carries the whole prompt's input_ids on every turn.
@@ -239,6 +244,7 @@ class SessionCoreV2(SessionCore):
             return proxy_result_to_response(result)
 
         response, choice, assistant_message, completion_token_ids = extract_completion(result)
+        self._check_engine_prompt(request_body, choice)
         assistant_message = tito_tokenizer.postprocess_completion(
             choice=choice,
             assistant_message=assistant_message,

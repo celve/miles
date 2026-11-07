@@ -16,8 +16,17 @@ stateless `/generate` interface.
 
 <Warning>
 
-**No VLM support yet.** Currently the TITO session path cannot carry image or video inputs. For vision-language models, use the
-[Generate Endpoint](/user-guide/generate-endpoint) path instead.
+**Media need `--multimodal-token-space-processing` and `--use-miles-router`.** With them, a chat request may carry images, audio or video
+parts (data URLs or shared paths). The server writes each item once under the run's directory in
+`--shared-media-dir`, which is removed when the run ends, named by content, and stores the path in the session.
+TITO renders one placeholder per item. Each turn sends the stored turns as the
+expanded IDs SGLang returned for them, sets `mm_token_expansion_start_len` to their length, and SGLang expands the
+placeholders after it. The collected sample carries the expanded tokens and the media paths
+(`multimodal_inputs`); the trainer rebuilds the processor inputs from them. Without the flag, a request with
+media is refused with a 400. With `--tito-model qwen3_vl`, the server counts each new image's tokens and refuses a
+turn whose expanded prompt differs from its own expansion. The retry picker compares the prompts' media as well as
+their tokens. Needs an SGLang whose chat endpoint keeps the message media of an `input_ids`
+request at `mm_token_expansion_start_len` 0.
 
 </Warning>
 
@@ -215,6 +224,7 @@ but treat it as best-effort until it passes the checks below.
 | Qwen3.8-27B | `qwen38small` |
 | Qwen3.8-Flash-Next | `qwen4exp` |
 | Qwen3-Thinking-2507 / Qwen3-Next | `qwennext` |
+| Qwen3-VL Instruct | `qwen3_vl` |
 | GLM-4.7 / 5 / 5.2 | `glm47` |
 | GLM-5.3 / GLM-5.3-Flash (text sessions) | `glm53` |
 | NVIDIA Nemotron 3 Nano / Super / Ultra | `nemotron3` |

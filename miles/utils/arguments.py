@@ -23,6 +23,7 @@ from miles.backends.sglang_utils.arguments import validate_args as sglang_valida
 from miles.backends.sglang_utils.sglang_config import SglangConfig
 from miles.backends.sglang_utils.sglang_scaling_config import SglangScalingConfig
 from miles.backends.torchtitan_utils.args_namespace import TorchtitanArgsNamespace
+from miles.backends.training_utils.data.token_space_media_process import RolloutEngineProcessorArgs
 from miles.dashboard.args import validate_dashboard_args
 from miles.ray.specs.train import external_trainer_controller_addrs
 from miles.rollout.checkpoint_eval import is_checkpoint_eval_fn
@@ -392,6 +393,7 @@ def parse_args_and_get_parser(
         validate_diffusion_sglang_config(sglang)
     raw_megatron = resolve_megatron_config(args, base_args=backend_values if backend == "megatron" else {})
     check_output_store_args(args, sglang=sglang, megatron=raw_megatron)
+    _check_multimodal_token_space_processing_args(args, sglang=sglang)
     reward_pools, reward_scaling = compute_reward_pools(args)
     values = {name: value for name, value in vars(args).items() if name in AllConfig.model_fields} | {
         "raw_megatron": raw_megatron,
@@ -863,6 +865,41 @@ def _resolve_sample_ownership_check(args: argparse.Namespace) -> None:
             "--enable-sample-ownership-checker needs an event directory: "
             "pass --save-debug-event-data, --save, or --dump-details"
         )
+
+
+def _check_multimodal_token_space_processing_args(args, *, sglang: SglangConfig) -> None:
+    """Reject launch settings under which the trainer cannot rebuild the rollout engines' media features."""
+    if not args.multimodal_token_space_processing:
+        return
+    if not sglang.common_value("enable_token_space_processor"):
+        raise ValueError(
+            "--multimodal-token-space-processing needs the SGLang engines to expand media placeholders in token "
+            "space; set --sglang-enable-token-space-processor."
+        )
+    # Read once resolved: by now custom_inference_engine_provider_path also names Miles' own engine provider.
+    if args.rollout_external:
+        raise ValueError(
+            "--multimodal-token-space-processing builds the trainer's processor from the server args Miles "
+            "launches its engines with, which external engines do not share."
+        )
+    if args.use_session_server and not args.use_miles_router:
+        raise ValueError(
+            "--multimodal-token-space-processing with --use-session-server needs --use-miles-router: the SGLang "
+            "router's chat route drops mm_token_expansion_start_len, which every turn after the first needs."
+        )
+    for name in ("rl_on_policy_target", "true_on_policy_contract", "decrypted_config_file"):
+        if sglang.common_value(name) is not None:
+            raise ValueError(
+                f"--multimodal-token-space-processing does not support --sglang-{name.replace('_', '-')}: the "
+                "trainer cannot yet build its processor the way the engines then do."
+            )
+    try:
+        RolloutEngineProcessorArgs.from_sglang_config(sglang)
+    except AssertionError as error:
+        raise ValueError(
+            "--multimodal-token-space-processing builds one trainer processor for every rollout engine, so the "
+            f"engine groups must launch with the same processor settings: {error}"
+        ) from error
 
 
 def miles_validate_args(args):
