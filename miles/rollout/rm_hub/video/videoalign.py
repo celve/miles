@@ -16,7 +16,7 @@ from torchvision.transforms import functional as F
 from transformers import AutoProcessor
 from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VLModel
 
-from miles.rollout.rm_hub.video.clip import Clip, read_clip
+from miles.rollout.rm_hub.video.clip import Clip, score_clips
 from miles.utils.hf_utils.config import load_hf_config
 
 HEADS = ("VQ", "MQ", "TA")
@@ -116,12 +116,9 @@ class VideoAlignScorer:
         self.device = device
 
     def score_batch(self, outputs: list[str], prompts: list[str]) -> list[float | None]:
-        return [self._score(path, request) for path, request in zip(outputs, prompts, strict=True)]
+        return score_clips(outputs, prompts, self._score)
 
-    @torch.no_grad()
-    def _score(self, path: str, request: str) -> float | None:
-        if (clip := read_clip(path)) is None:
-            return None
+    def _score(self, clip: Clip, request: str) -> float:
         heads = self.reward_heads(clip, request)
         return sum(heads[head] for head in self.heads)
 

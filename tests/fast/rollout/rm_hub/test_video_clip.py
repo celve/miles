@@ -3,6 +3,7 @@ import pytest
 
 av = pytest.importorskip("av")
 
+from miles.rollout.rm_hub.video import pickscore  # noqa: E402
 from miles.rollout.rm_hub.video.clip import read_clip  # noqa: E402
 
 
@@ -23,6 +24,29 @@ def test_a_clip_reads_as_every_frame_with_its_fps(tmp_path):
 
     assert clip.frames.shape == (6, 3, 48, 64) and clip.fps == 8.0
     assert clip.frames[0].float().mean() < clip.frames[-1].float().mean()
+
+
+class _FailingPickScore:
+    """Stands in for the CLIP model: raises, as an out-of-memory forward would, for the request `boom`."""
+
+    def __init__(self, **_kwargs):
+        pass
+
+    def __call__(self, prompts, images):
+        if "boom" in prompts:
+            raise RuntimeError("CUDA out of memory")
+        return [float(len(images))] * len(images)
+
+
+def test_a_clip_whose_scoring_raises_scores_none_and_the_others_keep_their_scores(tmp_path, monkeypatch):
+    _write_clip(tmp_path / "clip.mp4", num_frames=6)
+    monkeypatch.setattr(pickscore, "PickScoreScorer", _FailingPickScore)
+    scorer = pickscore.VideoPickScoreScorer(device=None, processor_path="", model_path="", num_frames=4)
+    clip = str(tmp_path / "clip.mp4")
+
+    scores = scorer.score_batch([clip, clip, str(tmp_path / "missing.mp4")], ["a dog", "boom", "a cat"])
+
+    assert scores == [4.0, None, None]
 
 
 @pytest.mark.parametrize("content", [None, b"not a video"])

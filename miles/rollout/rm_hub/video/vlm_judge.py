@@ -11,7 +11,7 @@ from transformers import AutoModelForImageTextToText, AutoProcessor
 from transformers.video_utils import VideoMetadata
 
 from miles.diffusion.rollout.pickscore import sample_frame_indices
-from miles.rollout.rm_hub.video.clip import Clip, read_clip
+from miles.rollout.rm_hub.video.clip import Clip, score_clips
 
 _DIGITS = ("1", "2", "3", "4", "5")
 _QUESTION = """You are judging a video that a model generated for this request:
@@ -65,12 +65,10 @@ class VlmJudgeScorer:
         self.device = device
 
     def score_batch(self, outputs: list[str], prompts: list[str]) -> list[float | None]:
-        return [self._score(path, request) for path, request in zip(outputs, prompts, strict=True)]
+        return score_clips(outputs, prompts, self._score)
 
     @torch.no_grad()
-    def _score(self, path: str, request: str) -> float | None:
-        if (clip := read_clip(path)) is None:
-            return None
+    def _score(self, clip: Clip, request: str) -> float:
         frames, metadata = self._sample(clip)
         axes = list(self.axis_weights)
         texts = [

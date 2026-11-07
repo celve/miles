@@ -1,6 +1,7 @@
 """Clips read from the file a video generator wrote."""
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import av
@@ -31,3 +32,21 @@ def read_clip(path: str) -> Clip | None:
         logger.warning(f"The clip {path} has {len(frames)} frames at {fps} fps; it scores None")
         return None
     return Clip(frames=torch.from_numpy(np.stack(frames)).permute(0, 3, 1, 2), fps=fps)
+
+
+def score_clips(
+    paths: list[str], requests: list[str], score_clip: Callable[[Clip, str], float]
+) -> list[float | None]:
+    """`score_clip(clip, request)` for each clip, one at a time, so a clip that cannot be read or whose scoring
+    raises scores None while the others keep their scores."""
+    scores = []
+    for path, request in zip(paths, requests, strict=True):
+        if (clip := read_clip(path)) is None:
+            scores.append(None)
+            continue
+        try:
+            scores.append(float(score_clip(clip, request)))
+        except Exception:
+            logger.warning(f"Scoring the clip {path} failed; it scores None", exc_info=True)
+            scores.append(None)
+    return scores
