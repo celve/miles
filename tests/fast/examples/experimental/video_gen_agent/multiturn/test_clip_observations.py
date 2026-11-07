@@ -137,9 +137,9 @@ def test_a_generated_clip_is_observed_in_token_space_and_reaches_the_trainers_sa
     first, second = engine.bodies
     assert collect_media_refs(first["messages"], None) is None
     tool_reply = second["messages"][-1]
-    assert tool_reply["role"] == "tool" and {"type": "video_url", "video_url": {"url": f"file://{clip}"}} in (
-        tool_reply["content"]
-    )
+    # The session server hands the engine the clip as its resolved shared path.
+    assert tool_reply["role"] == "tool"
+    assert {"type": "video_url", "video_url": {"url": str(Path(clip).resolve())}} in tool_reply["content"]
     start = second["mm_token_expansion_start_len"]
     assert second["input_ids"][start:].count(pad_id) == 1 and engine.prompts[1][start:].count(pad_id) > 1
     (sample,) = _samples(core, session_id, "v2")
