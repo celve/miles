@@ -95,6 +95,7 @@ def _train_args(args: ScriptArgs) -> str:
         f"--rollout-batch-size {args.rollout_batch_size} "
         f"--n-samples-per-prompt {args.n_samples_per_prompt} "
         "--rollout-max-response-len 320 "
+        "--rollout-skip-special-tokens "
         "--rollout-temperature 1 "
         f"--global-batch-size {args.rollout_batch_size * args.n_samples_per_prompt} "
         "--balance-data "
@@ -107,6 +108,9 @@ def _train_args(args: ScriptArgs) -> str:
         "--video-reward-pool judge "
         "--video-generator-model generator "
         f"--video-clip-dir {args.run_dir}/clips "
+        # FastWan's distilled schedule, as item 1's benchmark ran it (LIN-2735): 832x480, 49 frames at 24 fps.
+        "--video-num-frames 49 --video-fps 24 --video-width 832 --video-height 480 "
+        "--video-num-inference-steps 3 --video-guidance-scale 1.0 "
         f"--custom-rollout-log-function-path {PHASE0}.reward.log_rollout_data "
     )
 
@@ -152,7 +156,6 @@ def _train_args(args: ScriptArgs) -> str:
 
 
 def _sglang_config(args: ScriptArgs) -> dict:
-    # Clip settings are item 1's benchmark ones (LIN-2735): 832x480, 49 frames at 24 fps, 3 steps without CFG.
     generator_group = {
         "worker_type": "regular",
         "num_gpus": args.generator_gpus,
