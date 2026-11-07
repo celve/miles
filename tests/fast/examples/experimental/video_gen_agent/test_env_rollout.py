@@ -1,11 +1,13 @@
 """The video-generation env in a real rollout: miles router, v2 session server, a scripted mock engine, the fake
-generator and the stub scorer."""
+generator and a stub pool."""
 
 import json
+import os
 from pathlib import Path
 
 import pytest
-from examples.experimental.video_gen_agent.reward import stub_score
+from examples.experimental.video_gen_agent.multiturn.generator import URL_ENV
+from examples.experimental.video_gen_agent.reward import StubClipScorer, stub_score
 from tests.fast.fixtures.generation_fixtures import extra_argv_for_variant
 from tests.fast.fixtures.rollout_fixtures import RolloutEnvConfig
 from tests.fast.rollout.inference_rollout.integration.utils import MODULAR_ROLLOUT_BASE_ARGV, load_and_call_rollout
@@ -15,15 +17,28 @@ from miles.utils.test_utils.mock_sglang_server import ProcessResult
 REQUEST = "A paper boat drifts down a rain gutter."
 
 
-def _config(mode: str) -> RolloutEnvConfig:
+class _StubPool:
+    async def score(self, outputs, prompts):
+        return StubClipScorer().score_batch(outputs, prompts)
+
+
+_POOLS = {"judge": _StubPool()}
+_MULTITURN_GENERATE = "examples.experimental.video_gen_agent.multiturn.generate.generate"
+
+
+def _config(mode: str, generate_path: str | None = None) -> RolloutEnvConfig:
     argv = extra_argv_for_variant(
-        "agentic_tool_call", custom_agent_function_path="examples.experimental.video_gen_agent.env.run_agent"
+        "agentic_tool_call",
+        custom_generate_function_path=generate_path,
+        custom_agent_function_path="examples.experimental.video_gen_agent.env.run_agent",
     )
     argv += [
         "--custom-agent-function-mode",
         mode,
         "--custom-rm-path",
         "examples.experimental.video_gen_agent.reward.reward_func",
+        "--video-reward-pool",
+        "judge",
     ]
     argv += ["--max-consecutive-aborted-groups", "1"]
     return RolloutEnvConfig(
@@ -68,7 +83,7 @@ def test_submitted_clip_is_scored_in_the_reward_step(rollout_env, env_vars):
     prompts: list[str] = []
     rollout_env.mock_server.process_fn = _policy(prompts)
 
-    out = load_and_call_rollout(rollout_env.args, rollout_env.data_source, mode="train")
+    out = load_and_call_rollout(rollout_env.args, rollout_env.data_source, mode="train", reward_pools=_POOLS)
 
     samples = [s for group in out.samples for sub in group for s in (sub if isinstance(sub, list) else [sub])]
     assert samples
@@ -93,6 +108,19 @@ def test_generator_outage_aborts_the_group(rollout_env, env_vars):
     rollout_env.mock_server.process_fn = _policy([])
 
     with pytest.raises(RuntimeError, match="exit_status 'GeneratorUnavailable'"):
-        load_and_call_rollout(rollout_env.args, rollout_env.data_source, mode="train")
+        load_and_call_rollout(rollout_env.args, rollout_env.data_source, mode="train", reward_pools=_POOLS)
 
     assert not Path(tmp_path / "submitted").exists()
+
+
+@pytest.mark.parametrize("rollout_env", [pytest.param(_config("subproc", _MULTITURN_GENERATE))], indirect=True)
+def test_the_multiturn_hook_hands_the_env_the_generators_router(rollout_env, env_vars):
+    monkeypatch, _ = env_vars
+    monkeypatch.delenv(URL_ENV, raising=False)
+    rollout_env.mock_server.process_fn = _policy([])
+
+    out = load_and_call_rollout(rollout_env.args, rollout_env.data_source, mode="train", reward_pools=_POOLS)
+
+    args = rollout_env.args
+    assert os.environ[URL_ENV] == f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
+    assert out.samples
