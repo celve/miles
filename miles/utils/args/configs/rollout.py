@@ -456,7 +456,9 @@ class RolloutRelatedRolloutOnlyConfig(BaseConfig):
                 "operation of size over_sampling_batch_size will be triggered."
                 "Regardless of whether partial rollout is used or filters are applied, "
                 "the sampling granularity is always determined by this value. "
-                "If this value is None, rollout_batch_size will be used as the default over_sampling_batch_size."
+                "If this value is None, rollout_batch_size will be used as the default over_sampling_batch_size; "
+                "then the standard rollout replaces each dropped group with one new group instead of a whole batch, "
+                "so no surplus group is left to abort at the end of the round."
             )
         ),
     ] = None

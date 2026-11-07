@@ -115,6 +115,10 @@ async def generate_rollout_async(
     # default to group level submission for sync/one-step async rollout
     scheduler = make_submission_scheduler(args, default="group")
 
+    # Without over-sampling (the default), a dropped group is replaced by one group, not by a whole new batch whose
+    # surplus is aborted at the end of the round; asked-for over-sampling keeps refilling whole batches.
+    over_sampling = args.over_sampling_batch_size > target_data_size
+
     pendings = set()
     data = []
     all_data = []
@@ -124,7 +128,8 @@ async def generate_rollout_async(
     while len(data) < target_data_size:
         while scheduler.has_capacity(pending_groups=len(pendings), group_budget=target_data_size - len(data)):
             # get samples from the buffer and submit the generation requests.
-            samples = data_source(args.over_sampling_batch_size)
+            unfilled = max(1, target_data_size - len(data) - len(pendings))
+            samples = data_source(args.over_sampling_batch_size if over_sampling else unfilled)
             stamp_kv_cache_namespace(samples, namespace=kv_cache_namespace)
             scheduler.on_submit(samples)
             pendings.update(submit_generate_tasks(state, samples, scheduler.sample_done_callback))
