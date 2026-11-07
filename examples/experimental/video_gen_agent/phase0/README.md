@@ -8,7 +8,7 @@ A text planner rewrites each video request into one prompt for a frozen video ge
 
 - A generator that fails over HTTP, or a clip the judge cannot read or score, gives `None`, and the missing-reward filter drops the group (counted as `rollout/dynamic_filter/drop_group_has_missing_reward`).
 - An empty answer scores 0: it is the planner's own failure.
-- A clip whose frame count or size the generator changed fails the step, since every later clip would fail the same way.
+- A clip whose frame count or size the generator changed stops the run (`NonRetryableError`), since every later clip would fail the same way.
 
 `planner_rm` works with or without `--group-rm`. The recipe runs without it: Miles' eval refuses `--group-rm`, and the judge scores clip by clip, so a group call batches nothing.
 

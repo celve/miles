@@ -4,7 +4,8 @@ without `--group-rm`.
 The planner's answer is one prompt for the frozen generator. The reward step makes the clip through the generator's
 router and scores it against the user's request on a reward pool, with `video_rm`. A generator that fails over HTTP,
 or a clip the scorer cannot read, scores None, which drops the sample's group; an empty answer is the planner's own
-failure and scores 0.
+failure and scores 0. A clip whose frame count or size the generator changed stops the run, as every later clip
+would fail the same way.
 """
 
 import asyncio
@@ -20,6 +21,7 @@ from miles.rollout.rm_hub.video.reward import CLIP_PATH_KEY, REQUEST_KEY, VideoR
 from miles.rollout.sglang_rollout import get_model_url
 from miles.utils.args.schema import A, Arg
 from miles.utils.metric_utils import compute_rollout_step
+from miles.utils.retry_utils import NonRetryableError
 from miles.utils.tracking_utils import tracking
 from miles.utils.types import Sample
 
@@ -93,6 +95,9 @@ async def _generate_clip(args, client: DiffusionApiClient, sample: Sample) -> No
         )
     except httpx.HTTPError as error:
         logger.warning(f"generator failed for request {request!r}: {error!r}")
+    except ValueError as error:
+        # The training driver drops a group whose task raises and asks for another, unless the error is NonRetryable.
+        raise NonRetryableError(f"the generator broke the clip contract: {error}") from error
 
 
 def log_rollout_data(rollout_id, args, samples: list[Sample], rollout_extra_metrics, rollout_time) -> bool:

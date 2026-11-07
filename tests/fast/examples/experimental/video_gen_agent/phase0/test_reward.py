@@ -1,6 +1,7 @@
 """Phase 0's reward step, driven through the text rollout's `generate_and_rm_group`, with the real
 `DiffusionApiClient` behind the real Miles router and a fake multimodal_gen server, and a fake reward pool."""
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -21,6 +22,7 @@ from tests.fast.fixtures.args_fixtures import parser_defaults
 from tests.fast.rollout.inference_rollout.conftest import make_eval_args
 
 import miles.rollout.inference_rollout.inference_rollout_common as inference_rollout_common
+import miles.rollout.inference_rollout.inference_rollout_train as inference_rollout_train
 from miles.rollout.base_types import GenerateFnInput, GenerateFnOutput, RolloutFnConstructorInput
 from miles.rollout.filter_hub.common_filters import apply_missing_reward_filter
 from miles.rollout.inference_rollout.inference_rollout_common import InferenceRolloutFn, generate_and_rm_group
@@ -32,6 +34,7 @@ from miles.utils.args.custom_function import CustomFunctionConfig
 from miles.utils.args.custom_view import ImmutableNamespace
 from miles.utils.eval_config import EvalDatasetConfig
 from miles.utils.http_utils import find_available_port
+from miles.utils.retry_utils import NonRetryableError
 from miles.utils.test_utils.uvicorn_thread_server import UvicornThreadServer
 from miles.utils.types import Sample
 
@@ -136,6 +139,9 @@ def _rollout_fn(monkeypatch, tmp_path, router, *, group_rm, pool, num_frames=_FR
             sglang_model_routers={"policy": ("127.0.0.1", 1), "generator": router},
             inference_runtime_mut_state=SimpleNamespace(engine_count=1),
             eval_datasets=_EVAL_DATASETS,
+            rollout_batch_size=1,
+            over_sampling_batch_size=1,
+            n_samples_per_prompt=2,
         )
     )
     return InferenceRolloutFn(
@@ -230,12 +236,50 @@ async def test_an_empty_answer_scores_zero_without_calling_the_generator(monkeyp
     assert apply_missing_reward_filter(fn.state.args, group).keep
 
 
-async def test_a_clip_the_generator_resized_fails_the_reward_step(monkeypatch, tmp_path, generator_router):
-    router, _ = generator_router
-    fn = _rollout_fn(monkeypatch, tmp_path, router, group_rm=True, pool=FakePool(), num_frames=_FRAMES + 4)
+class _BoundedScheduler:
+    """Submits one group at a time, at most three, so a driver that swallows the error ends instead of spinning."""
 
-    with pytest.raises(ValueError, match="asked for 13 frames"):
-        await generate_and_rm_group(fn.state, _group("a cat", "a cat"), sampling_params={})
+    sample_done_callback = None
+
+    def __init__(self, submitted):
+        self.submitted = submitted
+
+    def has_capacity(self, *, pending_groups: int, group_budget: int) -> bool:
+        return pending_groups == 0 and len(self.submitted) < 3
+
+    def on_submit(self, samples) -> None:
+        pass
+
+    async def wait_for_progress(self, pendings):
+        assert pendings, f"the driver dropped {len(self.submitted)} failed groups and kept asking for more"
+        return await asyncio.wait(pendings)
+
+
+@pytest.mark.parametrize("group_rm", [False, True])
+async def test_a_clip_the_generator_resized_stops_the_training_rollout(
+    monkeypatch, tmp_path, generator_router, group_rm
+):
+    router, _ = generator_router
+    fn = _rollout_fn(monkeypatch, tmp_path, router, group_rm=group_rm, pool=FakePool(), num_frames=_FRAMES + 4)
+    submitted = []
+
+    def submit(state, samples, callback):
+        submitted.extend(tasks := real_submit(state, samples, callback))
+        return tasks
+
+    async def no_dumper(args) -> None:
+        pass
+
+    real_submit = inference_rollout_train.submit_generate_tasks
+    monkeypatch.setattr(inference_rollout_train, "submit_generate_tasks", submit)
+    monkeypatch.setattr(
+        inference_rollout_train, "make_submission_scheduler", lambda *a, **k: _BoundedScheduler(submitted)
+    )
+    monkeypatch.setattr(inference_rollout_train.dumper_utils, "configure_sglang", no_dumper)
+
+    with pytest.raises(NonRetryableError, match="asked for 13 frames"):
+        await inference_rollout_train.generate_rollout_async(fn.state, 0, lambda n: [_group("a cat", "a cat")])
+    assert len(submitted) == 1
 
 
 def test_the_rollout_log_adds_phase0_timings_and_keeps_the_default_metrics(monkeypatch):
