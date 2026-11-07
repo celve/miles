@@ -1877,6 +1877,16 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="KL penalty coefficient for the loss function. This is added to the final PPO loss.",
             )
             parser.add_argument(
+                "--proximal-kl-coef",
+                type=float,
+                default=0.0,
+                help=(
+                    "Coefficient of a KL penalty (low_var_kl) between the policy and the trainer's own scores of the "
+                    "batch when it is consumed, the proximal policy of the decoupled objective. Its gradient is zero "
+                    "at a batch's first optimizer step, so it restrains only the later steps on the same batch."
+                ),
+            )
+            parser.add_argument(
                 "--use-unbiased-kl",
                 action="store_true",
                 default=False,
@@ -3919,6 +3929,7 @@ def miles_validate_args(args):
 
     if args.use_rollout_logprobs:
         assert not args.use_tis, "use_rollout_logprobs and use_tis cannot be set at the same time."
+        assert args.proximal_kl_coef == 0, "proximal_kl_coef needs trainer-scored log-probs, not use_rollout_logprobs."
 
     validate_m2po_args(args)
 
