@@ -100,15 +100,23 @@ def engine_args(model_path):
         image_processor_backend="pil",
         disable_fast_image_processor=False,
         mm_process_config_json="{}",
+        token_space_preprocess_cache_dir=None,
     )
 
 
 @pytest.fixture(scope="module")
-def processor_core(engine_args):
+def trainer_processor(engine_args):
     """SGLang's token-space processor for the model, built the way the trainer builds it."""
-    from miles.backends.training_utils.data.token_space_media_process import _trainer_processor
+    from miles.backends.training_utils.data.token_space_media_process import build_trainer_processor
 
-    return _trainer_processor(engine_args, torch.device("cpu")).core
+    return build_trainer_processor(
+        engine_args, mm_processor_worker_num=1, mm_io_worker_num=0, device=torch.device("cpu")
+    )
+
+
+@pytest.fixture(scope="module")
+def processor_core(trainer_processor):
+    return trainer_processor.core
 
 
 def _data_url(width: int, height: int, color: tuple[int, int, int]) -> str:
@@ -230,9 +238,12 @@ def _samples(core, session_id: str, version: str) -> list[Sample]:
 
 @pytest.mark.parametrize("version", ["v1", "v2"])
 def test_images_flow_through_the_session_server_in_token_space(
-    version, tokenizer, processor_core, engine_args, tmp_path
+    version, tokenizer, processor_core, trainer_processor, tmp_path
 ):
-    from miles.backends.training_utils.data.token_space_media_process import compute_multimodal_train_inputs
+    from miles.backends.training_utils.data.token_space_media_process import (
+        compute_multimodal_train_inputs,
+        resolved_multimodal_train_inputs,
+    )
 
     pad_id = tokenizer.convert_tokens_to_ids(IMAGE_PAD)
     engine = TokenSpaceEngine(processor_core, tokenizer)
@@ -270,9 +281,15 @@ def test_images_flow_through_the_session_server_in_token_space(
     assert sample.tokens == engine.prompts[1] + engine.output_ids
 
     # The trainer rebuilds from the references and the expanded tokens what the engine computed.
-    (train_inputs,) = compute_multimodal_train_inputs(
-        engine_args, [sample.multimodal_inputs], [torch.tensor(sample.tokens)], device=torch.device("cpu")
+    pending = compute_multimodal_train_inputs(
+        trainer_processor,
+        [sample.multimodal_inputs],
+        [torch.tensor(sample.tokens)],
+        mm_processor_worker_num=1,
+        with_sglang_placement=False,
+        device=torch.device("cpu"),
     )
+    (train_inputs,) = resolved_multimodal_train_inputs(pending.multimodal_train_inputs)
     assert torch.equal(train_inputs["pixel_values"], engine.features[-1]["pixel_values"])
     assert train_inputs["image_grid_thw"].shape[0] == 2
 

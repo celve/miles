@@ -118,15 +118,22 @@ class DataBuffer(ABC):
     def get_metrics(self, trainer_model_id: str | None = None) -> dict[str, float]:
         """Report the metrics of one policy since its previous call (its window counters reset here)."""
 
-    def admits(self, *, in_flight_groups: int) -> bool:
-        """Whether the producer may start another group, given how many it has in flight."""
-        return True
-
     def state_dict(self) -> Any:
         raise NotImplementedError(f"{type(self).__name__} must implement state_dict() for checkpointing")
 
     def load_state_dict(self, state: Any) -> None:
         raise NotImplementedError(f"{type(self).__name__} must implement load_state_dict() for checkpointing")
+
+    def admits(self, *, in_flight: int) -> bool:
+        """Whether the producer may submit one more group while ``in_flight`` groups are generating.
+
+        Asked again whenever a group finishes, a get() starts, or a group goes to the unused handler.
+        """
+        return True
+
+    def drop_saved_state(self, state: Any, *, reason: str) -> None:
+        """Instead of ``load_state_dict``: record the saved groups as dropped, e.g. after a data source reset."""
+        raise NotImplementedError(f"{type(self).__name__} must implement drop_saved_state() for a data reset")
 
 
 # ============================= one policy buffer ==============================
@@ -237,22 +244,14 @@ class DefaultDataBuffer(DataBuffer):
             return False
         return True
 
-    def admits(self, *, in_flight_groups: int) -> bool:
-        if (limit := self._args.max_weight_staleness) is None:
-            return True
-        versions_per_drain = self._observed_versions_per_drain or self._estimated_versions_per_drain
-        # A drain follows each weight update, so only a waiting get takes groups of this version without lag.
-        batches = limit // versions_per_drain + int(self._get_pending)
-        return in_flight_groups + len(self._buffer) < batches * self._args.rollout_batch_size
-
     async def get(self, *, num_groups: int, current_version: int | None = None, **_) -> list[DataBufferInput]:
         self._get_pending = True
         try:
-            return await self._get(num_groups=num_groups, current_version=current_version)
+            return await self._take(num_groups=num_groups, current_version=current_version)
         finally:
             self._get_pending = False
 
-    async def _get(self, *, num_groups: int, current_version: int | None) -> list[DataBufferInput]:
+    async def _take(self, *, num_groups: int, current_version: int | None) -> list[DataBufferInput]:
         if current_version is not None:
             self._observe_version(current_version)
         async with self._cond:
@@ -335,6 +334,20 @@ class DefaultDataBuffer(DataBuffer):
                 self._unused_handler_fn(entry.prompt_group, UnusedReason.RESTORED)
             else:
                 self._buffer.append(entry)
+
+    def admits(self, *, in_flight: int) -> bool:
+        # On without --async-submit-within-staleness, whose bound this is at one version per drain.
+        if (limit := self._args.max_weight_staleness) is None:
+            return True
+        versions_per_drain = self._observed_versions_per_drain or self._estimated_versions_per_drain
+        # A drain follows each weight update, so only a waiting get takes groups of this version without lag.
+        batches = limit // versions_per_drain + int(self._get_pending)
+        return len(self._buffer) + in_flight < batches * self._args.rollout_batch_size
+
+    def drop_saved_state(self, state: list[DataBufferInput], *, reason: str) -> None:
+        record_dropped_samples([[entry.prompt_group, entry.group] for entry in state])
+        samples = [sample for entry in state for sample in entry.prompt_group]
+        SampleOwnershipRecorder.log_dropped_samples(args=self._args, samples=samples, reason=reason)
 
     def get_metrics(self, trainer_model_id: str | None = None) -> dict[str, float]:
         prefix = "rollout/fully_async/"
@@ -425,6 +438,9 @@ class DefaultMultiDataBuffer(DataBuffer):
         return []
 
     def load_state_dict(self, state: Any) -> None:
+        logger.warning(MULTI_POLICY_CHECKPOINT_UNSUPPORTED)
+
+    def drop_saved_state(self, state: Any, *, reason: str) -> None:
         logger.warning(MULTI_POLICY_CHECKPOINT_UNSUPPORTED)
 
     def _inner_of(self, trainer_model_id: str | None) -> DataBuffer:

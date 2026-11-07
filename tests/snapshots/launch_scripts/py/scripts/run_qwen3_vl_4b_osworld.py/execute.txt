@@ -27,7 +27,7 @@ export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && ray job submit
   --rollout-shuffle
   --num-rollout 20
   --rollout-max-response-len 12288
-  --rollout-max-context-len 16384
+  --max-seq-len 16384
   --rollout-temperature 1.0 
   --eval-interval 10
   --eval-prompt-data osworld_held_out /root/datasets/osworld/held_out.jsonl

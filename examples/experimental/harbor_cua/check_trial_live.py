@@ -33,7 +33,7 @@ def build_state(args: argparse.Namespace) -> SimpleNamespace:
             partial_rollout=False,
             sglang_router_ip=args.router_ip,
             sglang_router_port=args.router_port,
-            rollout_max_context_len=args.max_context_len,
+            max_seq_len=args.max_context_len,
             harbor_cua_max_turns=args.max_turns,
             harbor_cua_max_sandboxes=args.max_sandboxes,
             harbor_cua_write_off_mode=args.write_off_mode,

@@ -30,6 +30,7 @@ def _static_args() -> Namespace:
         qkv_format="thd",
         use_dynamic_global_batch_size=False,
         use_dynamic_batch_size=False,
+        multimodal_token_space_processing=False,
         backend=Namespace(global_batch_size=256, micro_batch_size=8),
     )
 
@@ -37,6 +38,7 @@ def _static_args() -> Namespace:
 def _scheduled_args() -> Namespace:
     return Namespace(
         qkv_format="thd",
+        multimodal_token_space_processing=False,
         global_batch_size=256,
         backend=Namespace(global_batch_size=256),
         use_dynamic_global_batch_size=False,
@@ -170,7 +172,7 @@ class TestGetRolloutDataParallelWiring:
         monkeypatch.setattr(data_utils, "get_parallel_state", lambda: state)
         monkeypatch.setattr(data_utils, "process_rollout_data", process)
         monkeypatch.setattr(data_utils.current_platform, "current_device", lambda: data_utils.torch.device("cpu"))
-        args = Namespace(enable_witness=False, qkv_format="thd")
+        args = Namespace(enable_witness=False, multimodal_token_space_processing=False, qkv_format="thd")
 
         rollout, result = data_utils.get_rollout_data(
             args=args, rollout_data_ref=object(), train_parallel_config=config
@@ -202,34 +204,30 @@ class TestGetRolloutDataMediaRebuild:
                 return {
                     "pixel_values": torch.ones(len(image_data), 3),
                     "image_grid_thw": torch.tensor([[1, 1, 2]] * len(image_data)),
+                    "mm_modalities": ["image"] * len(image_data),
+                    "mm_spans": [[(1, 2)]] * len(image_data),
                 }
 
         monkeypatch.setattr(data_utils, "get_parallel_state", lambda: _parallel_state(dp_size=1))
         monkeypatch.setattr(data_utils, "process_rollout_data", process)
-        monkeypatch.setattr(
-            token_space_media_process,
-            "_trainer_processor",
-            lambda rollout_engine_args, device: token_space_media_process._TrainerProcessor(
-                core=Processor(), image_device=None
-            ),
-        )
-        monkeypatch.setattr(
-            data_utils, "RolloutEngineProcessorArgs", Namespace(from_sglang_config=lambda sglang: None)
-        )
         monkeypatch.setattr(data_utils.current_platform, "current_device", lambda: torch.device("cpu"))
         args = Namespace(
             enable_witness=False,
             qkv_format="thd",
-            sglang=None,
             use_dynamic_global_batch_size=False,
             backend=Namespace(bf16=bf16, fp16=fp16),
+            multimodal_token_space_processing=True,
             multimodal_rebuild=mode,
+            trainer_mm_processor_worker_num=1,
+            train_backend="fsdp",
+            megatron_to_hf_mode="raw",
         )
 
         rollout, _ = data_utils.get_rollout_data(
             args=args,
             rollout_data_ref=object(),
             train_parallel_config=_parallel_state(dp_size=1).train_parallel_config(supports_precomputed_schedule=True),
+            token_space_processor=token_space_media_process.TrainerProcessor(core=Processor(), image_device=None),
         )
         return args, rollout, rebuilds
 
@@ -243,15 +241,18 @@ class TestGetRolloutDataMediaRebuild:
     ) -> None:
         _, rollout, _ = self._get_rollout_data(monkeypatch, mode=mode, bf16=bf16, fp16=fp16)
 
-        rebuilt, text_only = rollout["multimodal_train_inputs"][:2]
+        rebuilt, text_only = token_space_media_process.resolved_multimodal_train_inputs(
+            rollout["multimodal_train_inputs"][:2]
+        )
         assert rebuilt["pixel_values"].dtype == expected
         assert rebuilt["image_grid_thw"].dtype == torch.int64
         assert text_only is None
 
-    def test_the_round_rebuild_holds_every_sample(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_the_round_rebuild_builds_every_sample_from_its_host_tokens(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _, rollout, rebuilds = self._get_rollout_data(monkeypatch, mode="round")
 
         assert isinstance(rollout["multimodal_train_inputs"], list)
+        token_space_media_process.resolved_multimodal_train_inputs(rollout["multimodal_train_inputs"])
         assert rebuilds == [(["/shared/a.png"], [1, 9, 2]), (["/shared/b.png", "/c.png"], [1, 9, 9, 2])]
 
     def test_per_micro_batch_rebuild_rebuilds_only_the_fetched_micro_batch(
@@ -261,10 +262,14 @@ class TestGetRolloutDataMediaRebuild:
         (iterator,), _ = data_utils.get_data_iterator(args, model=None, rollout_data=rollout)
         assert rebuilds == []
 
-        first = iterator.get_next(["multimodal_train_inputs"])["multimodal_train_inputs"]
+        first = token_space_media_process.resolved_multimodal_train_inputs(
+            iterator.get_next(["multimodal_train_inputs"])["multimodal_train_inputs"]
+        )
 
         assert rebuilds == [(["/shared/b.png", "/c.png"], [1, 9, 9, 2])]
         assert first[0]["pixel_values"].shape == (2, 3)
         assert first[1] is None
-        iterator.get_next(["multimodal_train_inputs"])
+        token_space_media_process.resolved_multimodal_train_inputs(
+            iterator.get_next(["multimodal_train_inputs"])["multimodal_train_inputs"]
+        )
         assert rebuilds[1:] == [(["/shared/a.png"], [1, 9, 2])]

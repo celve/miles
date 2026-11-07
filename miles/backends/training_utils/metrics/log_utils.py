@@ -200,6 +200,7 @@ def log_rollout_data(rollout_id: int, args: Namespace, rollout_data: RolloutBatc
             if key in [
                 "tokens",
                 "multimodal_train_inputs",
+                "mrope_position_ids",
                 "loss_masks",
                 "sample_indices",
                 "rollout_ids",
@@ -564,6 +565,7 @@ def log_train_step(
         for key, val in extra_metrics.items():
             log_dict_out[f"train/{role_tag}{key}"] = val
 
+    log_dict_out["rollout/step"] = compute_rollout_step(args, rollout_id)
     log_dict_out, step_key = namespace_metrics(
         log_dict_out,
         trainer_model_id=args.trainer_model_id,

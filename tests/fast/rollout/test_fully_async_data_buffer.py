@@ -411,15 +411,15 @@ class TestAdmission:
     def test_without_a_staleness_cap_the_producer_is_never_held_back(self) -> None:
         under_test = _make_admission_buffer(max_weight_staleness=None)
 
-        assert under_test.buffer.admits(in_flight_groups=10_000)
+        assert under_test.buffer.admits(in_flight=10_000)
 
     async def test_a_waiting_get_admits_its_own_batch_and_one_per_drain_the_cap_reaches(self) -> None:
         under_test = _make_admission_buffer(max_weight_staleness=2, steps_per_drain=2)
         waiting = asyncio.create_task(under_test.buffer.get(num_groups=2, current_version=0))
         await _settle()
 
-        assert under_test.buffer.admits(in_flight_groups=3)
-        assert not under_test.buffer.admits(in_flight_groups=4)
+        assert under_test.buffer.admits(in_flight=3)
+        assert not under_test.buffer.admits(in_flight=4)
         waiting.cancel()
 
     async def test_once_the_batch_is_taken_only_the_drains_the_cap_reaches_are_admitted(self) -> None:
@@ -429,27 +429,27 @@ class TestAdmission:
 
         await under_test.buffer.get(num_groups=2, current_version=0)
 
-        assert under_test.buffer.admits(in_flight_groups=0)
-        assert not under_test.buffer.admits(in_flight_groups=1)
+        assert under_test.buffer.admits(in_flight=0)
+        assert not under_test.buffer.admits(in_flight=1)
 
     async def test_a_cap_below_one_drain_of_updates_admits_nothing_between_drains(self) -> None:
         under_test = _make_admission_buffer(max_weight_staleness=1, steps_per_drain=2)
         waiting = asyncio.create_task(under_test.buffer.get(num_groups=2, current_version=0))
         await _settle()
-        assert under_test.buffer.admits(in_flight_groups=1)
-        assert not under_test.buffer.admits(in_flight_groups=2)
+        assert under_test.buffer.admits(in_flight=1)
+        assert not under_test.buffer.admits(in_flight=2)
 
         for group_index in (1, 2):
             await _put(under_test.buffer, _make_finished_group(group_index, weight_version=0))
         await waiting
 
-        assert not under_test.buffer.admits(in_flight_groups=0)
+        assert not under_test.buffer.admits(in_flight=0)
 
     def test_an_update_interval_counts_every_drain_as_a_possible_update(self) -> None:
         under_test = _make_admission_buffer(max_weight_staleness=2, update_weights_interval=2)
 
-        assert under_test.buffer.admits(in_flight_groups=1)
-        assert not under_test.buffer.admits(in_flight_groups=2)
+        assert under_test.buffer.admits(in_flight=1)
+        assert not under_test.buffer.admits(in_flight=2)
 
     async def test_a_cancelled_get_stops_counting_as_waiting(self) -> None:
         under_test = _make_admission_buffer(max_weight_staleness=2, steps_per_drain=2)
@@ -458,7 +458,7 @@ class TestAdmission:
         waiting.cancel()
         await _settle()
 
-        assert not under_test.buffer.admits(in_flight_groups=2)
+        assert not under_test.buffer.admits(in_flight=2)
 
     async def test_two_drains_replace_the_optimizer_step_estimate_with_the_version_step_they_show(self) -> None:
         under_test = _make_admission_buffer(max_weight_staleness=1, steps_per_drain=2)
@@ -467,8 +467,8 @@ class TestAdmission:
                 await _put(under_test.buffer, _make_finished_group(10 * version + group_index, weight_version=version))
             await under_test.buffer.get(num_groups=2, current_version=version)
 
-        assert under_test.buffer.admits(in_flight_groups=1)
-        assert not under_test.buffer.admits(in_flight_groups=2)
+        assert under_test.buffer.admits(in_flight=1)
+        assert not under_test.buffer.admits(in_flight=2)
 
     async def test_a_composed_buffer_never_holds_the_shared_producer_back(self) -> None:
         multi = _make_multi_buffer(max_weight_staleness=2, rollout_batch_size=1, global_batch_size=GROUP_SIZE)
@@ -479,8 +479,8 @@ class TestAdmission:
         waiting = asyncio.create_task(multi.get(num_groups=1, current_version=0, trainer_model_id="verifier"))
         await _settle()
 
-        assert not multi._inners["solver"].admits(in_flight_groups=0)
-        assert multi.admits(in_flight_groups=0)
+        assert not multi._inners["solver"].admits(in_flight=0)
+        assert multi.admits(in_flight=0)
         waiting.cancel()
 
 

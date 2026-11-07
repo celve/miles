@@ -16,7 +16,7 @@ def args(**overrides):
         partial_rollout=False,
         sglang_router_ip="127.0.0.1",
         sglang_router_port=31000,
-        rollout_max_context_len=65536,
+        max_seq_len=65536,
         harbor_cua_max_turns=4,
         harbor_cua_max_sandboxes=2,
         **overrides,
@@ -140,7 +140,7 @@ async def test_the_options_defaults_reach_the_run(stub, state, episode):
     """Every flag has one default, in HarborCuaOptions, and the rollout reads it there."""
     episode.turn(image=png_bytes((6, 0, 0)))
     stub.outcome = outcome(episodes=1)
-    bare = Namespace(partial_rollout=False, sglang_router_ip="127.0.0.1", sglang_router_port=31000)
+    bare = Namespace(partial_rollout=False, sglang_router_ip="127.0.0.1", sglang_router_port=31000, max_seq_len=None)
     state.args = bare
 
     output = await harbor_cua.generate(fn_input(task_sample(9), state))

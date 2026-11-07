@@ -61,6 +61,29 @@ class DataConfig(BaseConfig):
             )
         ),
     ] = None
+    rollout_data_yaml_config: A[
+        str | None,
+        Arg(
+            help=(
+                "Path to a YAML file, or an inline `base64:<payload>`, listing the training datasets to mix and "
+                "how much each contributes per rollout step (`samples_per_step` weights). Replaces --prompt-data "
+                "and selects miles.rollout.data_source.MixedRolloutDataSource; needs --num-rollout."
+            )
+        ),
+    ] = None
+    rollout_data_reset_on_load: A[
+        bool,
+        Arg(
+            help=(
+                "With --load, start every training dataset over when the checkpoint cannot be resumed under the "
+                "current --rollout-data-yaml-config (other datasets, a changed file or dataset field, or a "
+                "--prompt-data checkpoint), and drop the prompt groups and untrained batches drawn from the old "
+                "data. The model, optimizer, rollout step and sample ids still resume; a checkpoint that does match "
+                "resumes in place, so the flag can stay set. A mix resumed under --prompt-data starts over without "
+                "this flag."
+            )
+        ),
+    ] = False
     apply_chat_template: A[bool, Arg()] = False
     # Temporarily be JSON-serialized str, will be a real dict after using Omegaconf
     apply_chat_template_kwargs: A[Any, Arg(type_parser=json.loads)] = "{}"
@@ -105,11 +128,21 @@ class DataConfig(BaseConfig):
                 "How the trainer rebuilds media tensors with --multimodal-token-space-processing. round: once per "
                 "round, held for the whole step. micro_batch: each time a micro-batch is fetched, so the GPU holds "
                 "one micro-batch's media, at the cost of one rebuild per forward pass. micro_batch_prefetch: also "
-                "rebuild the next micro-batch on a background thread and its own CUDA stream while the current one "
-                "computes (CUDA only). Defaults to micro_batch_prefetch on CUDA and micro_batch elsewhere."
+                "submit the next micro-batch's builds while the current one computes (CUDA only). Defaults to "
+                "micro_batch_prefetch on CUDA and micro_batch elsewhere."
             ),
         ),
     ] = None
+    trainer_mm_processor_worker_num: A[
+        int,
+        Arg(
+            help="Workers each trainer rank processes multimodal inputs with: threads building token-space inputs, and the SGLang processor's media workers."
+        ),
+    ] = 1
+    trainer_mm_io_worker_num: A[
+        int,
+        Arg(help="Media I/O threads (decoding) of each trainer rank's SGLang processor; 0 lets SGLang choose."),
+    ] = 0
     shared_media_dir: A[
         str | None,
         Arg(

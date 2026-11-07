@@ -11,6 +11,7 @@ from miles.diffusion.algorithms import ALGORITHMS
 from miles.diffusion.rewards import declared_reward_pool_names
 from miles.diffusion.rollout import step_strategy
 from miles.diffusion.train.pipeline_config import get_train_pipeline_config, resolve_model_family
+from miles.router.backend import RouterKind
 from miles.utils.args.configs.algo import AlgoConfig
 from miles.utils.args.configs.backend_fields import TrainerBackendTraitConfig
 from miles.utils.args.configs.data import DataConfig
@@ -31,7 +32,7 @@ _UNSUPPORTED = [
         "engines spanning several GPUs (--rollout-num-gpus-per-engine > 1)",
         lambda a: a.rollout_num_gpus_per_engine != 1,
     ),
-    ("a router other than --use-miles-router", lambda a: not a.use_miles_router),
+    ("a router other than --router miles (--use-miles-router)", lambda a: a.router != RouterKind.MILES),
     ("an advantage estimator other than grpo, including a critic", lambda a: a.advantage_estimator != "grpo"),
     (
         "a separate reference model or token KL (--ref-load, --use-kl-loss, --kl-coef)",
@@ -145,7 +146,7 @@ _UNREAD = {
         *("multimodal_keys", "tool_key"),
     ],
     RolloutRelatedRolloutOnlyConfig: [
-        "rollout_max_context_len",
+        "max_seq_len",
         "rollout_max_prompt_len",
         "rollout_stop",
         "rollout_stop_token_ids",
@@ -298,7 +299,7 @@ def validate_frozen_diffusion_models(config) -> None:
                 ("engine_kind text groups beside its diffusion groups", len(kinds) > 1),
                 # The first model's router is the run's default router, which the text rollout sends its requests to.
                 ("the first place in --sglang-config, whose router serves the text policy", index == 0),
-                ("a router other than --use-miles-router", not config.use_miles_router),
+                ("a router other than --router miles (--use-miles-router)", config.router != RouterKind.MILES),
                 *(
                     (f"a {group.worker_type.value} group; diffusion engines serve as regular", True)
                     for group in model.server_groups

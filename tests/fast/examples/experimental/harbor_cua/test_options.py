@@ -67,9 +67,9 @@ def test_an_impossible_option_is_refused_at_construction():
 def test_the_sample_budget_falls_back_to_the_rollout_context_length():
     options = HarborCuaOptions()
 
-    assert options.sample_token_budget(Namespace(rollout_max_context_len=4096)) == 4096
-    assert options.sample_token_budget(Namespace()) is None
-    assert HarborCuaOptions(max_sample_tokens=99).sample_token_budget(Namespace(rollout_max_context_len=4096)) == 99
+    assert options.sample_token_budget(Namespace(max_seq_len=4096)) == 4096
+    assert options.sample_token_budget(Namespace(max_seq_len=None)) is None
+    assert HarborCuaOptions(max_sample_tokens=99).sample_token_budget(Namespace(max_seq_len=4096)) == 99
 
 
 def test_the_write_off_modes_are_the_two_documented_ones():

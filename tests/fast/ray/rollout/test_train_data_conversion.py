@@ -634,7 +634,7 @@ class TestPostProcessRewards:
 
         with pytest.raises(
             ValueError,
-            match=r"all samples in rollout 11 must share one reward; rows \[1, 2\] have rewards \[2.0, 6.0\]",
+            match=r"all samples in a rollout must share one reward; rows \[1, 2\] have rewards \[2.0, 6.0\]",
         ):
             _post_process_rewards(args, samples, custom_reward_post_process_func=None)
 
@@ -1480,6 +1480,8 @@ class TestOutputStoreTookEffect:
 
     def test_without_replay_there_is_nothing_to_store(self):
         assert "rollout_store_plan" not in self._convert([make_sample()], use_output_store=True)
+
+
 def _pad_args(**overrides):
     return SimpleNamespace(
         **{

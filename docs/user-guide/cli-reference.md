@@ -171,13 +171,16 @@ Sections mirror the launch-script argument groups.
 | Flag | Type | Default | Notes |
 |---|---|---|---|
 | `--prompt-data` | str | – | Path to a single JSONL file. |
+| `--rollout-data-yaml-config` | str | – | YAML of several datasets mixed by weight; replaces `--prompt-data`. See [Mixing Datasets](/user-guide/mixing-datasets). |
 | `--input-key` | str | `input` | JSONL key to `Sample.prompt`. |
 | `--label-key` | str | `None` | JSONL key to `Sample.label`. |
 | `--metadata-key` | str | `metadata` | JSONL key to `Sample.metadata`. |
 | `--apply-chat-template` | flag | off | Apply tokenizer chat template. |
 | `--shared-media-dir` | path | – | Directory shared with every SGLang engine; media that is not a file path yet (data URL, bytes, PIL image) is written under `<dir>/<run_uuid>`, which is removed when the run ends. |
 | `--multimodal-token-space-processing` | flag | off | SGLang expands media placeholders and the trainer builds the processor inputs (models with an SGLang token-space strategy). Needs `--sglang-enable-token-space-processor`; the trainer builds its processor from the rollout engines' server args, so external engines (`--rollout-external-engine-addrs` or `--custom-inference-engine-provider-path`), engine groups that override the processor settings, `--sglang-rl-on-policy-target`, `--sglang-true-on-policy-contract` and `--sglang-decrypted-config-file` are rejected. `--rollout-max-prompt-len` counts text tokens only. |
-| `--multimodal-rebuild` | enum | `micro_batch_prefetch` on CUDA, `micro_batch` elsewhere | `round`, `micro_batch`, `micro_batch_prefetch`. How the trainer rebuilds media tensors with `--multimodal-token-space-processing`. `round`: once per round, held for the whole step. `micro_batch`: each time a micro-batch is fetched, so the GPU holds one micro-batch's media, at the cost of one rebuild per forward pass. `micro_batch_prefetch`: also rebuilds the next micro-batch on a background thread and its own CUDA stream while the current one computes; refused off CUDA. Outside token-space mode only the default is accepted, and it has no effect. The rebuilt features stay on the trainer's GPU. |
+| `--multimodal-rebuild` | enum | `micro_batch_prefetch` on CUDA, `micro_batch` elsewhere | `round`, `micro_batch`, `micro_batch_prefetch`. How the trainer rebuilds media tensors with `--multimodal-token-space-processing`. `round`: once per round, held for the whole step. `micro_batch`: each time a micro-batch is fetched, so the GPU holds one micro-batch's media, at the cost of one rebuild per forward pass. `micro_batch_prefetch`: also submits the next micro-batch's builds while the current one computes; refused off CUDA. Outside token-space mode only the default is accepted, and it has no effect. The rebuilt features stay on the trainer's GPU. |
+| `--trainer-mm-processor-worker-num` | int | 1 | Workers each trainer rank processes multimodal inputs with: threads building token-space inputs, and the SGLang processor's media workers. |
+| `--trainer-mm-io-worker-num` | int | 0 | Media I/O threads (decoding) of each trainer rank's SGLang processor; 0 lets SGLang choose. |
 | `--rollout-shuffle` | flag | on | Shuffle prompts once per epoch (seeded by `--rollout-seed`). `--no-rollout-shuffle` keeps file order. |
 | `--num-rollout` | int | – | Total rollout iterations. If unset, derived from dataset size. |
 | `--rollout-batch-size` | int | – | Prompts per rollout. |
@@ -192,6 +195,7 @@ Sections mirror the launch-script argument groups.
 | Flag | Type | Default | Notes |
 |---|---|---|---|
 | `--rollout-max-response-len` | int | – | Max tokens per response. |
+| `--max-seq-len` | int | – | Total tokens per session, including prompts, completions, and environment responses. Sample assembly truncates each collected trajectory to it, and the agent receives it in `metadata`; Miles does not stop the agent at it (see [Choose the session behavior](/user-guide/agentic-rollout#choose-the-session-behavior)). On `/generate`, each request's `max_new_tokens` is capped to fit it, and a request with no room left stops the sample as `TRUNCATED`. Defaults `--rollout-max-prompt-len` to one less. |
 | `--rollout-temperature` | float | `1.0` | Sampling temperature. |
 | `--rollout-top-p` | float | `1.0` | Top-p truncation. Values below `1` require bounded [sampling-support replay](/advanced/sampling-support-replay). |
 | `--rollout-top-k` | int | `-1` | Top-k truncation (`-1` disables). Positive values enable [sampling-support replay](/advanced/sampling-support-replay). |
@@ -332,7 +336,7 @@ contract, session behavior, and model-family selection.
 | `--use-session-images` | flag | off | v2 only. Dense session images: the session server assembles `pixel_values` / `image_grid_thw` per retained sample. Needs `--tito-model qwen3_vl`; refused with `--multimodal-token-space-processing`, which carries session media in token space instead. |
 | `--session-image-text-only-samples` | enum | `drop` | With `--use-session-images`: `drop` or `keep` a sample whose retained tokens carry no image. |
 | `--tito-model` | enum | `default` | TITO model family. Named families load their registered fixed template; `default` is best-effort with a checkpoint-native or custom template. |
-| `--max-seq-len` | int | – | Total tokens per session, including prompts, completions, and environment responses. Registered with the agentic wrapper. |
+| `--allow-stop-token-replace` / `--no-allow-stop-token-replace` | bool | family default | Whether the session server may replace the sampled stop token with the first token of the appended render (GLM stopping at `<\|observation\|>` before a non-tool message). Allowed replacements log a warning; otherwise the request gets HTTP 400. Allowed by default only for `glm47` and `glm53`. Allowing it cannot be combined with `--sglang-enable-streaming-session`. |
 | `--session-server-ip` | str | router IP | Session-server bind address. |
 | `--session-server-external-host` | str | – | Host that peers outside the cluster reach every session server on. Keeps the session servers on the head node. Leave unset when each node sets `MILES_NODE_EXTERNAL_IP`. |
 | `--session-server-port` | int | auto | First port for standalone session-server instances. When unset, each worker port is auto-allocated. |

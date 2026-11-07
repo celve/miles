@@ -1,18 +1,23 @@
 import logging
-import weakref
 from argparse import Namespace
 from collections.abc import Callable, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future
 
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-from miles.backends.training_utils.data.context_parallel import slice_log_prob_with_cp, slice_with_cp
+from miles.backends.training_utils.data.context_parallel import (
+    natural_to_local_cp_rows,
+    slice_log_prob_with_cp,
+    slice_with_cp,
+)
 from miles.backends.training_utils.data.multimodal import expand_multimodal_rollout_data_in_place
 from miles.backends.training_utils.data.token_space_media_process import (
-    RolloutEngineProcessorArgs,
+    TrainerProcessor,
     compute_multimodal_train_inputs,
+    resolved_mrope_position_ids,
+    resolved_multimodal_train_inputs,
 )
 from miles.backends.training_utils.parallel import get_parallel_state
 from miles.platforms import current_platform
@@ -46,86 +51,6 @@ def _media_dtype(args: Namespace) -> torch.dtype | None:
     return None
 
 
-class LazyMultimodalTrainInputs(Sequence):
-    def __init__(
-        self,
-        rollout_engine_args: RolloutEngineProcessorArgs,
-        multimodal_inputs: list,
-        token_ids: list,
-        *,
-        device: torch.device,
-        dtype: torch.dtype | None,
-        prefetch: bool,
-    ) -> None:
-        self._rollout_engine_args = rollout_engine_args
-        self._multimodal_inputs = multimodal_inputs
-        self._token_ids = token_ids
-        self._device = device
-        self._dtype = dtype
-        self._rebuilder = None
-        self._stream = None
-        self._pending: tuple[tuple[int, ...], Future] | None = None
-        if prefetch:
-            self._rebuilder = ThreadPoolExecutor(
-                max_workers=1,
-                thread_name_prefix="miles-media-rebuild",
-                initializer=torch.cuda.set_device,
-                initargs=(device,),
-            )
-            weakref.finalize(self, self._rebuilder.shutdown, wait=False, cancel_futures=True)
-            self._stream = torch.cuda.Stream(device)
-
-    def __getstate__(self) -> dict:
-        return {**self.__dict__, "_rebuilder": None, "_stream": None, "_pending": None}
-
-    def __len__(self) -> int:
-        return len(self._multimodal_inputs)
-
-    def __getitem__(self, index):
-        if isinstance(index, slice):
-            return self.get_many(range(*index.indices(len(self))))
-        return self.get_many([index])[0]
-
-    def _rebuild(self, index: int) -> dict[str, torch.Tensor] | None:
-        (mm,) = compute_multimodal_train_inputs(
-            self._rollout_engine_args,
-            [self._multimodal_inputs[index]],
-            [torch.as_tensor(self._token_ids[index])],
-            device=self._device,
-            dtype=self._dtype,
-        )
-        return mm
-
-    def _rebuild_on_stream(self, indices: tuple[int, ...]) -> tuple[list, torch.cuda.Event]:
-        with torch.cuda.stream(self._stream):
-            out = [self._rebuild(i) for i in indices]
-            return out, self._stream.record_event()
-
-    def get_many(self, indices) -> list:
-        with timer("multimodal_rebuild"):
-            indices = tuple(indices)
-            if self._rebuilder is None:
-                return [self._rebuild(i) for i in indices]
-            pending, self._pending = self._pending, None
-            if pending is not None and pending[0] == indices:
-                future = pending[1]
-            else:
-                future = self._rebuilder.submit(self._rebuild_on_stream, indices)
-            out, ready = future.result()
-            consumer = torch.cuda.current_stream(self._device)
-            consumer.wait_event(ready)
-            for mm in out:
-                for value in (mm or {}).values():
-                    if value.is_cuda:
-                        value.record_stream(consumer)
-            return out
-
-    def prefetch(self, indices) -> None:
-        if self._rebuilder is not None:
-            indices = tuple(indices)
-            self._pending = (indices, self._rebuilder.submit(self._rebuild_on_stream, indices))
-
-
 def get_rollout_data(
     args: Namespace,
     rollout_data_ref: Box,
@@ -133,7 +58,15 @@ def get_rollout_data(
     *,
     train_parallel_config: TrainParallelConfig,
     output_store_read: Callable | None = None,
+    sample_device: torch.device | None = None,
+    token_space_processor: TrainerProcessor | None = None,
 ) -> tuple[RolloutBatch, ObjectStoreGetResult]:
+    """Fetch this rank's rollout shard; per-sample tokens, masks and log-probs go to `sample_device`.
+
+    `sample_device` defaults to the accelerator; `PaddedRows` keeps them on the host.
+    """
+    if sample_device is None:
+        sample_device = current_platform.current_device()
     parallel_state = get_parallel_state()
     # Fetch data through ray on CPU, not sure if this will be performance bottleneck.
     # Both first pp stage and the last pp stage will receive the data.
@@ -146,16 +79,13 @@ def get_rollout_data(
         output_store_read=output_store_read,
     )
     token_ids = rollout_data["tokens"]
-    # move tokens to the device in advance
-    rollout_data["tokens"] = [
-        torch.tensor(t, dtype=torch.long, device=current_platform.current_device()) for t in rollout_data["tokens"]
-    ]
+    rollout_data["tokens"] = [torch.tensor(t, dtype=torch.long, device=sample_device) for t in token_ids]
     rollout_data["loss_masks"] = [
-        torch.tensor(t, dtype=torch.int, device=current_platform.current_device()) for t in rollout_data["loss_masks"]
+        torch.tensor(t, dtype=torch.int, device=sample_device) for t in rollout_data["loss_masks"]
     ]
     if "rollout_mask_sums" in rollout_data:
         rollout_data["rollout_mask_sums"] = torch.tensor(
-            rollout_data["rollout_mask_sums"], dtype=torch.float32, device=current_platform.current_device()
+            rollout_data["rollout_mask_sums"], dtype=torch.float32, device=sample_device
         )
     if args.enable_witness:
         seq_witness_ids = rollout_data.pop("seq_witness_ids")
@@ -164,18 +94,24 @@ def get_rollout_data(
             for t, sid in zip(rollout_data["tokens"], seq_witness_ids, strict=True)
         ]
 
-    if "multimodal_inputs" in rollout_data:
-        multimodal_train_inputs = LazyMultimodalTrainInputs(
-            RolloutEngineProcessorArgs.from_sglang_config(args.sglang),
-            rollout_data.pop("multimodal_inputs"),
-            token_ids,
+    if args.multimodal_token_space_processing:
+        # A rollout without media ships no references, but its tokens still need the model's mRoPE positions.
+        multimodal_inputs = rollout_data.pop("multimodal_inputs", [None] * len(token_ids))
+        token_space_train_inputs = compute_multimodal_train_inputs(
+            token_space_processor,
+            multimodal_inputs,
+            # Host token ids, so a build never synchronizes the device.
+            [torch.tensor(t, dtype=torch.long) for t in token_ids],
+            mm_processor_worker_num=args.trainer_mm_processor_worker_num,
+            # Megatron-Bridge and torch-native models place their media rows and rotate by themselves.
+            with_sglang_placement=args.train_backend == "megatron" and args.megatron_to_hf_mode == "raw",
             device=current_platform.current_device(),
             dtype=_media_dtype(args),
-            prefetch=args.multimodal_rebuild == "micro_batch_prefetch",
+            rebuild=args.multimodal_rebuild,
         )
-        if args.multimodal_rebuild == "round":
-            multimodal_train_inputs = multimodal_train_inputs.get_many(range(len(multimodal_train_inputs)))
-        rollout_data["multimodal_train_inputs"] = multimodal_train_inputs
+        rollout_data["multimodal_train_inputs"] = token_space_train_inputs.multimodal_train_inputs
+        if token_space_train_inputs.mrope_position_ids is not None:
+            rollout_data["mrope_position_ids"] = token_space_train_inputs.mrope_position_ids
     elif "multimodal_train_inputs" in rollout_data:
         # Move multimodal training tensors to the device in advance
         rollout_data["multimodal_train_inputs"] = [
@@ -214,7 +150,7 @@ def get_rollout_data(
                         args.qkv_format,
                         rollout_data["max_seq_lens"][i] if args.qkv_format == "bshd" else None,
                     ),
-                    device=current_platform.current_device(),
+                    device=sample_device,
                     dtype=dtype,
                 )
                 for i, (value, total_length, response_length) in enumerate(
@@ -326,8 +262,12 @@ def get_batch(
         if unit_key in data_iterator.rollout_data:
             batch[unit_key] = data_iterator.rollout_data[unit_key]
 
-    # No-op safety net if batches reach get_batch without rollout-level preprocessing.
-    expand_multimodal_rollout_data_in_place(batch, qkv_format=qkv_format)
+    # Token-space train inputs rebuild in the background; wait for this micro-batch's samples.
+    if (multimodal_train_inputs := batch.get("multimodal_train_inputs")) is not None and any(
+        isinstance(entry, Future) for entry in multimodal_train_inputs
+    ):
+        with timer("multimodal_rebuild"):
+            batch["multimodal_train_inputs"] = resolved_multimodal_train_inputs(multimodal_train_inputs)
 
     tokens = batch["tokens"]
     # use 0 as the pad token id should be fine?
@@ -444,6 +384,11 @@ def get_batch(
             raise NotImplementedError
         return ids
 
+    mrope_position_ids = batch.pop("mrope_position_ids", None)
+    if mrope_position_ids is not None and (mrope_position_ids := resolved_mrope_position_ids(mrope_position_ids)):
+        assert qkv_format == "thd" and not allgather_cp, "mRoPE positions need the per-sample THD CP layout"
+        batch["position_ids"] = _pack_natural_position_ids(mrope_position_ids, cu_seqlens_host)
+
     if get_position_ids:
         position_ids_list = []
         for t in batch["unconcat_tokens"]:
@@ -476,13 +421,28 @@ def get_batch(
         sample_offsets = [0]
         for t in batch["unconcat_tokens"]:
             sample_offsets.append(sample_offsets[-1] + t.size(0))
+
+        def packed_rows(positions: torch.Tensor, sample_index: int) -> torch.Tensor:
+            if qkv_format == "thd" and not allgather_cp:
+                return natural_to_local_cp_rows(
+                    positions,
+                    sample_start=cu_seqlens_host[sample_index],
+                    sample_end=cu_seqlens_host[sample_index + 1],
+                    cp_size=cp_size,
+                    cp_rank=parallel_state.cp.rank,
+                )
+            return positions + sample_offsets[sample_index]
+
         multimodal_data = {}  # key -> concatenated tensor
         multimodal_num_items = {}  # key -> list of item counts per sequence
         for i, mm_input_dict in enumerate(multimodal_train_inputs):
             if mm_input_dict is not None:
                 for key, mm_tensor in mm_input_dict.items():
+                    # Sample-local token indices of tower output rows, one long entry per row in tower output order:
+                    # mm_image_positions and mm_video_positions from the token-space processor, mm_vision_positions
+                    # and mm_audio_positions from the Inkling expansion.
                     if key.endswith("_positions"):
-                        mm_tensor = mm_tensor + sample_offsets[i]
+                        mm_tensor = packed_rows(mm_tensor, i)
                     if key not in multimodal_data:
                         multimodal_data[key] = mm_tensor
                         multimodal_num_items[key] = [mm_tensor.size(0)]
@@ -493,6 +453,20 @@ def get_batch(
         batch["multimodal_num_items"] = multimodal_num_items
 
     return batch
+
+
+def _pack_natural_position_ids(sample_positions: list[torch.Tensor], cu_seqlens_host: tuple[int, ...]) -> torch.Tensor:
+    """Pack each sample's [num_tokens, 3] positions into the [3, 1, T] natural (not CP-sliced) packed row.
+
+    Each sample starts at its ``cu_seqlens`` boundary, the same packing the tokens get before the CP split;
+    Megatron's THD rotary picks each CP rank's rows from it. Padding keeps position 0: it only follows the
+    real tokens, so causal attention never lets them see it.
+    """
+    positions = sample_positions[0].new_zeros(cu_seqlens_host[-1], sample_positions[0].size(1))
+    for sample, start, end in zip(sample_positions, cu_seqlens_host, cu_seqlens_host[1:], strict=False):
+        assert sample.size(0) <= end - start, f"{sample.size(0)} positions for a {end - start}-token segment"
+        positions[start : start + sample.size(0)] = sample
+    return positions.T.unsqueeze(1)
 
 
 class DataIterator:
@@ -602,9 +576,8 @@ def get_data_iterator(
     - `data_iterators`: list of `DataIterator`, one per VPP stage (size 1 if VPP disabled)
     - `num_microbatches`: list[int], one per local step in the rollout (length = steps)
     """
-    if not hasattr(
-        rollout_data.get("multimodal_train_inputs"), "get_many"
-    ):  # config-access-exempt: rollout values rebuilt per micro-batch are already expanded
+    # Token-space tokens arrive expanded, and their train inputs may still be rebuilding.
+    if not args.multimodal_token_space_processing:
         expand_multimodal_rollout_data_in_place(rollout_data, qkv_format=args.qkv_format)
 
     parallel_state = get_parallel_state()

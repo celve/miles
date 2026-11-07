@@ -241,7 +241,7 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
         f"--rollout-batch-size {args.rollout_batch_size} "
         f"--n-samples-per-prompt {args.n_samples_per_prompt} "
         "--rollout-max-response-len 4096 "
-        "--rollout-max-context-len 32768 "
+        "--max-seq-len 32768 "
         "--rollout-temperature 1.0 "
         f"--global-batch-size {args.global_batch_size} "
     )
@@ -257,8 +257,6 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
                 session_server_external_host=args.session_server_external_host,
                 agent_worker_url=args.agent_worker_url,
             )
-            # The session server's per-sample cap, where the generate path caps by --rollout-max-context-len.
-            + "--max-seq-len 32768 "
             # A whole episode is one sample, so a step can hold only samples over half the token cap.
             + "--pad-steps-for-dp-alignment "
         )

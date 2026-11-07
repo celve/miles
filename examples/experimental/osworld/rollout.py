@@ -382,7 +382,7 @@ async def generate(input: "GenerateFnInput") -> "GenerateFnOutput":
         counters["no_exact_evidence"] += 1
         return unusable("carried no exact model-call evidence")
 
-    context_limit = int(args.rollout_max_context_len or 0)
+    context_limit = int(args.max_seq_len or 0)
     processor = processor_identity(state.processor.image_processor)
     boundaries = _boundary_provenance(response)
     rollout_id = sample.rollout_id if sample.rollout_id is not None else sample.index

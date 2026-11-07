@@ -227,7 +227,7 @@ def execute(args: ScriptArgs):
         f"--num-rollout {1 if smoke else args.num_rollout} "
         # Bounds a whole stitched segment, about 11k tokens for a 15-turn episode.
         "--rollout-max-response-len 12288 "
-        "--rollout-max-context-len 16384 "
+        "--max-seq-len 16384 "
         "--rollout-temperature 1.0 "
     )
 
@@ -320,19 +320,19 @@ def execute(args: ScriptArgs):
     )
 
     train_args = (
-            f"{ckpt_args} "
-            f"{rollout_args} "
-            f"{eval_args} "
-            f"{custom_args} "
-            f"{grpo_args} "
-            f"{optimizer_args} "
-            f"{command_utils.get_default_wandb_args(__file__, run_id=args.run_id)} "
-            f"{train_backend_args} "
-            f"{sglang_args} "
-            f"{telemetry_args} "
-            f"{misc_args} "
-            f"{args.extra_args} "
-            f"{geometry_args} "
+        f"{ckpt_args} "
+        f"{rollout_args} "
+        f"{eval_args} "
+        f"{custom_args} "
+        f"{grpo_args} "
+        f"{optimizer_args} "
+        f"{command_utils.get_default_wandb_args(__file__, run_id=args.run_id)} "
+        f"{train_backend_args} "
+        f"{sglang_args} "
+        f"{telemetry_args} "
+        f"{misc_args} "
+        f"{args.extra_args} "
+        f"{geometry_args} "
     )
     # Miles's training entry rejects unknown flags, so the converter's knobs travel as env vars.
     launcher_env = {

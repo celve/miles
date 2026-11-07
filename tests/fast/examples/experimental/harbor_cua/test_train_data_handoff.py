@@ -56,6 +56,7 @@ def conversion_args(**overrides):
         "rollout_top_logprobs_num": 0,
         "use_opd": False,
         "loss_mask_type": None,
+        "length_penalty_coeff": 0.0,
     }
     return Namespace(**{**defaults, **overrides})
 

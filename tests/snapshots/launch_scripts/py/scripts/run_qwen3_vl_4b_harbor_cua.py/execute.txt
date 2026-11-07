@@ -44,7 +44,7 @@ export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && ray job submit
   --rollout-batch-size 4
   --n-samples-per-prompt 8
   --rollout-max-response-len 4096
-  --rollout-max-context-len 32768
+  --max-seq-len 32768
   --rollout-temperature 1.0
   --global-batch-size 32 
   --custom-generate-function-path examples.experimental.harbor_cua.rollout.generate

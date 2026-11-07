@@ -69,14 +69,22 @@ def engine_args(model_path):
         image_processor_backend="pil",
         disable_fast_image_processor=False,
         mm_process_config_json="{}",
+        token_space_preprocess_cache_dir=None,
     )
 
 
 @pytest.fixture(scope="module")
-def processor_core(engine_args):
-    from miles.backends.training_utils.data.token_space_media_process import _trainer_processor
+def trainer_processor(engine_args):
+    from miles.backends.training_utils.data.token_space_media_process import build_trainer_processor
 
-    return _trainer_processor(engine_args, torch.device("cpu")).core
+    return build_trainer_processor(
+        engine_args, mm_processor_worker_num=1, mm_io_worker_num=0, device=torch.device("cpu")
+    )
+
+
+@pytest.fixture(scope="module")
+def processor_core(trainer_processor):
+    return trainer_processor.core
 
 
 def _write_clip(path, color: tuple[int, int, int], *, frames: int = 33, fps: int = 16) -> str:
@@ -177,9 +185,12 @@ def _run_episode(core, registry, clips: list[str]):
 
 @pytest.mark.parametrize("version", ["v1", "v2"])
 def test_clips_flow_through_the_session_server_in_token_space(
-    version, model_path, tokenizer, processor_core, engine_args, clips, tmp_path
+    version, model_path, tokenizer, processor_core, trainer_processor, clips, tmp_path
 ):
-    from miles.backends.training_utils.data.token_space_media_process import compute_multimodal_train_inputs
+    from miles.backends.training_utils.data.token_space_media_process import (
+        compute_multimodal_train_inputs,
+        resolved_multimodal_train_inputs,
+    )
 
     pad_id = tokenizer.convert_tokens_to_ids(VIDEO_PAD)
     engine = ToolCallingEngine(processor_core, tokenizer)
@@ -209,9 +220,15 @@ def test_clips_flow_through_the_session_server_in_token_space(
     assert sample.tokens == engine.prompts[-1] + engine.output_ids
     assert sample.loss_mask.count(1) == 3 * len(engine.output_ids), "only the three sampled replies are trained"
 
-    (train_inputs,) = compute_multimodal_train_inputs(
-        engine_args, [sample.multimodal_inputs], [torch.tensor(sample.tokens)], device=torch.device("cpu")
+    pending = compute_multimodal_train_inputs(
+        trainer_processor,
+        [sample.multimodal_inputs],
+        [torch.tensor(sample.tokens)],
+        mm_processor_worker_num=1,
+        with_sglang_placement=False,
+        device=torch.device("cpu"),
     )
+    (train_inputs,) = resolved_multimodal_train_inputs(pending.multimodal_train_inputs)
     assert torch.equal(train_inputs["pixel_values_videos"], engine.features[-1]["pixel_values_videos"])
     assert torch.equal(train_inputs["video_grid_thw"], engine.features[-1]["video_grid_thw"])
     assert train_inputs["video_grid_thw"].shape[0] == 3

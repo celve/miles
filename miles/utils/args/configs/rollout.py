@@ -10,6 +10,8 @@ from miles.utils.object_store_config import ObjectStoreBackend
 # rollout
 class RolloutRelatedConfig(BaseConfig):
     custom_agent_function_path: A[CustomFunctionConfig | None, Arg()] = None
+    # agent functions --rollout-data-yaml-config datasets name, resolved at startup; abort fans out to them
+    rollout_dataset_agent_functions: list[CustomFunctionConfig] = []
     use_sampling_support_replay: bool
     rollout_sampling_logprobs_mode: Literal["selected", "support"]
     rollout_top_logprobs_num: A[int, Arg()] = 0
@@ -252,12 +254,15 @@ class RolloutRelatedConfig(BaseConfig):
         str,
         Arg(
             type_parser=None,
-            choices=["broadcast", "broadcast_packed", "p2p", "disk-delta"],
+            choices=["broadcast", "broadcast_packed", "p2p", "disk-delta", "ici"],
             help=(
                 "The method to transfer weights to remote rollout engines during update weight. "
                 "'disk-delta' diffs each sync against a CPU snapshot of the previous one and publishes "
                 "only the changed bytes to --update-weight-disk-dir; each engine's /pull_weights applies "
-                "them into a host-local checkpoint that the engine reloads from."
+                "them into a host-local checkpoint that the engine reloads from. "
+                "'ici' sends each bucket device to device over the ICI links of a TPU slice the trainer "
+                "shares with one engine (MILES_TPU_SHARED_SLICE on the trainer, SGLANG_TPU_SHARED_SLICE "
+                "on the engine)."
             ),
         ),
     ] = "broadcast"
@@ -348,6 +353,8 @@ class RolloutRelatedConfig(BaseConfig):
 
 
 class RolloutRelatedRolloutOnlyConfig(BaseConfig):
+    # hooks named by --rollout-data-yaml-config datasets, resolved at startup and keyed by path; not a flag
+    rollout_dataset_functions: dict[str, CustomFunctionConfig] = {}
     namespaced_radix_cache: A[
         bool | None,
         Arg(
@@ -362,12 +369,19 @@ class RolloutRelatedRolloutOnlyConfig(BaseConfig):
             ),
         ),
     ] = None
-    rollout_max_context_len: A[
+    max_seq_len: A[
         int | None,
         Arg(
             help=(
-                "The maximum context size for the inference engine during rollout."
-                "It should no exceed the `max_position_embeddinds` in Huggingface model's `config.json`"
+                "Max tokens in one trajectory: its prompt plus every completion and environment response. "
+                "On /generate, each request's max_new_tokens is lowered so prompt and completion fit it, and "
+                "a request with no room left stops the sample as TRUNCATED. Under the session server, agent "
+                "functions receive it in metadata and decide when to stop, and sample assembly truncates the "
+                "collected samples to it. An agentic dataset in --rollout-data-yaml-config may set a lower "
+                "max_seq_len. "
+                "It should not exceed `max_position_embeddings` in the HuggingFace model's `config.json`; "
+                "under the session server the engine context must also fit one --rollout-max-response-len "
+                "response past it."
             )
         ),
     ] = None
@@ -527,6 +541,20 @@ class RolloutRelatedRolloutOnlyConfig(BaseConfig):
             ),
         ),
     ] = "oldest"
+    async_submit_within_staleness: A[
+        bool,
+        Arg(
+            help=(
+                "Also apply --max-weight-staleness N when the fully async producer submits a group: the default "
+                "data buffer admits one only while the buffered and in-flight groups number fewer than "
+                "N * rollout_batch_size, plus one rollout_batch_size while a training step waits for its batch. "
+                "N = 0 makes generation synchronous. Requires one weight version per training step, and a data "
+                "buffer that implements admits(). The default data buffer already gates submission whenever "
+                "--max-weight-staleness is set, learning the versions each training step advances, so with it "
+                "this flag only adds those checks."
+            )
+        ),
+    ] = False
     async_max_concurrent_samples: A[
         int | None,
         Arg(

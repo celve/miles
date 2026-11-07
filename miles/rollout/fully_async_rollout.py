@@ -91,9 +91,12 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         self._curr_kv_cache_namespace: str | None = None
         self._producer_resumed = asyncio.Event()
         self._producer_resumed.set()
-        self._drain_started = asyncio.Event()
+        self._admission_changed = asyncio.Event()
         default_buffer_cls = DefaultMultiDataBuffer if self.args.raw_megatron.is_multi_policy else DefaultDataBuffer
         buffer_cls = load_function(self.args.custom_async_data_buffer_path) or default_buffer_cls
+        assert (
+            not self.args.async_submit_within_staleness or buffer_cls.admits is not DataBuffer.admits
+        ), f"--async-submit-within-staleness requires {buffer_cls.__name__} to implement admits()"
         self._output: DataBuffer = buffer_cls(
             DataBufferConstructorInput(args=self.args, unused_handler_fn=self._handle_unused)
         )
@@ -176,12 +179,12 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         active: set[asyncio.Task] = set()
         while True:
             await self._producer_resumed.wait()
-            self._drain_started.clear()
-            while (admitted := self._output.admits(in_flight_groups=len(active))) and self._scheduler.has_capacity(
+            self._admission_changed.clear()
+            while (admits := self._output.admits(in_flight=len(active))) and self._scheduler.has_capacity(
                 pending_groups=len(active), group_budget=self._max_in_flight_groups()
             ):
                 active.add(self._submit_one_group())
-            if admitted:
+            if admits:
                 done, active = await self._scheduler.wait_for_progress(active)
             else:
                 done, active = await self._wait_for_admission(active)
@@ -191,14 +194,14 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
                 await self._output.put(entry)
                 self._running_tasks = [x for x in self._running_tasks if x.task is not task]
 
-    async def _wait_for_admission(self, active: set[asyncio.Task]) -> tuple[set[asyncio.Task], set[asyncio.Task]]:
-        # Only a drain or a group the buffer rejects can reopen admission; sample completions cannot.
-        drain_started = asyncio.ensure_future(self._drain_started.wait())
+    async def _wait_for_admission(self, pendings: set[asyncio.Task]) -> tuple[set[asyncio.Task], set[asyncio.Task]]:
+        """Wait for a drain to start, an unused group to leave, or a group to finish (its put may reject it)."""
+        waiter = asyncio.create_task(self._admission_changed.wait())
         try:
-            done, pending = await asyncio.wait(active | {drain_started}, return_when=asyncio.FIRST_COMPLETED)
+            done, pending = await asyncio.wait(pendings | {waiter}, return_when=asyncio.FIRST_COMPLETED)
         finally:
-            drain_started.cancel()
-        return done - {drain_started}, pending - {drain_started}
+            waiter.cancel()
+        return done - {waiter}, pending - {waiter}
 
     def _collect_group_result(self, task: asyncio.Task, prompt_group: list[Sample]) -> DataBufferInput:
         if not task.cancelled():
@@ -227,7 +230,7 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
 
         assert not self._worker.done(), "the fully-async rollout worker has ended"
         self._worker_error_cancel_targets.add(asyncio.current_task())
-        self._drain_started.set()
+        self._admission_changed.set()
         entries = await self._output.get(
             current_version=input.weight_version,
             num_groups=args.rollout_batch_size,
@@ -278,9 +281,11 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         for sample in prompt_group:
             sample.reset_for_retry()
         self._retry_buffer.append(prompt_group)
+        self._admission_changed.set()
 
     def _drop_unused(self, prompt_group: list[Sample], reason: UnusedReason) -> None:
         SampleOwnershipRecorder.log_dropped_samples(args=self.args, samples=prompt_group, reason=reason.value)
+        self._admission_changed.set()
 
     def save(self, directory: Path) -> None:
         state = _FullyAsyncRolloutState(
@@ -296,6 +301,16 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         assert not self._retry_buffer, "restore the fully async rollout state before any group was recycled"
         self._retry_buffer = deque([*state.retry_buffer, *state.running])
         self._output.load_state_dict(state.output)
+
+    def drop_saved_in_flight(self, directory: Path) -> None:
+        state: _FullyAsyncRolloutState = load_simple_checkpoint(directory=directory)
+        prompt_groups = [*state.retry_buffer, *state.running]
+        record_dropped_samples(prompt_groups)
+        samples = [sample for group in prompt_groups for sample in group]
+        SampleOwnershipRecorder.log_dropped_samples(args=self.args, samples=samples, reason="data_reset_on_load")
+        # the finished groups are in the buffer's own layout, which a custom buffer class may change
+        self._output.drop_saved_state(state.output, reason="data_reset_on_load")
+        logger.info(f"Dropped {len(prompt_groups)} saved queued or running prompt groups drawn from the reset data")
 
 
 @dataclass(frozen=True)

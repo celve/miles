@@ -74,7 +74,7 @@ class HarborCuaOptions:
     def sample_token_budget(self, args) -> int | None:
         if self.max_sample_tokens is not None:
             return self.max_sample_tokens
-        context_len = args.rollout_max_context_len
+        context_len = args.max_seq_len
         return int(context_len) if context_len else None
 
 
