@@ -95,6 +95,7 @@ def _train_args(args: ScriptArgs) -> str:
         f"--rollout-batch-size {args.rollout_batch_size} "
         f"--n-samples-per-prompt {args.n_samples_per_prompt} "
         "--rollout-max-response-len 320 "
+        "--rollout-skip-special-tokens "
         "--rollout-temperature 1 "
         f"--global-batch-size {args.rollout_batch_size * args.n_samples_per_prompt} "
         "--balance-data "

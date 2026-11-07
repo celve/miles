@@ -47,6 +47,9 @@ class PlannerRewardConfig(VideoRewardConfig):
 
 
 async def planner_rm(args, samples: Sample | list[Sample], **pools) -> float | None | list[float | None]:
+    if not args.rollout_skip_special_tokens:
+        # Miles keeps the stop token in the response text (no_stop_trim), which would reach the generator.
+        raise NonRetryableError("planner_rm reads the answer as text: run with --rollout-skip-special-tokens")
     batch = samples if isinstance(samples, list) else [samples]
     client = DiffusionApiClient(server_url=get_model_url(args, args.video_generator_model, ""))
     started = time.monotonic()

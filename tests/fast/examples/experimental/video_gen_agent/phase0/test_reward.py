@@ -116,7 +116,9 @@ _EVAL_DATASETS = [
 ]
 
 
-def _rollout_fn(monkeypatch, tmp_path, router, *, group_rm, pool, num_frames=_FRAMES) -> InferenceRolloutFn:
+def _rollout_fn(
+    monkeypatch, tmp_path, router, *, group_rm, pool, num_frames=_FRAMES, skip_special_tokens=True
+) -> InferenceRolloutFn:
     monkeypatch.setattr(inference_rollout_common, "load_tokenizer", lambda *args, **kwargs: None)
     monkeypatch.setattr(inference_rollout_common, "load_processor", lambda *args, **kwargs: None)
     rm_config = PlannerRewardConfig(
@@ -142,6 +144,7 @@ def _rollout_fn(monkeypatch, tmp_path, router, *, group_rm, pool, num_frames=_FR
             rollout_batch_size=1,
             over_sampling_batch_size=1,
             n_samples_per_prompt=2,
+            rollout_skip_special_tokens=skip_special_tokens,
         )
     )
     return InferenceRolloutFn(
@@ -280,6 +283,15 @@ async def test_a_clip_the_generator_resized_stops_the_training_rollout(
     with pytest.raises(NonRetryableError, match="asked for 13 frames"):
         await inference_rollout_train.generate_rollout_async(fn.state, 0, lambda n: [_group("a cat", "a cat")])
     assert len(submitted) == 1
+
+
+async def test_a_run_that_keeps_special_tokens_in_the_answer_is_refused(monkeypatch, tmp_path, generator_router):
+    router, seen = generator_router
+    fn = _rollout_fn(monkeypatch, tmp_path, router, group_rm=True, pool=FakePool(), skip_special_tokens=False)
+
+    with pytest.raises(NonRetryableError, match="--rollout-skip-special-tokens"):
+        await generate_and_rm_group(fn.state, _group("a cat", "a cat"), sampling_params={})
+    assert seen == []
 
 
 def test_the_rollout_log_adds_phase0_timings_and_keeps_the_default_metrics(monkeypatch):
