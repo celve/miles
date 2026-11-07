@@ -25,6 +25,7 @@ from miles.backends.sglang_utils.arguments import validate_args as validate_sgla
 from miles.backends.sglang_utils.sglang_api_client import WorkerType
 from miles.backends.sglang_utils.sglang_config import ModelConfig, ServerGroupConfig, SglangConfig
 from miles.backends.torchtitan_utils.arguments import build_torchtitan_parser
+from miles.utils.args.configs.data import DataConfig
 from miles.utils.args.configs.router import RouterConfig
 from miles.utils.args.trainer_utils import compute_trainer_ckpt_load_config
 from miles.utils.arguments import (
@@ -4021,6 +4022,7 @@ class TestMultimodalTokenSpaceProcessingArgs:
                 "custom_inference_engine_provider_path": None,
                 "use_session_server": False,
                 "use_miles_router": False,
+                "multimodal_rebuild": None,
                 **overrides,
             }
         )
@@ -4094,3 +4096,53 @@ class TestMultimodalTokenSpaceProcessingArgs:
 
         with pytest.raises(ValueError, match=f"same processor settings: Field '{next(iter(group_override))}'"):
             _check_multimodal_token_space_processing_args(self._args(), sglang=sglang)
+
+    @staticmethod
+    def _parse_rebuild_mode(argv):
+        parser = argparse.ArgumentParser()
+        DataConfig.add_arguments(parser)
+        return parser.parse_args(argv).multimodal_rebuild
+
+    def _resolve(self, argv, *, token_space=True):
+        args = self._args(
+            multimodal_token_space_processing=token_space, multimodal_rebuild=self._parse_rebuild_mode(argv)
+        )
+        _check_multimodal_token_space_processing_args(args, sglang=make_sglang_config(**self._SUPPORTED))
+        return args.multimodal_rebuild
+
+    @pytest.mark.parametrize(
+        ("argv", "expected"),
+        [
+            ([], "micro_batch_prefetch"),
+            (["--multimodal-rebuild", "round"], "round"),
+            (["--multimodal-rebuild", "micro_batch"], "micro_batch"),
+            (["--multimodal-rebuild", "micro_batch_prefetch"], "micro_batch_prefetch"),
+        ],
+    )
+    def test_the_rebuild_mode_defaults_to_micro_batch_prefetch_on_cuda(self, argv, expected):
+        assert self._resolve(argv) == expected
+
+    def test_the_rebuild_mode_defaults_to_micro_batch_off_cuda(self, monkeypatch):
+        monkeypatch.setattr("miles.utils.arguments.current_platform", SimpleNamespace(device_type="tpu"))
+
+        assert self._resolve([]) == "micro_batch"
+        assert self._resolve(["--multimodal-rebuild", "round"]) == "round"
+
+    def test_an_explicit_micro_batch_prefetch_is_refused_off_cuda(self, monkeypatch):
+        monkeypatch.setattr("miles.utils.arguments.current_platform", SimpleNamespace(device_type="tpu"))
+
+        with pytest.raises(ValueError, match="CUDA stream; it does not support the tpu platform"):
+            self._resolve(["--multimodal-rebuild", "micro_batch_prefetch"])
+
+    def test_outside_token_space_only_the_default_mode_is_accepted(self):
+        assert self._resolve([], token_space=False) == "micro_batch_prefetch"
+        assert self._resolve(["--multimodal-rebuild", "micro_batch_prefetch"], token_space=False) == (
+            "micro_batch_prefetch"
+        )
+        for mode in ("round", "micro_batch"):
+            with pytest.raises(ValueError, match=f"--multimodal-rebuild {mode} needs --multimodal-token-space"):
+                self._resolve(["--multimodal-rebuild", mode], token_space=False)
+
+    def test_an_unknown_rebuild_mode_does_not_parse(self):
+        with pytest.raises(SystemExit):
+            self._parse_rebuild_mode(["--multimodal-rebuild", "eager"])

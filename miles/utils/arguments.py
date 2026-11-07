@@ -25,6 +25,7 @@ from miles.backends.sglang_utils.sglang_scaling_config import SglangScalingConfi
 from miles.backends.torchtitan_utils.args_namespace import TorchtitanArgsNamespace
 from miles.backends.training_utils.data.token_space_media_process import RolloutEngineProcessorArgs
 from miles.dashboard.args import validate_dashboard_args
+from miles.platforms import current_platform
 from miles.ray.specs.train import external_trainer_controller_addrs
 from miles.rollout.checkpoint_eval import is_checkpoint_eval_fn
 from miles.utils.args.configs.fault_tolerance import _DEFAULT_FT_API_SERVER_PORT
@@ -867,8 +868,23 @@ def _resolve_sample_ownership_check(args: argparse.Namespace) -> None:
         )
 
 
+def _check_multimodal_rebuild_args(args) -> None:
+    on_cuda = current_platform.device_type == "cuda"
+    default = "micro_batch_prefetch" if on_cuda else "micro_batch"
+    requested = args.multimodal_rebuild
+    if requested is not None and requested != default and not args.multimodal_token_space_processing:
+        raise ValueError(f"--multimodal-rebuild {requested} needs --multimodal-token-space-processing")
+    if requested == "micro_batch_prefetch" and not on_cuda:
+        raise ValueError(
+            "--multimodal-rebuild micro_batch_prefetch rebuilds on a CUDA stream; it does not support "
+            f"the {current_platform.device_type} platform."
+        )
+    args.multimodal_rebuild = requested or default
+
+
 def _check_multimodal_token_space_processing_args(args, *, sglang: SglangConfig) -> None:
     """Reject launch settings under which the trainer cannot rebuild the rollout engines' media features."""
+    _check_multimodal_rebuild_args(args)
     if not args.multimodal_token_space_processing:
         return
     if not sglang.common_value("enable_token_space_processor"):
