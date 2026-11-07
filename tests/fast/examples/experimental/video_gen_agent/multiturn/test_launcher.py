@@ -6,7 +6,7 @@ from tests.fast.fixtures.args_fixtures import parse_megatron_test_config
 from transformers import Qwen3_5Config
 
 
-def test_the_launchers_layout_parses_with_the_generator_and_judge_on_gpus_of_their_own(monkeypatch, tmp_path):
+def test_the_launchers_layout_parses_with_the_generator_and_eval_engine_on_gpus_of_their_own(monkeypatch, tmp_path):
     monkeypatch.delenv("WANDB_API_KEY", raising=False)
     # Megatron probes the GPU architecture for TP > 1; a CPU host has none.
     monkeypatch.setattr("megatron.training.arguments.get_device_arch_version", lambda: 10)
@@ -17,15 +17,20 @@ def test_the_launchers_layout_parses_with_the_generator_and_judge_on_gpus_of_the
 
     config = parse_megatron_test_config("--ffn-hidden-size", "256", *shlex.split(_train_args(args)))
 
-    policy, generator = config.sglang.models
+    policy, generator, eval_model = config.sglang.models
     assert [group.engine_kind for group in generator.server_groups] == ["diffusion"]
     assert policy.update_weights and not generator.update_weights
     assert config.sglang_scaling.group(model_name="generator", group_index=0).num_gpus == 2
     (judge,) = config.reward_pools
-    assert judge.name == "judge" and judge.num_workers == 1 and not judge.colocated
-    assert config.reward_scaling.pools["judge"].gpu_offset == 3
+    assert judge.name == "judge" and judge.num_workers == 1 and judge.colocated and not judge.needs_offload
+    assert config.reward_scaling.pools["judge"].gpu_offset == 0
     assert not config.colocate and config.actor_num_gpus_per_node == 4
     assert config.use_session_server == "v2" and config.tito_model == "qwen35"
+    # The env acts on parsed tool calls only, so the engines must parse Qwen3.5's native calls.
+    assert config.sglang.common_value("tool_call_parser") == "qwen3_coder"
+    assert config.sglang.common_value("reasoning_parser") == "qwen3"
+    assert config.eval_num_gpus == 1 and config.eval_uses_snapshots and eval_model.name == "eval"
+    assert config.eval_hf_dir == "/root/shared_data/test/eval_snapshots"
     assert config.multimodal_token_space_processing and not config.group_rm
     assert config.custom_rm_path.config.video_reward_pool == "judge"
     assert [dataset.name for dataset in config.eval_datasets] == ["heldout"]
@@ -48,9 +53,10 @@ def test_the_feature_cache_is_on_by_default_and_shared_under_the_run():
 
     assert "--sglang-enable-token-space-preprocess-cache --sglang-token-space-preprocess-cache-trust-url" in argv
     assert "--sglang-token-space-preprocess-cache-dir /root/shared_data/test/feature_cache " in argv
+    assert "multiturn.feature_cache.prune_feature_cache" in argv
     assert "preprocess-cache" not in _train_args(ScriptArgs(run_id="test", feature_cache=False))
 
 
 def test_a_gpu_split_that_does_not_fill_the_node_is_refused():
     with pytest.raises(AssertionError, match="adds up to 7, not 8"):
-        ScriptArgs(judge_gpus=0)
+        ScriptArgs(eval_gpus=0)

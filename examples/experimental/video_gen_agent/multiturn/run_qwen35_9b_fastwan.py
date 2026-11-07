@@ -2,7 +2,8 @@
 up to three times and submits one, rewarded by a Qwen3-VL judge of the submitted clip against the request.
 
 One node, not colocated (a frozen generator cannot share GPUs with training): the trainer (Qwen3.5 plugin model under
-raw Megatron, its vision tower frozen), the planner's engines, the generator's engines and the judge's reward pool.
+raw Megatron, its vision tower frozen), the planner's engine with the judge's reward pool beside it, the generator's
+engines, and an eval engine that scores exported snapshots off the training path.
 The env is ``examples.experimental.video_gen_agent.env`` under session server v2; each clip comes back to the planner
 as a ``video_url`` part in token space, and the engines and the trainer share SGLang's disk item feature cache.
 
@@ -11,7 +12,8 @@ at step 0, the untrained planner). The raw-request baseline is Phase 0's ``eval/
 seeds, generator settings and judge.
 
 Args:
-    --train-gpus, --policy-gpus, --generator-gpus, --judge-gpus: the node's split, summing to --num-gpus-per-node.
+    --train-gpus, --policy-gpus, --generator-gpus, --eval-gpus: the node's split, summing to --num-gpus-per-node; the
+        judge shares the planner's GPU.
     --num-rollout, --rollout-batch-size, --n-samples-per-prompt: GRPO steps, requests per step, episodes per request.
     --feature-cache / --no-feature-cache: share the engines' disk item feature cache with the trainer.
     --model-dir, --data-dir: where models and the requests live; checkpoints and clips go under --output-dir.
@@ -27,6 +29,7 @@ from dataclasses import dataclass
 import typer
 import yaml
 
+from miles.utils.chat_template_utils import resolve_reasoning_and_tool_call_parser
 from miles.utils.external_utils import command_utils
 
 PLANNER = "Qwen/Qwen3.5-9B"
@@ -46,6 +49,9 @@ _CLIP_ENV = {
     "AGENT_VIDEO_GEN_GUIDANCE_SCALE": "1.0",
 }
 
+# SGLang parses Qwen3.5's tool calls only with these engine parsers; the env acts on parsed tool calls alone.
+_REASONING_PARSER, _TOOL_CALL_PARSER = resolve_reasoning_and_tool_call_parser("qwen35")
+
 # The planner watches each clip at 4 fps: 8 frames of a 2 s clip.
 _MM_PROCESS_CONFIG = {"video": {"fps": 4.0, "max_frames": 16}, "video_preprocessing_device": "cpu"}
 
@@ -57,7 +63,7 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     train_gpus: int = 4
     policy_gpus: int = 1
     generator_gpus: int = 2
-    judge_gpus: int = 1
+    eval_gpus: int = 1
     num_rollout: int = 200
     rollout_batch_size: int = 32
     n_samples_per_prompt: int = 8
@@ -71,7 +77,7 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     extra_args: str = ""
 
     def __post_init__(self):
-        split = self.train_gpus + self.policy_gpus + self.generator_gpus + self.judge_gpus
+        split = self.train_gpus + self.policy_gpus + self.generator_gpus + self.eval_gpus
         assert self.num_nodes == 1, "the recipe places its trainer, engines and judge on one node"
         assert split == self.num_gpus_per_node, f"the GPU split adds up to {split}, not {self.num_gpus_per_node}"
 
@@ -157,6 +163,7 @@ def _train_args(args: ScriptArgs) -> str:
         f"--custom-agent-function-path {AGENT}.env.run_agent "
         "--use-session-server v2 "
         "--tito-model qwen35 "
+        f"--sglang-reasoning-parser {_REASONING_PARSER} --sglang-tool-call-parser {_TOOL_CALL_PARSER} "
         "--router miles "
         # Generation dominates an episode, so every episode of a round is in flight at once (LIN-2634).
         f"--sglang-server-concurrency {args.rollout_batch_size * args.n_samples_per_prompt} "
@@ -175,6 +182,7 @@ def _train_args(args: ScriptArgs) -> str:
             "--sglang-enable-token-space-preprocess-cache "
             "--sglang-token-space-preprocess-cache-trust-url "
             f"--sglang-token-space-preprocess-cache-dir {args.run_dir}/feature_cache "
+            f"--custom-rollout-log-function-path {AGENT}.multiturn.feature_cache.prune_feature_cache "
         )
 
     # No --group-rm: the env reward scores episodes sample by sample, and eval refuses it.
@@ -184,9 +192,12 @@ def _train_args(args: ScriptArgs) -> str:
         "--video-reward-pool judge "
     )
 
+    # The eval engine loads an HF snapshot of each eval step, so evaluation never waits on, or holds up, training.
     eval_args = (
         f"--eval-interval {args.eval_interval} "
         f"--eval-config {command_utils.encode_pseudo_file(yaml.safe_dump(_eval_config(args)))} "
+        f"--eval-num-gpus {args.eval_gpus} --eval-num-gpus-per-engine 1 "
+        f"--eval-hf-dir {args.run_dir}/eval_snapshots "
     )
 
     # TimeLens GRPO on Qwen3.5 (#4633): no KL, constant lr 1e-6, TIS against the rollout log-probs.
@@ -257,6 +268,7 @@ def _sglang_config(args: ScriptArgs) -> dict:
                 "update_weights": False,
                 "server_groups": [generator_group],
             },
+            {"name": "eval", "server_groups": [{"worker_type": "regular", "num_gpus": args.eval_gpus}]},
         ]
     }
 
@@ -267,8 +279,9 @@ def _reward_pools(args: ScriptArgs) -> list[dict]:
             "name": "judge",
             "scorer_path": "miles.rollout.rm_hub.video.vlm_judge.VlmJudgeScorer",
             "scorer_kwargs": {"model_path": f"{args.model_dir}/{JUDGE.split('/')[1]}"},
-            "num_workers": args.judge_gpus,
+            "num_workers": 1,
             "uses_gpu": True,
+            "colocated": True,
             "batch_size": 4,
         }
     ]

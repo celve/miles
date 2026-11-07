@@ -4,13 +4,13 @@ A Qwen3.5-9B planner turns a video request into a clip with a frozen generator: 
 
 ## How an episode runs
 
-The episode is [the env](../env.py) under session server v2, reached through [`generate.py`](generate.py), which hands the generator's router to the env and is otherwise `agentic_tool_call.generate`. With `AGENT_VIDEO_GEN_CLIP_OBSERVATIONS=1` each generated clip comes back in the tool reply as a `video_url` part, which the session server carries in token space (`--multimodal-token-space-processing`, `--tito-model qwen35`, the Miles router). [`generator.py`](generator.py)'s `RouterClipGenerator` is the env's generator: one `DiffusionApiClient.generate_clip` per `generate` call, its frame count rounded to the 4k+1 the generator takes, an HTTP failure raised as `GeneratorUnavailable`, which discards the episode instead of training on it.
+The episode is [the env](../env.py) under session server v2, reached through [`generate.py`](generate.py), which hands the generator's router to the env and is otherwise `agentic_tool_call.generate`. With `AGENT_VIDEO_GEN_CLIP_OBSERVATIONS=1` each generated clip comes back in the tool reply as a `video_url` part, which the session server carries in token space (`--multimodal-token-space-processing`, `--tito-model qwen35`, the Miles router). The engines parse Qwen3.5's native tool calls with the `qwen35` family's parsers (`qwen3_coder`, `qwen3`); without them a call stays text and the env, which acts on parsed tool calls only, never generates. [`generator.py`](generator.py)'s `RouterClipGenerator` is the env's generator: one `DiffusionApiClient.generate_clip` per `generate` call, its frame count rounded to the 4k+1 the generator takes, an HTTP failure raised as `GeneratorUnavailable`, which discards the episode instead of training on it.
 
 [The env's reward step](../reward.py) scores each episode's submitted clip on the judge pool (`--video-reward-pool judge`); an episode that submits nothing scores 0, and a pool failure leaves the reward missing.
 
 ## Running it
 
-[`run_qwen35_9b_fastwan.py`](run_qwen35_9b_fastwan.py) trains Qwen3.5-9B (the plugin multimodal model under raw Megatron, TP 4, vision tower frozen, as in TimeLens) against FastWan2.2-TI2V-5B and a Qwen3-VL-8B judge on one 8-GPU node: 4 trainer GPUs, 1 planner engine, 2 generator engines and 1 judge worker. A frozen generator cannot share GPUs with training, so the run is not colocated.
+[`run_qwen35_9b_fastwan.py`](run_qwen35_9b_fastwan.py) trains Qwen3.5-9B (the plugin multimodal model under raw Megatron, TP 4, vision tower frozen, as in TimeLens) against FastWan2.2-TI2V-5B and a Qwen3-VL-8B judge on one 8-GPU node: 4 trainer GPUs, 1 planner engine with the judge worker beside it on the same GPU, 2 generator engines and 1 eval engine. A frozen generator cannot share GPUs with training, so the run is not colocated. The eval engine loads an HF snapshot the trainer exports at each eval step (`--eval-hf-dir`), so evaluation runs off the training path.
 
 ```bash
 python examples/experimental/video_gen_agent/multiturn/run_qwen35_9b_fastwan.py
@@ -32,4 +32,9 @@ Clips are Phase 0's: 832×480, 2 s at 24 fps (49 frames), FastWan's 3-step sched
 
 ## Disk use
 
-The feature cache keys on the clip's path and is never evicted. Clips are written once, under their content hash, so a cached entry never goes stale. A clip's features at 4 fps are about 1.5 k visual tokens (832×480, 8 frames); budget the cache directory for every clip of the run: at 32 × 8 episodes and up to 3 clips each, about 770 clips a step.
+The feature cache never evicts, so the recipe prunes it: [`feature_cache.py`](feature_cache.py), the rollout log hook, removes every entry written before the rollout just generated, which training has already used (a removed entry reads back as a miss and is computed again). The cache then holds about two rollouts' clips.
+
+- One clip's features at the planner's sampling (832×480, 8 frames at 4 fps) are `pixel_values_videos` of 6240 × 1536 float32, 36.6 MiB, for 1560 visual tokens (measured with Qwen3.5's video processor).
+- A step makes at most 32 × 8 episodes × 3 clips = 768 clips, 27.4 GiB of features; an eval at most 95 × 3 = 285 clips, 10.2 GiB.
+- Budget the cache directory for two steps and one eval in flight: about 65 GiB. Without the prune a 200-step run would need up to 153,600 clips' features, 5.4 TiB.
+- The clips themselves (`clips/`, mp4, under 1 MB each) and the submitted copies (`submitted/`) are kept for the whole run: at most 160 k files, under 160 GB.
