@@ -22,6 +22,8 @@ class ClipRequest:
     width: int
     height: int
     fps: int
+    # A frame to continue from, for image-to-video; None generates from text alone.
+    image_path: str | None = None
 
     @property
     def num_frames(self) -> int:
