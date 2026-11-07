@@ -34,13 +34,19 @@ logger = logging.getLogger(__name__)
 
 
 def retarget_args(
-    *, args: ImmutableNamespace, router_ip: str, router_port: int, engine_gpu_counts: Sequence[int]
+    *,
+    args: ImmutableNamespace,
+    router_ip: str,
+    router_port: int,
+    engine_gpu_counts: Sequence[int],
+    server_concurrency: int | None = None,
 ) -> ImmutableNamespace:
     """Shallow-copy ``args`` with the router address and GPU sizing swapped for eval.
 
     Generate functions read the router from ``args`` and ``GenerateState`` sizes its
-    semaphore off the GPU counts, so a retargeted copy runs the standard eval path
-    against a different set of engines unchanged.
+    semaphore off the GPU counts and the per-engine concurrency, so a retargeted copy
+    runs the standard eval path against a different set of engines unchanged.
+    ``server_concurrency`` None keeps ``args.sglang_server_concurrency``.
     """
     runtime = InferenceRuntimeMutState(engine_count=len(engine_gpu_counts), gpu_count=sum(engine_gpu_counts))
     values = dict(args) | {
@@ -48,6 +54,8 @@ def retarget_args(
         "sglang_router_ip": router_ip,
         "sglang_router_port": router_port,
     }
+    if server_concurrency is not None:
+        values["sglang_server_concurrency"] = server_concurrency
     return type(args).model_validate(values)
 
 

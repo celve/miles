@@ -12,6 +12,7 @@ from miles.backends.training_utils.data.context_parallel import (
 from miles.backends.training_utils.data.sampling_mask import get_rollout_sampling_masks
 from miles.backends.training_utils.loss.hub.corrections import vanilla_tis_function
 from miles.backends.training_utils.loss.hub.logit_processors import get_log_probs_and_entropy, get_values
+from miles.backends.training_utils.loss.hub.m2po import compute_m2po_policy_loss
 from miles.backends.training_utils.loss.hub.math_utils import (
     compute_approx_kl,
     compute_ess_ratio_contribution,
@@ -129,8 +130,14 @@ def policy_loss_function(
     )
 
     log_probs = log_probs_and_entropy["log_probs"]
+    scored_log_probs = batch.get("log_probs") or [None] * len(log_probs)
+    # Samples the forward-only pass skipped (the first optimizer step's) take this forward's own scores.
+    reuses_training_forward = [args.skip_actor_forward_only and old is None for old in scored_log_probs]
     if args.skip_actor_forward_only:
-        trainer_scored_log_probs = [log_prob.detach() for log_prob in log_probs]
+        trainer_scored_log_probs = [
+            (log_prob if reuse else old).detach()
+            for log_prob, old, reuse in zip(log_probs, scored_log_probs, reuses_training_forward, strict=True)
+        ]
     else:
         trainer_scored_log_probs = (
             [log_prob.detach() for log_prob in batch["log_probs"]] if batch.get("log_probs") is not None else None
@@ -154,15 +161,24 @@ def policy_loss_function(
                 log_probs, total_lengths, response_lengths, strict=False
             )
         ]
-        if args.skip_actor_forward_only and not args.use_rollout_logprobs:
-            full_old_log_probs = [full_log_prob.detach() for full_log_prob in full_log_probs]
-        else:
-            full_old_log_probs = [
-                all_gather_with_cp(old_log_prob, total_length, response_length)
-                for old_log_prob, total_length, response_length in zip(
-                    old_log_probs, total_lengths, response_lengths, strict=False
-                )
-            ]
+        full_old_log_probs = [
+            (
+                full_log_prob.detach()
+                if reuse and not args.use_rollout_logprobs
+                else all_gather_with_cp(old_log_prob, total_length, response_length)
+            )
+            for full_log_prob, old_log_prob, reuse, total_length, response_length in zip(
+                full_log_probs, old_log_probs, reuses_training_forward, total_lengths, response_lengths, strict=False
+            )
+        ]
+
+    local_loss_mask_list = get_local_response_loss_masks(
+        total_lengths,
+        response_lengths,
+        batch["loss_masks"],
+        args.qkv_format,
+        max_seq_lens,
+    )
 
     # Compute OPSM mask if enabled
     if args.use_opsm:
@@ -172,6 +188,8 @@ def policy_loss_function(
             full_old_log_probs=full_old_log_probs,
             advantages=advantages_list,
             loss_masks=batch["loss_masks"],
+            denominators=batch.get("rollout_mask_sums", None),
+            local_loss_masks=local_loss_mask_list,
         )
 
     # Compute KL divergence (GSPO uses sequence-level KL, others use per-token KL)
@@ -189,13 +207,6 @@ def policy_loss_function(
         log_probs = torch.cat(log_probs, dim=0)
         ppo_kl = old_log_probs - log_probs
 
-    local_loss_mask_list = get_local_response_loss_masks(
-        total_lengths,
-        response_lengths,
-        batch["loss_masks"],
-        args.qkv_format,
-        max_seq_lens,
-    )
     local_loss_masks = torch.cat(local_loss_mask_list, dim=0).to(device=ppo_kl.device)
     active_tokens = local_loss_masks.bool()
     ppo_kl = torch.where(
@@ -209,7 +220,25 @@ def policy_loss_function(
         advantages.new_zeros(()),
     )
 
-    pg_loss, pg_clipfrac = compute_policy_loss(ppo_kl, advantages, args.eps_clip, args.eps_clip_high, args.eps_clip_c)
+    if args.use_m2po:
+        assert rollout_old_log_probs is not None, "rollout_log_probs must be provided when --use-m2po is set"
+        behaviour_log_ratio = torch.where(
+            active_tokens,
+            log_probs.detach() - torch.cat(rollout_old_log_probs, dim=0),
+            log_probs.new_zeros(()),
+        )
+        pg_loss, pg_clipfrac, m2po_metrics = compute_m2po_policy_loss(
+            ppo_kl,
+            behaviour_log_ratio,
+            advantages,
+            tau=args.m2po_tau,
+            eps_clip=args.eps_clip,
+            eps_clip_high=args.eps_clip_high,
+        )
+    else:
+        pg_loss, pg_clipfrac = compute_policy_loss(
+            ppo_kl, advantages, args.eps_clip, args.eps_clip_high, args.eps_clip_c
+        )
 
     if args.dump_details is not None:
         from miles.backends.training_utils.metrics.debug_dump import maybe_dump_policy_loss_debug
@@ -299,6 +328,7 @@ def policy_loss_function(
         qkv_format=args.qkv_format,
         max_seq_lens=max_seq_lens,
         calculate_per_token_loss=args.backend.calculate_per_token_loss,
+        denominators=batch.get("rollout_mask_sums", None),
     )
 
     pg_loss = pg_loss_reducer(pg_loss)
@@ -393,6 +423,10 @@ def policy_loss_function(
         for metric_key, metric_value in tis_metrics.items():
             key_name = f"{metric_key}"
             reported_loss[key_name] = sum_of_sample_mean_for_mismatch_metrics(metric_value)
+
+    if args.use_m2po:
+        for metric_key, metric_value in m2po_metrics.items():
+            reported_loss[metric_key] = sum_of_sample_mean(metric_value).clone().detach()
 
     if args.use_opsm:
         reported_loss["opsm_clipfrac"] = opsm_clipfrac

@@ -199,11 +199,13 @@ class AlgoConfig(BaseConfig):
         bool,
         Arg(
             help=(
-                "Skip the standalone Megatron actor forward-only pass. With --use-rollout-logprobs, those log-"
-                "probs remain the old-policy baseline; otherwise detached training log-probs are reused and the"
-                " actor importance log-ratio is exactly 0. This requires a single optimizer step. The skipped "
-                "pass's rollout/log_probs metric is not emitted. Custom model providers and the before-train-"
-                "step hook must not make the training forward differ from the skipped forward."
+                "Skip the standalone Megatron actor forward-only pass. With --use-rollout-logprobs, "
+                "those log-probs remain the old-policy baseline; otherwise detached training log-probs "
+                "are reused and the actor importance log-ratio is exactly 0. With several optimizer "
+                "steps per rollout only the first step's samples skip the pass; the later steps' are "
+                "still scored before training. The skipped pass's rollout/log_probs metric is not emitted. "
+                "Custom model providers and the before-train-step hook must not make the training "
+                "forward differ from the skipped forward."
             )
         ),
     ] = False
@@ -263,6 +265,22 @@ class AlgoConfig(BaseConfig):
         float,
         Arg(help="The threshold for Off-Policy Sequence Masking (OPSM)."),
     ] = 1e-4
+    use_m2po: A[
+        bool,
+        Arg(
+            help=(
+                "Replace PPO's ratio clip with M2PO's second-moment mask (https://arxiv.org/abs/2510.01161): "
+                "the surrogate is the unclipped ratio times the advantage, and in each micro-batch the "
+                "trust-region tokens with the largest (log pi_theta/pi_rollout)^2 are masked until the rest "
+                "average at most --m2po-tau. Needs rollout log-probs; composes with --use-tis or "
+                "--use-rollout-logprobs. --eps-clip and --eps-clip-high then set only the m2po_ppo_clipfrac metric."
+            )
+        ),
+    ] = False
+    m2po_tau: A[
+        float,
+        Arg(help="M2PO's second-moment threshold tau_M2 (0.04 in every experiment of the paper)."),
+    ] = 0.04
 
 
 class AlgoRolloutOnlyConfig(BaseConfig):

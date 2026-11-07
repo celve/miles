@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CUA-PROGRESS 0/1</title>
+<style>
+  body { margin: 0; background: #f4f4f5; font: 16px system-ui, sans-serif; }
+  #board { position: relative; width: 980px; height: 760px; margin: 8px auto; }
+  .tile { position: absolute; width: __TILE_PX__px; height: __TILE_PX__px; border-radius: 6px; }
+  #banner { text-align: center; padding: 10px; font-weight: 700; }
+</style>
+</head>
+<body>
+<div id="banner">Click the __COLOR_NAME__ square.</div>
+<div id="board"></div>
+<script>
+  const TARGET = "__COLOR_HEX__";
+  const TARGET_AT = [__TARGET_X__, __TARGET_Y__];
+  const DECOYS = __DECOYS__;
+  const board = document.getElementById("board");
+  const banner = document.getElementById("banner");
+
+  function tile(color, x, y, isTarget) {
+    const el = document.createElement("div");
+    el.className = "tile";
+    el.style.background = color;
+    el.style.left = x + "px";
+    el.style.top = y + "px";
+    el.addEventListener("click", () => {
+      if (!isTarget) return;
+      el.style.outline = "6px solid #16a34a";
+      document.title = "CUA-PROGRESS 1/1";
+      banner.textContent = "Done.";
+    });
+    board.appendChild(el);
+  }
+
+  tile(TARGET, TARGET_AT[0], TARGET_AT[1], true);
+  for (const decoy of DECOYS) tile(decoy[0], decoy[1], decoy[2], false);
+</script>
+</body>
+</html>

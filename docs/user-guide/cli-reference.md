@@ -154,6 +154,7 @@ Sections mirror the launch-script argument groups.
 | Flag | Type | Default | Notes |
 |---|---|---|---|
 | `--train-backend` | enum | `megatron` | `megatron` or `fsdp`. |
+| `--freeze-vision-model` | flag | off | Train with the vision tower frozen (Megatron, `--megatron-to-hf-mode bridge`, no custom model provider); its mergers stay trainable. |
 | `--hf-checkpoint` | path | – | HF model dir. Provides tokenizer, config, and the weights FSDP loads. |
 | `--ref-load` | path | – | Reference model in `torch_dist` format (Megatron). |
 | `--load` | path | – | Actor checkpoint to resume from. |
@@ -208,8 +209,10 @@ Sections mirror the launch-script argument groups.
 | `--eval-temperature` | float | – | Eval temperature. Inherits from rollout if unset. |
 | `--eval-top-p` | float | – | Eval top-p. Inherits from rollout if unset. |
 | `--eval-top-k` | int | – | Eval top-k. Inherits from rollout if unset. |
-| `--eval-num-gpus` | int | `0` | Dedicated eval fleet size. `0` = shared-engine eval. Requires `train_async.py`. |
+| `--eval-num-gpus` | int | `0` | Dedicated eval fleet size. `0` = shared-engine eval. Under `--colocate` the fleet takes GPUs past the colocated ones and reuses `--save-hf` checkpoints. |
 | `--eval-num-gpus-per-engine` | int | `1` | Eval engine TP, independent of rollout TP. |
+| `--eval-server-concurrency` | int | – | Requests in flight per eval engine. Inherits `--sglang-server-concurrency` if unset. |
+| `--eval-record-dir` | path | – | Record every evaluated episode under `<dir>/eval_<rollout_id>/` (instruction, per-step screenshot, output, action, reward). Not with `--custom-agent-function-mode sandbox`. |
 | `--eval-hf-dir` | str | – | Staging dir for per-eval HF snapshots (tmpfs recommended). Unset + `--save-hf` = reuse mode. |
 | `--eval-max-in-flight` | int | `2` | Snapshots the trainer may export ahead of the eval backend. Evals are serialized, so this buys lead time, not concurrency — and one more staged snapshot. |
 | `--eval-overflow-policy` | str | `backpressure` | At the cap: await the oldest eval, or `skip` the new point (logged as `eval/skipped_busy`). |
@@ -228,6 +231,7 @@ Sections mirror the launch-script argument groups.
 | `--sequence-parallel` | flag | off | Enable Megatron sequence parallel. |
 | `--use-dynamic-batch-size` | flag | off | Pack varlen samples. Recommended for varlen workloads. |
 | `--max-tokens-per-gpu` | int | – | Token budget per micro-batch per GPU. Required when dynamic batching is on. |
+| `--pad-steps-for-dp-alignment` | flag | off | With `--use-dynamic-batch-size`, add `dp_size - 1` zero-loss two-token samples to each step's first rollout so a step of over-half-cap samples still splits across DP. Incompatible with `--calculate-per-token-loss`. |
 | `--micro-batch-size` | int | `1` | Ignored when dynamic batching is on. |
 | `--recompute-granularity` | enum | Megatron default | `full` or `selective`. |
 | `--recompute-method` | enum | Megatron default | `uniform` or `block`. |
@@ -256,6 +260,8 @@ Sections mirror the launch-script argument groups.
 | `--calculate-per-token-loss` | flag | off | Per-token loss reduction. |
 | `--no-check-for-nan-in-loss-and-grad` | flag | off | Skip NaN/Inf guard (Megatron flag, debug only). |
 | `--true-on-policy-mode` | flag | off | Strict on-policy: reject samples from a prior policy. |
+| `--use-m2po` | flag | off | Replace PPO's ratio clip with M2PO's second-moment mask (arXiv 2510.01161). Needs rollout log-probs; policy loss only, no GSPO, no `--eps-clip-c`, CP 1. |
+| `--m2po-tau` | float | `0.04` | M2PO's second-moment threshold. |
 
 ### Optimizer
 
@@ -283,6 +289,7 @@ Sections mirror the launch-script argument groups.
 | `--group-rm` | flag | off | Batched reward computation. |
 | `--custom-rm-path` | str | – | Custom reward function (see [Customization](/user-guide/customization)). |
 | `--dynamic-sampling-filter-path` | str | – | Group filter (DAPO-style). |
+| `--max-consecutive-aborted-groups` | int | 4 × rollout batch | Fail a synchronous rollout after this many aborted groups in a row; `0` disables. |
 | `--rollout-submission-granularity` | enum | driver | `group` or `sample`: what frees rollout submission capacity. Unset means `sample` under `--fully-async`, `group` otherwise. |
 | `--buffer-filter-path` | str | – | Buffer dequeue filter. |
 | `--rollout-sample-filter-path` | str | – | Per-sample filter. |
@@ -322,6 +329,8 @@ contract, session behavior, and model-family selection.
 | `--custom-agent-function-path` | `<module>.<fn>` | – | Async agent-environment loop. Registered after selecting the built-in agentic wrapper. |
 | `--custom-agent-function-mode` | `subproc` / `inline` | `subproc` | Where each agent call runs: a child process of its own, or the rollout's event loop. See [Where the agent runs](/user-guide/agentic-rollout#where-the-agent-runs). |
 | `--use-session-server` | optional `v1` / `v2` | off | Bare flag (or `v1`) selects the linear append-only server; `v2` selects tree serving. Requires `--hf-checkpoint`. |
+| `--use-session-images` | flag | off | v2 only. Dense session images: the session server assembles `pixel_values` / `image_grid_thw` per retained sample. Needs `--tito-model qwen3_vl`; refused with `--multimodal-token-space-processing`, which carries session media in token space instead. |
+| `--session-image-text-only-samples` | enum | `drop` | With `--use-session-images`: `drop` or `keep` a sample whose retained tokens carry no image. |
 | `--tito-model` | enum | `default` | TITO model family. Named families load their registered fixed template; `default` is best-effort with a checkpoint-native or custom template. |
 | `--max-seq-len` | int | – | Total tokens per session, including prompts, completions, and environment responses. Registered with the agentic wrapper. |
 | `--session-server-ip` | str | router IP | Session-server bind address. |
@@ -355,6 +364,7 @@ contract, session behavior, and model-family selection.
 | Flag | Type | Default | Notes |
 |---|---|---|---|
 | `--partial-rollout` | flag | off | Resume aborted rollouts in the next iteration. |
+| `--weight-staleness-measure` | enum | `oldest` | Which lag of a group `--max-weight-staleness` bounds: `oldest`, `token_mean` or `newest` generated token. |
 
 ### Logging
 

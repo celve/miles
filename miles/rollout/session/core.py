@@ -67,6 +67,7 @@ class ProxyRequest:
 
     method: str
     query: str = ""
+    evaluation: bool = False
 
 
 def _render_json(payload) -> bytes:
@@ -448,7 +449,10 @@ class SessionCore:
         # --- Phase 2: proxy to backend (NO lock held) ---
         headers = self._with_routing_key(headers, session_id)
         result = await self.backend.do_proxy(
-            ProxyRequest(method=method, query=query), "v1/chat/completions", body=proxy_body, headers=headers
+            ProxyRequest(method=method, query=query, evaluation=session.evaluation),
+            "v1/chat/completions",
+            body=proxy_body,
+            headers=headers,
         )
         await self._take_store_ref(session, request_body, result)
 
@@ -529,6 +533,9 @@ class SessionCore:
             assert_engine_expansion_matches(request_body, choice, self.image_token_counter)
 
     def _store_message_media(self, client_args: dict) -> dict:
+        if self.config.use_session_images:
+            # The dense path snapshots each image's bytes itself (``images.store``) and keeps the data URLs.
+            return client_args
         return store_message_media(
             client_args,
             token_space=self.config.multimodal_token_space_processing,
@@ -543,7 +550,9 @@ class SessionCore:
         self, session_id: str, path: str, *, method: str, query: str, headers: dict, body: bytes
     ) -> Response:
         headers = self._with_routing_key(headers, session_id)
+        session = self.registry.sessions.get(session_id)
+        evaluation = session is not None and session.evaluation
         result = await self.backend.do_proxy(
-            ProxyRequest(method=method, query=query), path, body=body, headers=headers
+            ProxyRequest(method=method, query=query, evaluation=evaluation), path, body=body, headers=headers
         )
         return proxy_result_to_response(result)

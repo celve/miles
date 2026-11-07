@@ -36,14 +36,14 @@ from miles.utils.test_utils.uvicorn_thread_server import UvicornThreadServer
 from miles.utils.types import Sample, WeightVersionSpan
 
 
+def _echo_process_fn(prompt: str) -> ProcessResult:
+    return ProcessResult(text=f"echo: {prompt}", finish_reason="stop")
+
+
 @contextmanager
-def _serve_router(extra_args: dict | None = None):
+def _serve_router(extra_args: dict | None = None, eval_backend_url: str | None = None):
     """A standalone v2 SessionServer with arg overrides."""
-
-    def process_fn(prompt: str) -> ProcessResult:
-        return ProcessResult(text=f"echo: {prompt}", finish_reason="stop")
-
-    with with_mock_server(process_fn=process_fn) as backend:
+    with with_mock_server(process_fn=_echo_process_fn) as backend:
         args_values = {
             "miles_router_timeout": 30,
             "hf_checkpoint": "Qwen/Qwen3-0.6B",
@@ -67,6 +67,8 @@ def _serve_router(extra_args: dict | None = None):
             "lora_adapter_path": None,
             "lora_train_only": False,
             "use_session_server": "v2",
+            "use_session_images": False,
+            "session_image_text_only_samples": "drop",
             "session_message_matcher": "strict",
             "session_server_instance_id": uuid.uuid4().hex,
             "pause_generation_mode": "retract",
@@ -83,6 +85,7 @@ def _serve_router(extra_args: dict | None = None):
             port=port,
             instance_id=args.session_server_instance_id,
             backend_url=backend.url,
+            eval_backend_url=eval_backend_url,
         )
         server_obj = SessionServer(config)
         server = UvicornThreadServer(server_obj.app, host="127.0.0.1", port=port)
@@ -91,6 +94,41 @@ def _serve_router(extra_args: dict | None = None):
             yield SimpleNamespace(url=f"http://127.0.0.1:{port}", backend=backend)
         finally:
             server.stop()
+
+
+class TestEvalSessionRouting:
+    @pytest.fixture(scope="class")
+    def env(self):
+        with with_mock_server(process_fn=_echo_process_fn) as eval_backend:
+            with _serve_router(eval_backend_url=eval_backend.url) as env:
+                yield SimpleNamespace(url=env.url, backend=env.backend, eval_backend=eval_backend)
+
+    @staticmethod
+    def _create(url: str, *, evaluation: bool) -> str:
+        return requests.post(f"{url}/sessions", json={"evaluation": evaluation}, timeout=5.0).json()["session_id"]
+
+    @pytest.mark.parametrize("evaluation", [False, True])
+    def test_a_chat_turn_reaches_the_pool_its_session_was_created_for(self, env, evaluation):
+        env.backend.reset_stats()
+        env.eval_backend.reset_stats()
+        session_id = self._create(env.url, evaluation=evaluation)
+
+        assert _post_chat(env.url, session_id, {"messages": [{"role": "user", "content": "hi"}]}).status_code == 200
+
+        expected, other = (env.eval_backend, env.backend) if evaluation else (env.backend, env.eval_backend)
+        assert len(expected.request_log) == 1
+        assert other.request_log == []
+
+    def test_a_raw_proxied_call_follows_its_session_too(self, env):
+        env.backend.reset_stats()
+        env.eval_backend.reset_stats()
+        session_id = self._create(env.url, evaluation=True)
+
+        response = requests.post(f"{env.url}/sessions/{session_id}/generate", json={"input_ids": [1, 2]}, timeout=10.0)
+
+        assert response.status_code == 200
+        assert len(env.eval_backend.request_log) == 1
+        assert env.backend.request_log == []
 
 
 @pytest.fixture(scope="class")

@@ -801,13 +801,22 @@ class TestPosterActorKeywordOnlyConstruction:
 
 
 class TestInitHttpClientConcurrency:
-    def _args(self, *, engine_count: int = 0, eval_engine_count: int = 0, eval_uses_snapshots: bool = True):
+    def _args(
+        self,
+        *,
+        engine_count: int = 0,
+        eval_engine_count: int = 0,
+        eval_uses_snapshots: bool = True,
+        sglang_server_concurrency: int = 512,
+        eval_server_concurrency: int = 512,
+    ):
         return SimpleNamespace(
             inference_runtime_mut_state=InferenceRuntimeMutState(
                 engine_count=engine_count, eval_engine_count=eval_engine_count
             ),
             eval_uses_snapshots=eval_uses_snapshots,
-            sglang_server_concurrency=512,
+            sglang_server_concurrency=sglang_server_concurrency,
+            eval_server_concurrency=eval_server_concurrency,
             use_distributed_post=False,
         )
 
@@ -835,6 +844,13 @@ class TestInitHttpClientConcurrency:
         concurrency, client = self._init(monkeypatch, args)
         assert client is not None
         assert concurrency == 512 * 4 // 2
+
+    def test_the_eval_fleet_adds_its_own_concurrency_per_engine(self, monkeypatch):
+        args = self._args(
+            engine_count=4, sglang_server_concurrency=16, eval_engine_count=1, eval_server_concurrency=64
+        )
+        concurrency, _ = self._init(monkeypatch, args)
+        assert concurrency == 16 * 4 + 64
 
     def test_in_job_gpu_sizing_is_unchanged(self, monkeypatch):
         args = self._args(engine_count=8 // 2, eval_uses_snapshots=False)

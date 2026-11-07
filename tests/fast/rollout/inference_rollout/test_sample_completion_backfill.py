@@ -84,6 +84,7 @@ class Harness:
         self.callbacks: list = []
         self._next_group_index = 0
         self._blockers: list[asyncio.Event] = []
+        self.aborted_pending: int | None = None
 
         def fake_submit_generate_tasks(_state, samples, sample_done_callback=None):
             tasks = []
@@ -97,6 +98,7 @@ class Harness:
             return tasks
 
         async def fake_abort(_state, pendings, _rollout_id):
+            self.aborted_pending = len(pendings)
             _state.aborted = True
             for task in pendings:
                 task.cancel()
@@ -215,7 +217,51 @@ async def test_aborted_group_is_classified_before_missing_reward(monkeypatch):
 
     assert [group[0].group_index for group in output.samples] == [2]
     assert output.metrics["rollout/dynamic_filter/drop_group_has_aborted"] == 1
+    assert output.metrics["rollout/aborted/drop_unknown"] == 1
     assert "rollout/dynamic_filter/drop_group_has_missing_reward" not in output.metrics
+
+
+async def test_an_aborted_group_is_counted_under_its_cause(monkeypatch):
+    harness = Harness(monkeypatch, make_args(rollout_batch_size=1))
+    task = harness.run()
+    await _submitted(harness, 1)
+
+    _abort(harness.submitted_groups[0], "SandboxUnavailable")
+    harness.finish_group(0)
+    await _submitted(harness, 2)
+    harness.finish_group(1)
+    output, _ = await task
+
+    assert output.metrics["rollout/aborted/drop_SandboxUnavailable"] == 1
+
+
+async def test_a_rollout_whose_groups_keep_aborting_stops_its_inflight_groups_and_fails(monkeypatch):
+    args = make_args(rollout_batch_size=1, over_sampling_batch_size=3, max_consecutive_aborted_groups=2)
+    harness = Harness(monkeypatch, args)
+    task = harness.run()
+    await _submitted(harness, 3)
+
+    for submission in range(2):
+        _abort(harness.submitted_groups[submission], "SandboxUnavailable")
+        harness.finish_group(submission)
+
+    with pytest.raises(RuntimeError, match="2 rollout groups in a row aborted.*SandboxUnavailable"):
+        await task
+    assert harness.aborted_pending >= 1
+    assert harness.state.reset_count == 1
+
+
+def _abort(group: list[Sample], exit_status: str) -> None:
+    group[0].status = Sample.Status.ABORTED
+    group[0].metadata = {"exit_status": exit_status}
+
+
+async def _submitted(harness: Harness, count: int) -> None:
+    for _ in range(1000):
+        if len(harness.submitted_groups) >= count:
+            return
+        await asyncio.sleep(0.001)
+    raise AssertionError(f"the rollout never submitted group {count}")
 
 
 async def test_backfill_submits_replacement_before_the_group_returns(monkeypatch):

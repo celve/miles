@@ -116,6 +116,7 @@ def _with_session_server(args: Namespace, backend_url: str) -> Iterator[UvicornT
         port=port,
         instance_id=None,
         backend_url=backend_url,
+        eval_backend_url=None,
     )
     session_server = SessionServer(config)
     server = UvicornThreadServer(session_server.app, host="127.0.0.1", port=port)

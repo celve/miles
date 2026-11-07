@@ -16,6 +16,7 @@ from megatron.core.transformer.spec_utils import import_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.training.arguments import core_transformer_config_from_args
 
+from miles.backends.megatron_utils.te_patches import install_te_training_patches
 from miles.backends.training_utils.model_companion import ModelCompanionInstallationUtils
 from miles.utils.args.custom_view import compute_custom_function_config
 from miles.utils.args.runtime import TrainerConfig
@@ -112,6 +113,12 @@ def _apply_bridge_runtime_config(provider, args: TrainerConfig) -> None:
     if args.backend.moe_aux_loss_coeff is not None:
         provider.moe_aux_loss_coeff = args.backend.moe_aux_loss_coeff
 
+    if args.freeze_vision_model:
+        assert hasattr(  # config-access-exempt: probes whether the Megatron-Bridge provider has a vision tower
+            provider, "freeze_vision_model"
+        ), f"--freeze-vision-model: {type(provider).__name__} has no vision tower to freeze"
+        provider.freeze_vision_model = True
+
     # Imported here: test_bridge_mtp_detachment.py exec()s this function's AST in a bare namespace (no module names).
     from miles.utils.megatron_bridge_utils import apply_dsa_backend_args
 
@@ -154,6 +161,7 @@ def get_model_provider_func(
     args: TrainerConfig,
     role: Literal["actor", "critic"] = "actor",
 ):
+    install_te_training_patches()
     # Support custom model provider path (similar to --custom-rm-path for reward models)
     if (custom_model_provider_path := args.custom_model_provider_path) is not None:
 

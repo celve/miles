@@ -28,6 +28,8 @@ from miles.dashboard.args import validate_dashboard_args
 from miles.platforms import current_platform
 from miles.ray.specs.train import external_trainer_controller_addrs
 from miles.rollout.checkpoint_eval import is_checkpoint_eval_fn
+from miles.rollout.fully_async_rollout import FullyAsyncRolloutFn
+from miles.rollout.session.images.launch_settings import validate_session_image_args
 from miles.utils.args.configs.fault_tolerance import _DEFAULT_FT_API_SERVER_PORT
 from miles.utils.args.configs.reward_pool import compute_reward_pools
 from miles.utils.args.configs.router import RouterConfig
@@ -41,6 +43,7 @@ from miles.utils.chat_template_utils.tito_tokenizer import TITOTokenizerType
 from miles.utils.environ import use_legacy_rollout_v1
 from miles.utils.eval_config import EvalDatasetConfig, build_eval_dataset_configs, ensure_dataset_list
 from miles.utils.file_arg_utils import resolve_file_arg
+from miles.utils.function_registry import load_function
 from miles.utils.hf_utils.config import is_dsa, load_hf_config
 from miles.utils.logging_utils import configure_logger_raw
 from miles.utils.lora.arguments import validate_lora_args, validate_lora_args_after_megatron
@@ -77,7 +80,7 @@ def resolve_rollout_function_paths(args: argparse.Namespace) -> None:
         standard_path = "miles.rollout.inference_rollout.inference_rollout_common.InferenceRolloutFn"
     rollout_path = args.rollout_function_path or standard_path
     if args.fully_async:
-        rollout_path = FULLY_ASYNC_ROLLOUT_PATH
+        rollout_path = args.rollout_function_path or FULLY_ASYNC_ROLLOUT_PATH
     # Resolved after the override: shared-engine eval must reach the producer it pauses.
     eval_path = args.eval_function_path or rollout_path
     args.rollout_function_path = rollout_path
@@ -90,6 +93,14 @@ def driver_owns_generation_pause(args) -> bool:
 
 def supports_partial_target_weight_update(args) -> bool:
     return not args.colocate and args.update_weight_transfer_mode == "p2p"
+
+
+def _assert_fully_async_rollout_subclass(path: str) -> None:
+    rollout_cls = load_function(path)
+    assert isinstance(rollout_cls, type) and issubclass(rollout_cls, FullyAsyncRolloutFn), (
+        f"--fully-async and --rollout-function-path {path} both select a rollout function; pass only one, "
+        "or name a FullyAsyncRolloutFn subclass"
+    )
 
 
 def _resolve_rollout_functions(args) -> None:
@@ -110,9 +121,8 @@ def _resolve_rollout_functions(args) -> None:
         ), "--fully-async needs the class-based rollout API; unset MILES_USE_LEGACY_ROLLOUT_V1"
         # Runs after validate_multi_lora_args, which selects a rollout function of its own.
         assert not args.multi_lora, "--fully-async and multi-LoRA select different rollout functions"
-        assert (
-            args.rollout_function_path is None
-        ), "--fully-async and --rollout-function-path both select a rollout function; pass only one"
+        if args.rollout_function_path is not None:
+            _assert_fully_async_rollout_subclass(args.rollout_function_path)
         if args.colocate:
             assert args.train_backend != "fsdp", (
                 "--fully-async --colocate needs the megatron IPC weight updater; the FSDP updater still "
@@ -395,6 +405,7 @@ def parse_args_and_get_parser(
     raw_megatron = resolve_megatron_config(args, base_args=backend_values if backend == "megatron" else {})
     check_output_store_args(args, sglang=sglang, megatron=raw_megatron)
     _check_multimodal_token_space_processing_args(args, sglang=sglang)
+    validate_session_image_args(args, sglang=sglang)
     reward_pools, reward_scaling = compute_reward_pools(args)
     values = {name: value for name, value in vars(args).items() if name in AllConfig.model_fields} | {
         "raw_megatron": raw_megatron,
@@ -918,6 +929,17 @@ def _check_multimodal_token_space_processing_args(args, *, sglang: SglangConfig)
         ) from error
 
 
+def validate_m2po_args(args) -> None:
+    """--use-m2po's launch constraints; compute_trainer_args checks them again after per-trainer overrides."""
+    if not args.use_m2po:
+        return
+    assert args.loss_type == "policy_loss", "--use-m2po applies to --loss-type policy_loss only."
+    assert args.advantage_estimator != "gspo", "--use-m2po masks tokens, but GSPO's ratio is per sequence."
+    assert args.eps_clip_c is None, "--use-m2po replaces PPO clipping, dual-clip included: drop --eps-clip-c."
+    assert args.m2po_tau > 0, f"--m2po-tau must be positive, got {args.m2po_tau}."
+    assert args.context_parallel_size == 1, "--use-m2po masks a micro-batch's tokens, which CP splits across ranks."
+
+
 def miles_validate_args(args):
     from miles.backends.training_utils.weight_update.session import weight_update_selector
 
@@ -1187,12 +1209,28 @@ def miles_validate_args(args):
             f"eval_num_gpus ({args.eval_num_gpus}) must be divisible by "
             f"eval_num_gpus_per_engine ({args.eval_num_gpus_per_engine})."
         )
+        if args.eval_server_concurrency is None:
+            args.eval_server_concurrency = args.sglang_server_concurrency
+        assert (
+            args.eval_server_concurrency > 0
+        ), f"--eval-server-concurrency must be positive, got {args.eval_server_concurrency}."
     else:
+        assert (
+            args.eval_server_concurrency is None
+        ), "--eval-server-concurrency sizes the dedicated eval engines, which need --eval-num-gpus > 0."
         overrides = collect_eval_sglang_overrides(args)
         assert not overrides, (
             f"--eval-sglang-* configures the dedicated eval fleet, which needs --eval-num-gpus > 0. "
             f"Got {sorted(overrides)} with --eval-num-gpus 0."
         )
+
+    # A sandbox worker's files go with its sandbox when the call ends.
+    agent_function_mode = getattr(
+        args, "custom_agent_function_mode", None
+    )  # config-access-exempt: only agentic_tool_call's generate function registers --custom-agent-function-mode
+    assert not (
+        args.eval_record_dir is not None and agent_function_mode == "sandbox"
+    ), "--eval-record-dir needs the agent function's files to outlive the call; use subproc, inline or worker mode."
 
     if args.save_interval is not None:
         assert args.save is not None, "'--save' is required when save_interval is set."
@@ -1216,6 +1254,8 @@ def miles_validate_args(args):
 
     if args.use_rollout_logprobs:
         assert not args.use_tis, "use_rollout_logprobs and use_tis cannot be set at the same time."
+
+    validate_m2po_args(args)
 
     if args.get_mismatch_metrics:
         assert (
@@ -1246,6 +1286,15 @@ def miles_validate_args(args):
 
     if args.balance_by_flops:
         assert args.use_dynamic_batch_size, "--balance-by-flops requires --use-dynamic-batch-size"
+
+    if args.pad_steps_for_dp_alignment:
+        if not args.use_dynamic_batch_size:
+            raise ValueError("--pad-steps-for-dp-alignment pads the dynamic schedule; set --use-dynamic-batch-size")
+        if args.calculate_per_token_loss:
+            raise ValueError(
+                "--pad-steps-for-dp-alignment is incompatible with --calculate-per-token-loss: the per-token "
+                "normalizer counts a fully masked row as one token, so pad rows would shrink every real gradient"
+            )
 
     if args.eps_clip_high is None:
         args.eps_clip_high = args.eps_clip
@@ -1590,7 +1639,10 @@ def miles_validate_args(args):
             "Snapshot eval requires a snapshot source: set --eval-hf-dir (staging exports) "
             "or --save-hf (reuse periodic HF checkpoints)."
         )
-        assert not args.colocate, "Snapshot eval is not supported with --colocate."
+        assert not (args.colocate and args.eval_hf_dir is not None), (
+            "Snapshot eval under --colocate must reuse --save-hf checkpoints: an --eval-hf-dir export "
+            "loads the trainer onto GPUs the colocated engines still hold. Unset --eval-hf-dir."
+        )
         assert not args.debug_rollout_only, "Snapshot eval is not supported with debug_rollout_only."
         assert (
             args.load_debug_rollout_data is None
@@ -1635,6 +1687,12 @@ def miles_validate_args(args):
 
         if args.over_sampling_batch_size is None:
             args.over_sampling_batch_size = args.rollout_batch_size
+        if args.max_consecutive_aborted_groups is None:
+            args.max_consecutive_aborted_groups = 4 * args.rollout_batch_size
+        assert args.max_consecutive_aborted_groups >= 0, (
+            "--max-consecutive-aborted-groups takes 0, to disable the guard, or a positive count; "
+            f"got {args.max_consecutive_aborted_groups}"
+        )
 
         assert args.over_sampling_batch_size >= args.rollout_batch_size, (
             f"over_sampling_batch_size {args.over_sampling_batch_size} should be greater than or equal to "
@@ -1754,6 +1812,12 @@ def miles_validate_args(args):
     if args.skip_actor_forward_only:
         validate_skip_actor_forward_only(args)
 
+    assert not args.freeze_vision_model or (
+        args.train_backend == "megatron"
+        and args.megatron_to_hf_mode == "bridge"
+        and args.custom_model_provider_path is None
+    ), "--freeze-vision-model needs --train-backend megatron with --megatron-to-hf-mode bridge and no custom model provider"
+
     validate_score_centering_args(args)
 
     _maybe_apply_dumper_overrides(args)
@@ -1813,17 +1877,6 @@ def validate_skip_actor_forward_only(args) -> None:
         if enabled
     ]
     assert not incompatible_options, f"{option} is incompatible with: {', '.join(incompatible_options)}"
-
-    assert args.num_steps_per_rollout in (None, 1), (
-        f"{option} requires exactly one optimizer step per rollout; "
-        f"got --num-steps-per-rollout {args.num_steps_per_rollout}"
-    )
-    if not args.use_dynamic_global_batch_size and not args.multi_lora:
-        samples_per_rollout = args.rollout_batch_size * args.n_samples_per_prompt
-        assert args.global_batch_size == samples_per_rollout, (
-            f"{option} requires exactly one optimizer step for {samples_per_rollout} rollout samples; "
-            f"got --global-batch-size {args.global_batch_size}"
-        )
 
 
 def validate_async_off_policy_correction(args) -> None:

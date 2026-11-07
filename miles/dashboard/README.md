@@ -103,6 +103,49 @@ after 10 minutes. The collector overwrites
 `{dump-details}/dashboard/sandboxes.json` on every flush, and
 `/api/sandboxes?stale_after_s=N` serves the counts and rows.
 
+## Custom CUA generation and per-turn samples
+
+The Rollouts view keeps every training segment in **Samples** and groups siblings in **Episodes** by `Sample.rollout_id` (falling back to `Sample.index` for older dumps). Set the same rollout ID on every segment of an episode. Rewards and GRPO group statistics count each episode once; token metrics and drilldown remain per segment. Segmented/padded dumps use the saved episode return (`metadata.raw_reward`, legacy `metadata.others.episode_return`, or the sample reward) independently of token-row coverage. Ordinary one-sample-per-episode dumps retain an unambiguous batch-global raw-reward override. Zero-loss `[0, 0]` placeholders in train-only padding/pruning are excluded from token joins.
+
+Custom generate functions can report their own phases without importing the dashboard extra:
+
+```python
+from miles.utils.lifecycle import trajectory_phase
+from miles.dashboard.hooks import report_sandbox
+
+
+async def generate(input):
+    sample = input.sample
+    key = f"desktop:{sample.index}"
+    report_sandbox(key, task=sample.metadata["instance_id"], provider="sandbox-service")
+    try:
+        with trajectory_phase(sample, "setup", evaluation=input.evaluation):
+            env = await create_desktop()
+        try:
+            with trajectory_phase(sample, "reset", evaluation=input.evaluation):
+                observation = await env.reset()
+            for turn in range(1, max_turns + 1):
+                with trajectory_phase(sample, "model_call", turn=turn, evaluation=input.evaluation):
+                    action = await predict(observation)
+                with trajectory_phase(sample, "env_step", turn=turn, evaluation=input.evaluation):
+                    observation = await env.step(action)
+                    with trajectory_phase(sample, "settle", turn=turn, evaluation=input.evaluation):
+                        await wait_for_desktop()
+                report_sandbox(key, sandbox_id=env.id)
+        finally:
+            await env.close()
+    except Exception as exc:
+        report_sandbox(key, status="error", error=str(exc))
+        raise
+    else:
+        report_sandbox(key, status="finished")
+    return build_samples(sample)
+```
+
+The per-sample dispatcher already emits episode boundaries. A custom **rollout** function that bypasses that dispatcher should wrap each episode in `trajectory_episode(sample, evaluation=evaluation)`. Avoid wrapping a dispatched generate function a second time. `report_trajectory_phase(sample, name, t0, t1, turn=..., evaluation=...)` accepts externally measured wall-clock seconds, for example timings returned by an environment server. Phase helpers are no-ops when collection is disabled and exclude evaluation when `evaluation=True`, matching the existing lifecycle probes. A dispatched subprocess agent receives `metadata["miles_lifecycle"]`; construct `TrajectoryIdentity(**metadata["miles_lifecycle"])` from `miles.utils.lifecycle` and pass it in place of the Sample. Phase reports travel through the existing agent-to-parent pipe and are batched by the parent collector sink. Evaluation filtering is enforced by the parent dispatcher. An unrelated external environment process must return its measurements to the generator, which can call `report_trajectory_phase`. Events flush in batches of 64 or after the two-second deadline, including when generation goes idle. Concurrent samples and nested phases with distinct names or turns are independent; do not overlap the same phase name and turn on the same sample. The lifecycle pane and timeline trajectory carpet preserve phase labels; nested spans overlap and their durations must not be added as exclusive wall time.
+
+The existing Timer also writes INFO boundaries on distributed rank 0 for each measured rebuild batch; its logging overhead has not been measured. `multimodal_rebuild` appears on training GPU phase lanes for both eager and per-micro-batch media reconstruction, nested inside the consuming log-prob or training pass. It measures the processor rebuild and time waiting for requested image data; background image prefetch work is not separately attributed.
+
 ## Develop
 
 ```bash

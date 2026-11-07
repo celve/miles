@@ -77,6 +77,10 @@ def _serve_session(backend_url: str) -> Iterator[str]:
         sglang=make_sglang_config(speculative_algorithm=None),
         raw_megatron=MegatronConfig(trainers=[], base_args={}),
         use_session_server="v1",
+        use_session_images=False,
+        session_image_text_only_samples="drop",
+        multimodal_token_space_processing=False,
+        shared_media_dir=None,
         use_rollout_routing_replay=True,
         use_rollout_indexer_replay=False,
         rollout_indexer_topk_num_streams=None,
@@ -107,6 +111,7 @@ def _serve_session(backend_url: str) -> Iterator[str]:
         port=port,
         instance_id="session-addition-r3-e2e",
         backend_url=backend_url,
+        eval_backend_url=None,
     )
     server = UvicornThreadServer(SessionServer(config).app, host="127.0.0.1", port=port)
     server.start()

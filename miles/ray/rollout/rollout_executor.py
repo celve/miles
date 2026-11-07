@@ -29,7 +29,7 @@ from miles.rollout.base_types import (
 )
 from miles.rollout.checkpoint_eval import CheckpointEvalFn, EvalSkip
 from miles.rollout.fully_async_data_buffer import Group
-from miles.rollout.inference_rollout.compatibility import load_rollout_function
+from miles.rollout.inference_rollout.compatibility import LegacyRolloutFnAdapter, load_rollout_function
 from miles.utils import object_store
 from miles.utils.args.custom_function import CustomFunctionConfig
 from miles.utils.args.custom_view import ImmutableNamespace, compute_custom_function_config
@@ -245,6 +245,7 @@ class RolloutExecutor(DedicatedRpcLoopWorker):
         # The dp schedule and a custom convert may leave rows out of the train data: collect from the samples.
         self._unreleased_store_refs[rollout_id] = store_refs_of(data) | take_dropped_refs()
 
+        handoff_start = time.perf_counter()
         with SampleOwnershipRecorder.suppress_drop_logging() if replay is not None else nullcontext():
             train_data = convert_samples_to_train_data(
                 self.args,
@@ -262,6 +263,7 @@ class RolloutExecutor(DedicatedRpcLoopWorker):
                 )
                 store = object_store.get_instance()
                 data_ref = [store.put(value=shard, value_spec=ROLLOUT_DATA_VALUE_SPEC) for shard in shards]
+            logger.info(f"rollout {rollout_id}: train data converted and put in {time.perf_counter() - handoff_start:.1f}s")
             return RolloutDataPack(sample_indices=sample_indices, data_ref=data_ref)
 
     async def release(self, rollout_id: int) -> None:
@@ -523,6 +525,13 @@ class RolloutExecutor(DedicatedRpcLoopWorker):
         if eval_fleet_info is None:
             self._eval_fleet = None
             return
+        if isinstance(self.eval_generate_rollout, LegacyRolloutFnAdapter):
+            # A legacy fn takes only args, whose router is training's, so it would score the training weights as the snapshot.
+            raise ValueError(
+                f"{self.args.eval_function_path} is a legacy rollout function and cannot generate on the dedicated eval "
+                "engines (--eval-num-gpus); make it a BaseRolloutFn that generates against input.generate_state, or "
+                "evaluate on the training engines without --eval-num-gpus."
+            )
 
         fn_args = _compute_rollout_function_config(self.args, self.args.eval_function_path)
         self._eval_fleet = RolloutExecutorEvalFleet(

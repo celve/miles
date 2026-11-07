@@ -261,6 +261,16 @@ generates against the fleet exactly as it would against the training engines, so
 eval functions work unchanged. The point lands at the right step on the x-axis even when
 it completes a few steps later, and `eval/lag_steps` reports how late it was.
 
+Agent rollouts through the session server reach the fleet too: a session created for
+eval is proxied to the fleet's router, and a training session to the training router.
+`--eval-server-concurrency` sets the requests in flight per eval engine, defaulting to
+`--sglang-server-concurrency`, so a one-engine fleet can keep as many episodes going as
+the training engines do.
+
+The fleet also runs beside a colocated `train.py` run, on `--eval-num-gpus` GPUs past
+the colocated ones. It must then reuse the `--save-hf` checkpoints (below): an
+`--eval-hf-dir` export would load the trainer onto GPUs the colocated engines still hold.
+
 The fleet's engines inherit every `--sglang-*` setting from the rollout engines, so by
 default they are configured exactly like the engines you already tuned. You can override
 any single field with the matching `--eval-sglang-*` flag:
@@ -303,7 +313,7 @@ The fleet and an external backend both evaluate a checkpoint, so both need
 | Source | Set | Cost |
 |---|---|---|
 | A fresh export per eval point | `--eval-hf-dir`, pointed at tmpfs | `eval/export_time_seconds` per point, plus staging space |
-| The periodic HF checkpoints | `--eval-hf-dir` unset and `--save-hf` set | None, but `eval_interval` must be a multiple of `save_interval` |
+| The periodic HF checkpoints | `--eval-hf-dir` unset and `--save-hf` set | None, but `eval_interval` must be a multiple of `save_interval`; the only source under `--colocate` |
 
 When snapshot eval reuses `--save-hf`, a fixed path such as `/checkpoints/hf`
 automatically becomes `/checkpoints/hf/step_{rollout_id}`. Existing rollout ID
@@ -345,7 +355,12 @@ rollout/fully_async/token_weighted_staleness
 rollout/fully_async/weight_version_sample_coverage
 rollout/fully_async/buffer_avg_staleness, rollout/fully_async/buffer_max_staleness
 rollout/dynamic_filter/drop_<reason>
+rollout/aborted/drop_<exit_status>
 ```
+
+`rollout/aborted/drop_<exit_status>` splits `aborted_groups_filtered` by the cause
+the aborted sample recorded, such as an agent function's `InfraAbort` or
+`NoModelCalls`; the synchronous rollout reports it too.
 
 Staleness is measured in published rollout weight versions: with
 `--update-weights-interval 1`, one version normally corresponds to one optimizer step;

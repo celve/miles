@@ -41,6 +41,17 @@ class EvalConfig(BaseConfig):
     eval_max_response_len: A[int | None, Arg()] = None
     eval_min_new_tokens: A[int | None, Arg()] = None
     eval_max_context_len: A[int | None, Arg()] = None
+    eval_server_concurrency: A[
+        int | None,
+        Arg(
+            help=(
+                "Requests in flight per dedicated eval engine (--eval-num-gpus), in place of "
+                "--sglang-server-concurrency, which it defaults to. Sizes the eval rollout's "
+                "concurrency and the eval router's connections, so a small eval pool can keep as "
+                "many episodes going as the training engines do."
+            )
+        ),
+    ] = None
     eval_hf_dir: A[
         str | None,
         Arg(
@@ -65,6 +76,18 @@ class EvalConfig(BaseConfig):
             ),
         ),
     ] = "backpressure"
+    eval_record_dir: A[
+        str | None,
+        Arg(
+            help=(
+                "Record every evaluated episode under `{eval_record_dir}/eval_{rollout_id}/`: its instruction, "
+                "each step's screenshot, model output and parsed action, and its reward (miles.utils.eval_record). "
+                "Miles's eval loop hands each eval sample its directory in metadata['eval_record_dir']; the "
+                "Harbor computer-1 binding and examples/experimental/cua_lite/record.py write the episodes, and "
+                "scripts/tools/render_eval_records.py renders two recordings side by side."
+            )
+        ),
+    ] = None
     eval_keep_snapshots: A[
         int,
         Arg(

@@ -10,6 +10,7 @@ from transformers import BaseImageProcessor
 from miles.backends.training_utils.data import token_space_media_process
 from miles.backends.training_utils.data.rollout import DataIterator, LazyMultimodalTrainInputs
 from miles.backends.training_utils.data.token_space_media_process import RolloutEngineProcessorArgs
+from miles.utils.timer import Timer
 
 
 class _RecordingProcessor:
@@ -156,6 +157,26 @@ def _lazy(multimodal_inputs, token_ids, *, prefetch):
         dtype=torch.bfloat16,
         prefetch=prefetch,
     )
+
+
+def test_a_micro_batch_rebuild_is_timed_once_as_the_media_wait(monkeypatch):
+    processor = _RecordingProcessor()
+    _patch_trainer_processor(monkeypatch, processor)
+    phases = []
+    monkeypatch.setattr(Timer(), "event_sinks", [lambda name, t0, t1: phases.append((name, t0, t1))])
+    multimodal_inputs = [{"images": ["/s/a.png"]}, None, {"images": ["/s/b.png", "/s/c.png"]}]
+    lazy = _lazy(multimodal_inputs, [[1, 9, 2], [1, 2], [1, 9, 9, 2]], prefetch=False)
+
+    batch = DataIterator({"multimodal_train_inputs": lazy}, micro_batch_indices=[[2, 1]]).get_next(
+        ["multimodal_train_inputs"]
+    )
+
+    rebuilt, text_only = batch["multimodal_train_inputs"]
+    assert text_only is None
+    assert rebuilt["pixel_values"].dtype == torch.bfloat16
+    assert [call["image_data"] for call in processor.calls] == [["/s/b.png", "/s/c.png"]]
+    assert [name for name, _, _ in phases] == ["multimodal_rebuild"]
+    assert all(t1 >= t0 for _, t0, t1 in phases)
 
 
 def test_prefetch_rebuilds_the_next_micro_batch_on_one_thread_and_the_forward_waits_for_it(

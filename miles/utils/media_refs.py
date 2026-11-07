@@ -41,12 +41,14 @@ _TO_SGLANG_MEDIA_FIELDS = {"images": "image_data", "audios": "audio_data", "vide
 
 
 def run_media_dir(args) -> str | None:
+    """Where this run writes media: its own directory under ``--shared-media-dir``, removed when the run ends."""
     if args.shared_media_dir is None:
         return None
     return os.path.join(args.shared_media_dir, args.run_uuid)
 
 
 def release_run_media(args) -> None:
+    """Remove the media this run wrote; shared paths the data already pointed at live elsewhere and are kept."""
     if (media_dir := run_media_dir(args)) is not None:
         shutil.rmtree(media_dir, ignore_errors=True)
 

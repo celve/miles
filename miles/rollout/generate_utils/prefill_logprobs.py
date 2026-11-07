@@ -50,6 +50,7 @@ def _build_prefill_scoring_payload(
 
     payload.update(rollout_media_payload(sample.multimodal_inputs))
     if has_media(sample.multimodal_inputs) and args.multimodal_token_space_processing:
+        # The tokens were expanded during rollout, so SGLang must treat the whole sequence as an expanded prefix.
         payload["mm_token_expansion_start_len"] = len(sample.tokens)
 
     return payload

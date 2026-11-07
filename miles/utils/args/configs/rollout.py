@@ -57,7 +57,8 @@ class RolloutRelatedConfig(BaseConfig):
         Arg(
             help=(
                 "Run fully async rollout: a persistent worker keeps generating while the trainer "
-                "drains completed groups. Selects `FullyAsyncRolloutFn` as the rollout function; "
+                "drains completed groups. Selects `FullyAsyncRolloutFn` as the rollout function, or the "
+                "subclass of it --rollout-function-path names; "
                 "evaluation keeps the standard rollout function, which fully async does not serve. "
                 "Requires train_async.py."
             )
@@ -456,6 +457,16 @@ class RolloutRelatedRolloutOnlyConfig(BaseConfig):
             )
         ),
     ] = None
+    max_consecutive_aborted_groups: A[
+        int | None,
+        Arg(
+            help=(
+                "Fail a synchronous rollout once this many groups in a row come back aborted, as when the "
+                "sandbox service is down, rather than drawing new prompts forever. Defaults to "
+                "4 * rollout_batch_size; 0 disables it."
+            )
+        ),
+    ] = None
     rollout_submission_granularity: A[
         str | None,
         Arg(
@@ -496,14 +507,26 @@ class RolloutRelatedRolloutOnlyConfig(BaseConfig):
         int | None,
         Arg(
             help=(
-                "Maximum allowed gap between a group's oldest generated-token weight version and the current "
-                "engine weight version. Prompt KV weight staleness is not considered. "
-                "Groups exceeding this threshold are recycled back to "
-                "the data buffer instead of being sent to training. Only effective in fully "
+                "Maximum allowed gap between a group's generated-token weight version (see "
+                "--weight-staleness-measure) and the current engine weight version. Prompt KV weight "
+                "staleness is not considered. Groups exceeding this threshold are handed to "
+                "--async-unused-samples-handler instead of being sent to training, and the producer stops "
+                "starting groups that could only be consumed past it. Only effective in fully "
                 "async mode. None (default) disables staleness filtering."
             )
         ),
     ] = None
+    weight_staleness_measure: A[
+        str,
+        Arg(
+            choices=["oldest", "token_mean", "newest"],
+            help=(
+                "Which lag of a group --max-weight-staleness bounds: its oldest generated token (default), "
+                "the mean over its generated tokens, or its newest generated token. Under oldest, the first "
+                "turn of a multi-turn episode decides for every later turn."
+            ),
+        ),
+    ] = "oldest"
     async_max_concurrent_samples: A[
         int | None,
         Arg(

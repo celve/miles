@@ -101,6 +101,7 @@ def _make_args() -> Namespace:
             custom_async_data_buffer_path_per_model=None,
             dynamic_sampling_filter_path=None,
             max_weight_staleness=None,
+            weight_staleness_measure="oldest",
             megatron_config=encode_megatron_config("solver", "verifier"),
             reward_key=None,
             rollout_batch_size=1,
@@ -159,11 +160,15 @@ def _make_single_policy_args(**overrides) -> Namespace:
         dynamic_sampling_filter_path=None,
         enable_sample_ownership_checker=False,
         max_weight_staleness=None,
+        weight_staleness_measure="oldest",
+        update_weights_interval=1,
+        n_samples_per_prompt=GROUP_SIZE,
         reward_key=None,
         rollout_batch_size=1,
         use_output_store=False,
     )
     defaults.update(overrides)
+    defaults.setdefault("global_batch_size", defaults["rollout_batch_size"] * GROUP_SIZE)
     return Namespace(**defaults)
 
 
@@ -329,6 +334,154 @@ class TestStalenessFiltering:
 
         await _get_one(under_test.buffer, current_version=20)
         assert under_test.buffer.get_metrics()["rollout/fully_async/buffer_max_staleness"] == 12
+
+
+def _make_episode_group(group_index: int, *, turn_versions: list[int]) -> list[Sample]:
+    return [
+        Sample(
+            group_index=group_index,
+            index=group_index * 10 + i,
+            prompt=f"prompt {group_index}",
+            response="ok",
+            response_length=len(turn_versions),
+            reward=1.0,
+            status=Sample.Status.COMPLETED,
+            weight_versions=[
+                WeightVersionsPerCall(
+                    spans=[WeightVersionSpan(version=str(version), abs_start=turn, abs_end=turn + 1)]
+                )
+                for turn, version in enumerate(turn_versions)
+            ],
+        )
+        for i in range(GROUP_SIZE)
+    ]
+
+
+class TestStalenessMeasure:
+    async def test_the_oldest_measure_drops_a_long_episode_for_its_first_turn(self) -> None:
+        under_test = _make_buffer(max_weight_staleness=2)
+        await _put(under_test.buffer, _make_episode_group(1, turn_versions=[6, 8, 8, 10, 10, 10]))
+        fresh = _make_finished_group(2, weight_version=10)
+        await _put(under_test.buffer, fresh)
+
+        assert (await _get_one(under_test.buffer, current_version=10)).group is fresh
+        assert [reason for _, reason in under_test.unused] == [UnusedReason.STALE]
+
+    async def test_the_token_mean_measure_keeps_it_when_most_tokens_are_within_the_limit(self) -> None:
+        under_test = _make_buffer(max_weight_staleness=2, weight_staleness_measure="token_mean")
+        episode = _make_episode_group(1, turn_versions=[6, 8, 8, 10, 10, 10])
+        await _put(under_test.buffer, episode)
+        await _put(under_test.buffer, _make_finished_group(2, weight_version=10))
+
+        assert (await _get_one(under_test.buffer, current_version=10)).group is episode
+        assert under_test.unused == []
+
+    async def test_the_token_mean_measure_still_drops_an_episode_stale_on_average(self) -> None:
+        under_test = _make_buffer(max_weight_staleness=2, weight_staleness_measure="token_mean")
+        await _put(under_test.buffer, _make_episode_group(1, turn_versions=[4, 6, 6, 10]))
+        fresh = _make_finished_group(2, weight_version=10)
+        await _put(under_test.buffer, fresh)
+
+        assert (await _get_one(under_test.buffer, current_version=10)).group is fresh
+        assert [reason for _, reason in under_test.unused] == [UnusedReason.STALE]
+
+    async def test_the_newest_measure_keeps_an_episode_whose_last_turn_is_within_the_limit(self) -> None:
+        under_test = _make_buffer(max_weight_staleness=2, weight_staleness_measure="newest")
+        episode = _make_episode_group(1, turn_versions=[2, 4, 6, 8])
+        await _put(under_test.buffer, episode)
+        await _put(under_test.buffer, _make_finished_group(2, weight_version=10))
+
+        assert (await _get_one(under_test.buffer, current_version=10)).group is episode
+
+
+# =============================== admission ================================
+
+
+def _make_admission_buffer(*, max_weight_staleness: int | None, steps_per_drain: int = 1, **overrides):
+    rollout_batch_size = overrides.pop("rollout_batch_size", 2)
+    return _make_buffer(
+        max_weight_staleness=max_weight_staleness,
+        rollout_batch_size=rollout_batch_size,
+        global_batch_size=rollout_batch_size * GROUP_SIZE // steps_per_drain,
+        **overrides,
+    )
+
+
+class TestAdmission:
+    def test_without_a_staleness_cap_the_producer_is_never_held_back(self) -> None:
+        under_test = _make_admission_buffer(max_weight_staleness=None)
+
+        assert under_test.buffer.admits(in_flight_groups=10_000)
+
+    async def test_a_waiting_get_admits_its_own_batch_and_one_per_drain_the_cap_reaches(self) -> None:
+        under_test = _make_admission_buffer(max_weight_staleness=2, steps_per_drain=2)
+        waiting = asyncio.create_task(under_test.buffer.get(num_groups=2, current_version=0))
+        await _settle()
+
+        assert under_test.buffer.admits(in_flight_groups=3)
+        assert not under_test.buffer.admits(in_flight_groups=4)
+        waiting.cancel()
+
+    async def test_once_the_batch_is_taken_only_the_drains_the_cap_reaches_are_admitted(self) -> None:
+        under_test = _make_admission_buffer(max_weight_staleness=2, steps_per_drain=2)
+        for group_index in (1, 2, 3):
+            await _put(under_test.buffer, _make_finished_group(group_index, weight_version=0))
+
+        await under_test.buffer.get(num_groups=2, current_version=0)
+
+        assert under_test.buffer.admits(in_flight_groups=0)
+        assert not under_test.buffer.admits(in_flight_groups=1)
+
+    async def test_a_cap_below_one_drain_of_updates_admits_nothing_between_drains(self) -> None:
+        under_test = _make_admission_buffer(max_weight_staleness=1, steps_per_drain=2)
+        waiting = asyncio.create_task(under_test.buffer.get(num_groups=2, current_version=0))
+        await _settle()
+        assert under_test.buffer.admits(in_flight_groups=1)
+        assert not under_test.buffer.admits(in_flight_groups=2)
+
+        for group_index in (1, 2):
+            await _put(under_test.buffer, _make_finished_group(group_index, weight_version=0))
+        await waiting
+
+        assert not under_test.buffer.admits(in_flight_groups=0)
+
+    def test_an_update_interval_counts_every_drain_as_a_possible_update(self) -> None:
+        under_test = _make_admission_buffer(max_weight_staleness=2, update_weights_interval=2)
+
+        assert under_test.buffer.admits(in_flight_groups=1)
+        assert not under_test.buffer.admits(in_flight_groups=2)
+
+    async def test_a_cancelled_get_stops_counting_as_waiting(self) -> None:
+        under_test = _make_admission_buffer(max_weight_staleness=2, steps_per_drain=2)
+        waiting = asyncio.create_task(under_test.buffer.get(num_groups=2, current_version=0))
+        await _settle()
+        waiting.cancel()
+        await _settle()
+
+        assert not under_test.buffer.admits(in_flight_groups=2)
+
+    async def test_two_drains_replace_the_optimizer_step_estimate_with_the_version_step_they_show(self) -> None:
+        under_test = _make_admission_buffer(max_weight_staleness=1, steps_per_drain=2)
+        for version in (0, 1):
+            for group_index in (1, 2):
+                await _put(under_test.buffer, _make_finished_group(10 * version + group_index, weight_version=version))
+            await under_test.buffer.get(num_groups=2, current_version=version)
+
+        assert under_test.buffer.admits(in_flight_groups=1)
+        assert not under_test.buffer.admits(in_flight_groups=2)
+
+    async def test_a_composed_buffer_never_holds_the_shared_producer_back(self) -> None:
+        multi = _make_multi_buffer(max_weight_staleness=2, rollout_batch_size=1, global_batch_size=GROUP_SIZE)
+        for group_index in (1, 2):
+            await multi.put(
+                DataBufferInput(prompt_group=[], group=_make_policy_group(group_index, "solver", "solver"))
+            )
+        waiting = asyncio.create_task(multi.get(num_groups=1, current_version=0, trainer_model_id="verifier"))
+        await _settle()
+
+        assert not multi._inners["solver"].admits(in_flight_groups=0)
+        assert multi.admits(in_flight_groups=0)
+        waiting.cancel()
 
 
 # ============================== batched get ===============================
@@ -523,6 +676,16 @@ class TestPutTimeFilters:
 
         assert under_test.unused == [(group, UnusedReason.ABORTED)]
         assert under_test.buffer.get_metrics()["rollout/fully_async/aborted_groups_filtered"] == 1
+
+    async def test_an_aborted_group_is_counted_under_the_cause_it_recorded(self) -> None:
+        under_test = _make_buffer()
+        group = _make_finished_group(1)
+        group[0].status = Sample.Status.ABORTED
+        group[0].metadata = {"exit_status": "SandboxUnavailable"}
+
+        await _put(under_test.buffer, group)
+
+        assert under_test.buffer.get_metrics()["rollout/aborted/drop_SandboxUnavailable"] == 1
 
     async def test_a_group_with_one_aborted_sample_among_finished_ones_is_refused_whole(self) -> None:
         """The group is the training unit, so a partial one is not something the trainer can use."""

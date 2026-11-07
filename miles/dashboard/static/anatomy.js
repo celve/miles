@@ -1,3 +1,4 @@
+import { CUSTOM_PHASE_COLORS } from "./lifecycle.js";
 import { el, fmtNum } from "./app.js";
 import { hideTooltip, showTooltip } from "./charts.js";
 
@@ -89,6 +90,9 @@ export function createAnatomy({ lanes, consumeTs, rowsByIndex, onClickSample }) 
     el("div", { class: "legend" }, [
       legendSwatch(COLORS.gen, "generating (hue steps with weight version)"),
       legendSwatch(COLORS.tool, "tool wait"),
+      ...[...new Set(lanes.flatMap((l) => l.segments.map((s) => s.kind)))]
+        .filter((kind) => kind !== "gen" && kind !== "tool")
+        .map((kind) => legendSwatch(CUSTOM_PHASE_COLORS[kind] ?? COLORS[kind] ?? COLORS.tool, kind.replaceAll("_", " "))),
       legendSwatch(COLORS.attempt, "queue/attempt"),
       el("span", { style: `color: ${COLORS.consume}` }, ["│ consume"]),
     ]),
@@ -147,7 +151,7 @@ export function createAnatomy({ lanes, consumeTs, rowsByIndex, onClickSample }) 
       }
       for (const segment of lane.segments) {
         if ((segment.t1 ?? T1) < v0 || (segment.t0 ?? T0) > v1) continue;
-        ctx.fillStyle = segment.kind === "gen" ? versionColor(segmentVersion(segment, lane)) : COLORS.tool;
+        ctx.fillStyle = segment.kind === "gen" ? versionColor(segmentVersion(segment, lane)) : (CUSTOM_PHASE_COLORS[segment.kind] ?? COLORS[segment.kind] ?? COLORS.tool);
         const x0 = X(segment.t0 ?? T0, W);
         ctx.fillRect(x0, y + padSegment, Math.max(X(segment.t1 ?? T1, W) - x0, 1.5), ROW - 2 * padSegment);
       }
@@ -232,13 +236,13 @@ export function createAnatomy({ lanes, consumeTs, rowsByIndex, onClickSample }) 
     }
     const lane = order[i];
     const t = tAt(ev.clientX, rect);
-    const segment = lane.segments.find((s) => (s.t0 ?? T0) <= t && t < (s.t1 ?? T1));
+    const segment = [...lane.segments].reverse().find((s) => (s.t0 ?? T0) <= t && t < (s.t1 ?? T1));
     const versions = lane.versions.length > 1 ? `  v${lane.versions[0]}–v${lane.versions.at(-1)}` : "";
     const lines = [`s${lane.sample_index}  +${fmtNum(t - T0)}s  ${lane.status}${versions}`];
     if (segment) {
       const version = segment.weight_version ? ` · v${segment.weight_version}` : "";
       const turn = segment.turn > 0 ? `turn ${segment.turn} ` : "";
-      lines.push(`${turn}${segment.kind === "gen" ? "generating" : "tool wait"}${version}`);
+      lines.push(`${turn}${segment.kind === "gen" ? "generating" : segment.kind.replaceAll("_", " ")}${version}`);
     } else if (lane.attempts.some((a) => (a.t0 ?? T0) <= t && t < (a.t1 ?? T1))) {
       lines.push("queued / waiting");
     }

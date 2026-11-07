@@ -5,9 +5,10 @@ from argparse import Namespace
 import pytest
 from pydantic import ValidationError
 from tests.fast.fixtures.args_fixtures import sglang_router_args
-from tests.fast.fixtures.sglang_config_fixtures import make_sglang_config
 
 from miles.backends.megatron_utils.megatron_config import MegatronConfig
+from miles.backends.sglang_utils.sglang_api_client import WorkerType
+from miles.backends.sglang_utils.sglang_config import ModelConfig, ServerGroupConfig, SglangConfig
 from miles.rollout.session.config import SessionServerConfig, compute_session_server_config
 from miles.utils.output_store.config import output_store_backend_config
 
@@ -29,6 +30,8 @@ _ARGS_TO_CONFIG_FIELD = {
     "lora_adapter_path": "lora_adapter_path",
     "lora_train_only": "lora_train_only",
     "use_session_server": "use_session_server",
+    "use_session_images": "use_session_images",
+    "session_image_text_only_samples": "session_image_text_only_samples",
     "session_message_matcher": "session_message_matcher",
     "pause_generation_mode": "pause_generation_mode",
     "session_sample_picker_path": "session_sample_picker_path",
@@ -39,9 +42,9 @@ _ARGS_TO_CONFIG_FIELD = {
     "multimodal_token_space_processing": "multimodal_token_space_processing",
 }
 
-_CALL_SITE_FIELDS = ("host", "port", "instance_id", "backend_url")
+_CALL_SITE_FIELDS = ("host", "port", "instance_id", "backend_url", "eval_backend_url")
 # Derived from several args, tested on their own below.
-_DERIVED_FIELDS = ("output_store_backend_config", "run_media_dir")
+_DERIVED_FIELDS = ("output_store_backend_config", "run_media_dir", "session_image_engine_settings")
 _ROUTER_DERIVED_FIELDS = ("routing_key_header",)
 
 _DISTINCT_ARGS_VALUES = dict(
@@ -62,6 +65,9 @@ _DISTINCT_ARGS_VALUES = dict(
     lora_adapter_path="/fake/adapters/x",
     lora_train_only=True,
     use_session_server="v2",
+    use_session_images=True,
+    session_image_text_only_samples="keep",
+    rollout_external=False,
     session_message_matcher="fake.matcher",
     pause_generation_mode="in_place",
     session_sample_picker_path="fake.picker",
@@ -83,9 +89,21 @@ def _make_args(**overrides) -> Namespace:
     moe_router_topk = values.pop("moe_router_topk")
     return Namespace(
         **values,
-        sglang=make_sglang_config(speculative_algorithm=speculative_algorithm),
+        sglang=_policy_sglang_config(values["hf_checkpoint"], speculative_algorithm=speculative_algorithm),
         raw_megatron=MegatronConfig(trainers=[], base_args={"moe_router_topk": moe_router_topk}),
     )
+
+
+def _policy_sglang_config(model_path: str, **base_args) -> SglangConfig:
+    """One regular engine group serving ``model_path`` with SGLang's default image settings."""
+    group = ServerGroupConfig(
+        worker_type=WorkerType.REGULAR,
+        num_gpus_per_engine=1,
+        needs_offload=False,
+        overrides={"model_path": model_path},
+    )
+    model = ModelConfig(name="default", model_path=model_path, server_groups=[group], update_weights=True)
+    return SglangConfig(models=[model], base_args={"image_processor_backend": "auto", **base_args})
 
 
 class TestComputeSessionServerConfig:
@@ -100,20 +118,31 @@ class TestComputeSessionServerConfig:
         assert covered == set(SessionServerConfig.model_fields)
 
     def test_call_site_fields_are_copied(self):
-        """Host, port, instance id, and backend url come from the caller, not from args."""
+        """Host, port, instance id, and both backend urls come from the caller, not from args."""
         config = compute_session_server_config(
-            _make_args(), host="10.0.0.1", port=5001, instance_id="abc", backend_url="http://10.0.0.2:3000"
+            _make_args(),
+            host="10.0.0.1",
+            port=5001,
+            instance_id="abc",
+            backend_url="http://10.0.0.2:3000",
+            eval_backend_url="http://10.0.0.3:3001",
         )
         assert config.host == "10.0.0.1"
         assert config.port == 5001
         assert config.instance_id == "abc"
         assert config.backend_url == "http://10.0.0.2:3000"
+        assert config.eval_backend_url == "http://10.0.0.3:3001"
 
     @pytest.mark.parametrize("args_attr,config_field", sorted(_ARGS_TO_CONFIG_FIELD.items()))
     def test_each_args_field_is_copied(self, args_attr: str, config_field: str):
         """Every args-derived field maps one-to-one, using values no hardcoded default would produce."""
         config = compute_session_server_config(
-            _make_args(), host="10.0.0.1", port=5001, instance_id="abc", backend_url="http://10.0.0.2:3000"
+            _make_args(),
+            host="10.0.0.1",
+            port=5001,
+            instance_id="abc",
+            backend_url="http://10.0.0.2:3000",
+            eval_backend_url=None,
         )
         assert getattr(config, config_field) == _DISTINCT_ARGS_VALUES[args_attr]
 
@@ -126,18 +155,29 @@ class TestComputeSessionServerConfig:
             port=5001,
             instance_id="abc",
             backend_url="http://10.0.0.2:3000",
+            eval_backend_url=None,
         )
         assert config.use_session_server is flag_value
 
     def test_session_media_go_under_this_runs_directory(self):
         config = compute_session_server_config(
-            _make_args(), host="10.0.0.1", port=5001, instance_id="abc", backend_url="http://10.0.0.2:3000"
+            _make_args(),
+            host="10.0.0.1",
+            port=5001,
+            instance_id="abc",
+            backend_url="http://10.0.0.2:3000",
+            eval_backend_url=None,
         )
         assert config.run_media_dir == "/fake/media/fakerun"
 
     def test_no_shared_media_dir_means_no_session_media_dir(self):
         config = compute_session_server_config(
-            _make_args(shared_media_dir=None), host="10.0.0.1", port=5001, instance_id="abc", backend_url="http://x"
+            _make_args(shared_media_dir=None),
+            host="10.0.0.1",
+            port=5001,
+            instance_id="abc",
+            backend_url="http://x",
+            eval_backend_url=None,
         )
         assert config.run_media_dir is None
 
@@ -150,10 +190,20 @@ class TestComputeSessionServerConfig:
             run_uuid="abcd",
         )
         config = compute_session_server_config(
-            _make_args(**store_args), host="10.0.0.1", port=5001, instance_id="abc", backend_url="http://x:1"
+            _make_args(**store_args),
+            host="10.0.0.1",
+            port=5001,
+            instance_id="abc",
+            backend_url="http://x:1",
+            eval_backend_url=None,
         )
         off = compute_session_server_config(
-            _make_args(), host="10.0.0.1", port=5001, instance_id="abc", backend_url="http://x:1"
+            _make_args(),
+            host="10.0.0.1",
+            port=5001,
+            instance_id="abc",
+            backend_url="http://x:1",
+            eval_backend_url=None,
         )
 
         assert config.output_store_backend_config == output_store_backend_config(_make_args(**store_args))
@@ -177,16 +227,46 @@ class TestComputeSessionServerConfig:
                 port=5001,
                 instance_id="abc",
                 backend_url="http://10.0.0.2:3000",
+                eval_backend_url=None,
             )
         assert config.routing_key_header == expected
         assert ("does not route by session" in caplog.text) is (expected is None)
+
+    def test_session_image_engine_settings_are_the_policy_engines_launch_settings(self):
+        config = compute_session_server_config(
+            _make_args(), host="10.0.0.1", port=5001, instance_id="abc", backend_url="http://x", eval_backend_url=None
+        )
+        assert config.session_image_engine_settings == {
+            "model_path": "/fake/model",
+            "revision": None,
+            "tokenizer_path": "/fake/model",
+            "mm_process_config": None,
+            "image_processor_backend": "auto",
+            "disable_fast_image_processor": None,
+        }
+
+    def test_no_session_images_means_no_engine_settings(self):
+        config = compute_session_server_config(
+            _make_args(use_session_images=False, rollout_external=True),
+            host="10.0.0.1",
+            port=5001,
+            instance_id="abc",
+            backend_url="http://x",
+            eval_backend_url=None,
+        )
+        assert config.session_image_engine_settings is None
 
     def test_older_args_default_rollout_temperature(self) -> None:
         """Older session inputs retain the default temperature after owner migration."""
         args = _make_args()
         del args.rollout_temperature
         config = compute_session_server_config(
-            args, host="127.0.0.1", port=5001, instance_id=None, backend_url="http://127.0.0.1:3000"
+            args,
+            host="127.0.0.1",
+            port=5001,
+            instance_id=None,
+            backend_url="http://127.0.0.1:3000",
+            eval_backend_url=None,
         )
         assert config.rollout_temperature == 1.0
 
@@ -197,6 +277,7 @@ _COMPLETE_CONFIG_KWARGS = dict(
     instance_id=None,
     backend_url="http://127.0.0.1:3000",
     routing_key_header=None,
+    eval_backend_url=None,
     timeout=None,
     hf_checkpoint=None,
     chat_template_path=None,
@@ -214,6 +295,9 @@ _COMPLETE_CONFIG_KWARGS = dict(
     lora_adapter_path=None,
     lora_train_only=False,
     use_session_server=None,
+    use_session_images=False,
+    session_image_engine_settings=None,
+    session_image_text_only_samples="drop",
     session_message_matcher="strict",
     pause_generation_mode=None,
     session_sample_picker_path=None,
@@ -285,7 +369,12 @@ class TestOptionalBackendRoutingMetadata:
         args.moe_router_topk = 99
 
         config = compute_session_server_config(
-            args=args, host="127.0.0.1", port=5001, instance_id=None, backend_url="http://127.0.0.1:3000"
+            args=args,
+            host="127.0.0.1",
+            port=5001,
+            instance_id=None,
+            backend_url="http://127.0.0.1:3000",
+            eval_backend_url=None,
         )
 
         assert config.moe_router_topk is None

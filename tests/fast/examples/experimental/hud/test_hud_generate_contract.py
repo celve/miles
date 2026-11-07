@@ -45,6 +45,7 @@ async def test_episode_result_wraps_the_same_sample_and_uses_supplied_state(
     monkeypatch.setattr(rollout, "_stitch", stitch)
     monkeypatch.setattr(rollout, "_vision_inputs", vision)
     monkeypatch.setattr(rollout, "_failed", failure)
+    monkeypatch.setattr(rollout, "_no_response_cause", lambda run: None)
 
     output = await rollout.generate(GenerateFnInput(state=state, sample=sample, sampling_params={}, evaluation=False))
 

@@ -219,6 +219,7 @@ def run_benchmark(bench):
                 port=server_port,
                 instance_id="bench-0",
                 backend_url=f"http://127.0.0.1:{backend_port}",
+                eval_backend_url=None,
             )
             server = ctx.Process(target=run_session_server, args=(config,))
             processes.append(server)

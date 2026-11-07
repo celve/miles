@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CUA-PROGRESS 0/1</title>
+<style>
+  body { margin: 0; background: #f4f4f5; font: 18px system-ui, sans-serif; }
+  main { width: 860px; margin: 90px auto; text-align: center; }
+  button { font-size: 26px; padding: 18px 26px; margin: 14px; border-radius: 10px; }
+  #state { margin-top: 30px; font-weight: 700; }
+</style>
+</head>
+<body>
+<main>
+  <p>Click the button labelled <b>__LABEL__</b>.</p>
+  <div id="row"></div>
+  <div id="state">waiting</div>
+</main>
+<script>
+  const LABEL = "__LABEL__";
+  const LABELS = __LABELS__;
+  const row = document.getElementById("row");
+  const state = document.getElementById("state");
+  for (const text of LABELS) {
+    const button = document.createElement("button");
+    button.textContent = text;
+    button.addEventListener("click", () => {
+      if (text !== LABEL) {
+        state.textContent = "Not that one.";
+        return;
+      }
+      document.title = "CUA-PROGRESS 1/1";
+      state.textContent = "Done.";
+      button.style.outline = "6px solid #16a34a";
+    });
+    row.appendChild(button);
+  }
+</script>
+</body>
+</html>

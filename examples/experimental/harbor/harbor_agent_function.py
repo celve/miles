@@ -51,15 +51,26 @@ Env vars (read on the rollout worker):
                          same meaning as on the agent server
   HARBOR_OVERRIDE_STORAGE_MB
                          per-sandbox disk, Harbor's ``override_storage_mb``
+  HARBOR_CUA_DESKTOP_WIDTH / HARBOR_CUA_DESKTOP_HEIGHT
+                         computer-1's desktop size (Harbor's default 1024x900)
+  HARBOR_AGENT_IMPORT_PATH
+                         ``module:Class`` Harbor builds instead of the binding's agent
+  HARBOR_AGENT_KWARGS    JSON object added to ``AgentConfig.kwargs``; a key the
+                         binding sets is refused
+  HARBOR_VERIFIER_IMPORT_PATH / HARBOR_VERIFIER_KWARGS
+                         a Harbor verifier class, and its JSON kwargs, run in
+                         place of the task's ``tests/``
 
-Failure semantics: a verdict is returned as-is; every episode that ends
-without one scores 0 with a named ``exit_status`` (``TimeLimitExceeded``,
+Failure semantics: a verdict is returned as-is. A trial the policy cannot have
+failed is discarded with ``InfraAbort``: one that failed before its agent
+started (``SandboxUnavailable``, ``AgentSetupFailed``), one whose in-process
+agent lost the model service (``ServerUnreachable``), or a computer-1 trial whose
+own in-sandbox command failed mid-episode (``SandboxLost``). Every other episode that ends
+without a verdict scores 0 with a named ``exit_status`` (``TimeLimitExceeded``,
 ``SequenceLengthLimitExceeded``, ``AgentError``), matching the agent-server
 path. Configuration errors (missing task dir, bad env vars) raise instead:
 they would fail every sample, and a loud stop beats training on silent
-all-zero rewards. Nothing is discarded here yet; see the tracking issue for
-wiring the platform-side Harbor exceptions to ``InfraAbort`` once that
-contract lands.
+all-zero rewards.
 """
 
 import asyncio
@@ -73,8 +84,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from miles.rollout.agentic.agent_function import InfraAbort
 from miles.rollout.agentic.credentials import PROVIDER_CREDENTIALS, resolve_provider_api_key
 from miles.rollout.agentic.session import openai_session_url
+from miles.utils.eval_record import episode_dir, finish_episode, start_episode
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +97,9 @@ _SAFE_INSTANCE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # Harbor exception class names -> the exit_status vocabulary the reward path reads.
 _TIMEOUT_EXCEPTIONS = {"AgentTimeoutError", "VerifierTimeoutError", "EnvironmentStartTimeoutError"}
 _OUTPUT_LIMIT_EXCEPTIONS = {"MaxSeqLenExceededError", "SingleTurnMaxSeqLenExceededError"}
+# litellm's, raised by in-process agents such as computer-1; installed agents' Api* errors are regex matches on
+# their own output, which the policy writes, so those stay scored.
+_MODEL_SERVICE_EXCEPTIONS = {"APIConnectionError", "ServiceUnavailableError"}
 
 
 def _trial_timeout_s() -> int:
@@ -102,6 +118,13 @@ def _env_int(var: str) -> int | None:
 
 def _allowed_hosts(var: str) -> list[str]:
     return [host for host in re.split(r"[,\s]+", os.getenv(var, "")) if host]
+
+
+def _env_json_object(var: str) -> dict[str, Any]:
+    value = json.loads(os.getenv(var, "") or "{}")
+    if not isinstance(value, dict):
+        raise ValueError(f"{var} must be a JSON object, got {type(value).__name__}")
+    return value
 
 
 # --- harness bindings -------------------------------------------------------
@@ -127,6 +150,13 @@ class HarnessBinding:
     env: Callable[[str, str], dict[str, str]]
     # the model name Harbor passes to the harness
     model_name: Callable[[str], str] = lambda model: model
+    # the agent class Harbor builds instead of the one registered under the name
+    import_path: str | None = None
+    accepts_max_seq_len: bool = True
+    # exception types that, once the agent has started, only a lost sandbox raises
+    sandbox_loss_exceptions: frozenset[str] = frozenset()
+    # the agent takes a ``record_dir`` kwarg and writes its steps there (miles.utils.eval_record)
+    records_steps: bool = False
 
 
 def _terminus_kwargs(
@@ -253,6 +283,53 @@ def _opencode_env(session_url: str, api_key: str) -> dict[str, str]:
     return {"OPENAI_BASE_URL": session_url, "OPENAI_API_BASE": session_url, "OPENAI_API_KEY": api_key}
 
 
+def _opencode_cua_kwargs(
+    session_url: str, api_key: str, sampling_params: dict[str, Any], model: str, max_seq_len: int | None
+) -> dict[str, Any]:
+    kwargs = _opencode_kwargs(session_url, api_key, sampling_params, model, max_seq_len)
+    provider, model_id = _opencode_provider_model(model)
+    # Without image input declared, OpenCode drops the screenshots the computer tool returns.
+    kwargs["opencode_config"]["provider"][provider]["models"][model_id].update(
+        {"modalities": {"input": ["text", "image"], "output": ["text"]}, "attachment": True}
+    )
+    if (temperature := sampling_params.get("temperature")) is not None:
+        kwargs["temperature"] = temperature
+    if max_turns := _env_int("HARBOR_AGENT_MAX_ITERATIONS"):
+        kwargs["max_turns"] = max_turns
+    return kwargs
+
+
+_OPENCODE_CUA = "examples.experimental.harbor_cua.opencode_cua:OpenCodeCUA"
+
+
+# Qwen3-VL clicks on a 0..999 grid whatever its prompt says; session images serve only Qwen3-VL.
+_QWEN3_VL_COMPUTER_1 = "examples.experimental.harbor_cua.qwen_computer:Qwen3VLComputer1"
+
+
+def _computer_1_kwargs(
+    session_url: str, api_key: str, sampling_params: dict[str, Any], model: str, max_seq_len: int | None
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "api_base": session_url,
+        # computer-1 would send 0.7, which the session server refuses for training.
+        "temperature": sampling_params.get("temperature"),
+        # LiteLLM sends these on every call, the compactor's included; llm_call_kwargs reaches the agent loop only.
+        "llm_kwargs": {**{k: v for k, v in sampling_params.items() if k != "temperature"}, "api_key": api_key},
+        "provider": "litellm",
+        "enable_images": True,
+    }
+    if max_turns := _env_int("HARBOR_AGENT_MAX_ITERATIONS"):
+        kwargs["max_turns"] = max_turns
+    for field, var in (("desktop_width", "HARBOR_CUA_DESKTOP_WIDTH"), ("desktop_height", "HARBOR_CUA_DESKTOP_HEIGHT")):
+        if (value := _env_int(var)) is not None:
+            kwargs[field] = value
+    return kwargs
+
+
+def _no_env(session_url: str, api_key: str) -> dict[str, str]:
+    return {}
+
+
 HARNESS_BINDINGS: dict[str, HarnessBinding] = {
     "terminus-2": HarnessBinding(kwargs=_terminus_kwargs, env=_openai_env),
     "terminus-1": HarnessBinding(kwargs=_terminus_kwargs, env=_openai_env),
@@ -264,6 +341,23 @@ HARNESS_BINDINGS: dict[str, HarnessBinding] = {
         model_name=lambda model: "/".join(_opencode_provider_model(model)),
     ),
     "mini-swe-agent": HarnessBinding(kwargs=_no_kwargs, env=_mini_swe_agent_env),
+    # Needs --sglang-tool-call-parser qwen25 and --session-message-matcher loose_tool_call (OpenCode re-serialises arguments).
+    "opencode-cua": HarnessBinding(
+        kwargs=_opencode_cua_kwargs,
+        env=_opencode_env,
+        model_name=lambda model: "/".join(_opencode_provider_model(model)),
+        import_path=_OPENCODE_CUA,
+        sandbox_loss_exceptions=frozenset({"DesktopLost"}),
+    ),
+    # Its actions' failures return to the policy as observations; an escaping runtime error is a harness command's.
+    "computer-1": HarnessBinding(
+        kwargs=_computer_1_kwargs,
+        env=_no_env,
+        import_path=_QWEN3_VL_COMPUTER_1,
+        accepts_max_seq_len=False,
+        sandbox_loss_exceptions=frozenset({"RuntimeRequestError"}),
+        records_steps=True,
+    ),
 }
 # Any other installed agent that speaks OpenAI chat completions.
 _DEFAULT_BINDING = HarnessBinding(kwargs=_no_kwargs, env=_openai_env)
@@ -338,14 +432,24 @@ def _environment_config():
     return EnvironmentConfig(type=env_type, delete=True, kwargs=kwargs, **overrides, **policies)
 
 
-def build_trial_config(metadata: dict[str, Any], session_url: str, request_kwargs: dict[str, Any]):
+def _agent_name(metadata: dict[str, Any]) -> str:
+    return str(metadata.get("agent_name") or "mini-swe-agent")
+
+
+def _binding(metadata: dict[str, Any]) -> HarnessBinding:
+    return HARNESS_BINDINGS.get(_agent_name(metadata), _DEFAULT_BINDING)
+
+
+def build_trial_config(
+    metadata: dict[str, Any], session_url: str, request_kwargs: dict[str, Any], record_dir: Path | None = None
+):
     from harbor.models.trial.config import AgentConfig, TaskConfig, TrialConfig, VerifierConfig
 
     tasks_dir = Path(os.environ["HARBOR_TASKS_DIR"])
-    agent_name = str(metadata.get("agent_name") or "mini-swe-agent")
+    agent_name = _agent_name(metadata)
     model = f"openai/{os.getenv('AGENT_MODEL_NAME', 'model')}"
     api_key = "dummy"
-    binding = HARNESS_BINDINGS.get(agent_name, _DEFAULT_BINDING)
+    binding = _binding(metadata)
 
     raw_max_seq_len = metadata.get("max_seq_len") or _env_int("HARBOR_MAX_SEQ_LEN")
     max_seq_len = int(raw_max_seq_len) if raw_max_seq_len is not None else None
@@ -356,12 +460,32 @@ def build_trial_config(metadata: dict[str, Any], session_url: str, request_kwarg
         "input_cost_per_token": 0.0,
         "output_cost_per_token": 0.0,
     }
-    if max_seq_len is not None:
+    if max_seq_len is not None and binding.accepts_max_seq_len:
         agent_kwargs["max_seq_len"] = max_seq_len
+    if record_dir is not None:
+        if not binding.records_steps:
+            raise ValueError(
+                f"--eval-record-dir records computer-1 episodes; the {agent_name} binding has no recorder"
+            )
+        agent_kwargs["record_dir"] = str(record_dir)
+    extra_agent_kwargs = _env_json_object("HARBOR_AGENT_KWARGS")
+    if clash := sorted(set(extra_agent_kwargs) & set(agent_kwargs)):
+        raise ValueError(f"HARBOR_AGENT_KWARGS sets {clash}, which the {agent_name} binding owns")
+    agent_kwargs.update(extra_agent_kwargs)
+    import_path = os.getenv("HARBOR_AGENT_IMPORT_PATH", "").strip() or binding.import_path
 
     extra: dict[str, Any] = {}
-    if verifier_timeout := os.getenv("HARBOR_VERIFIER_TIMEOUT_SEC"):
-        extra["verifier"] = VerifierConfig(override_timeout_sec=float(verifier_timeout))
+    verifier_timeout = os.getenv("HARBOR_VERIFIER_TIMEOUT_SEC")
+    verifier_import_path = os.getenv("HARBOR_VERIFIER_IMPORT_PATH", "").strip() or None
+    verifier_kwargs = _env_json_object("HARBOR_VERIFIER_KWARGS")
+    if verifier_kwargs and verifier_import_path is None:
+        raise ValueError("HARBOR_VERIFIER_KWARGS needs HARBOR_VERIFIER_IMPORT_PATH")
+    if verifier_timeout or verifier_import_path:
+        extra["verifier"] = VerifierConfig(
+            override_timeout_sec=float(verifier_timeout) if verifier_timeout else None,
+            import_path=verifier_import_path,
+            kwargs=verifier_kwargs,
+        )
     if build_mult := os.getenv("HARBOR_ENV_BUILD_TIMEOUT_MULTIPLIER"):
         extra["environment_build_timeout_multiplier"] = float(build_mult)
 
@@ -369,7 +493,9 @@ def build_trial_config(metadata: dict[str, Any], session_url: str, request_kwarg
     return TrialConfig(
         task=TaskConfig(path=_task_path(tasks_dir, str(metadata.get("instance_id", "")))),
         agent=AgentConfig(
-            name=agent_name,
+            # Harbor builds the registered class whenever the name is a registered one.
+            name=None if import_path else agent_name,
+            import_path=import_path,
             model_name=binding.model_name(model),
             override_timeout_sec=float(agent_timeout) if agent_timeout else None,
             env=binding.env(session_url, api_key),
@@ -469,6 +595,54 @@ def _failed(exit_status: str) -> dict[str, Any]:
     return {"reward": 0.0, "exit_status": exit_status, "eval_report": {}, "agent_metrics": {}}
 
 
+def _discard_cause(result, binding: HarnessBinding) -> tuple[str, Any] | None:
+    """The ``InfraAbort`` exit_status, and its exception, of a trial the policy cannot have failed."""
+    steps = (
+        getattr(result, "step_results", None) or []
+    )  # config-access-exempt: Harbor result objects differ across Harbor versions
+    failures = [
+        exc
+        for exc in (
+            getattr(
+                result, "exception_info", None
+            ),  # config-access-exempt: Harbor result objects differ across Harbor versions
+            *(
+                getattr(step, "exception_info", None) for step in steps
+            ),  # config-access-exempt: Harbor result objects differ across Harbor versions
+        )
+        if exc is not None
+    ]
+    if not failures:
+        return None
+    if not _agent_started(result):
+        # Harbor stamps a phase's timing when the phase begins.
+        cause = (
+            "SandboxUnavailable" if getattr(result, "agent_setup", None) is None else "AgentSetupFailed"
+        )  # config-access-exempt: Harbor result objects differ across Harbor versions
+        return cause, failures[0]
+    for exc in failures:
+        exc_type = getattr(
+            exc, "exception_type", ""
+        )  # config-access-exempt: Harbor result objects differ across Harbor versions
+        if exc_type in _MODEL_SERVICE_EXCEPTIONS:
+            return "ServerUnreachable", exc
+        if exc_type in binding.sandbox_loss_exceptions:
+            return "SandboxLost", exc
+    return None
+
+
+def _agent_started(result) -> bool:
+    steps = (
+        getattr(result, "step_results", None) or []
+    )  # config-access-exempt: Harbor result objects differ across Harbor versions
+    return getattr(
+        result, "agent_execution", None
+    ) is not None or any(  # config-access-exempt: Harbor result objects differ across Harbor versions
+        getattr(step, "agent_execution", None) is not None
+        for step in steps  # config-access-exempt: Harbor result objects differ across Harbor versions
+    )
+
+
 # --- entry -----------------------------------------------------------------
 
 
@@ -492,7 +666,16 @@ async def run(
     # fail every sample the same way; raising beats training on silent all-zero
     # rewards.
     _ensure_provider_key()
-    config = build_trial_config(metadata, session_url, request_kwargs)
+    record_dir = _record_dir(metadata)
+    config = build_trial_config(metadata, session_url, request_kwargs, record_dir=record_dir)
+    if record_dir is not None:
+        start_episode(
+            record_dir,
+            stack="harbor",
+            task_id=str(instance_id),
+            sample_index=metadata["miles_lifecycle"]["sample_index"],
+            dataset=record_dir.parent.parent.name,
+        )
 
     try:
         trial = await Trial.create(config)
@@ -502,12 +685,31 @@ async def run(
     except asyncio.TimeoutError:
         # The policy may be what is stalling, so this is a negative sample.
         logger.error(f"Harbor trial for {instance_id} exceeded {trial_timeout_s}s; scoring 0")
-        return _failed("TimeLimitExceeded")
+        return _recorded(record_dir, _failed("TimeLimitExceeded"))
     except Exception as e:
         logger.error(f"Harbor trial for {instance_id} failed: {e}", exc_info=True)
-        return _failed("AgentError")
+        return _recorded(record_dir, _failed("AgentError"))
+
+    if (discard := _discard_cause(result, _binding(metadata))) is not None:
+        cause, exc = discard
+        if record_dir is not None:
+            finish_episode(record_dir, reward=None, status=cause)
+        raise InfraAbort(cause, f"Harbor trial for {instance_id}: {exc.exception_type}: {exc.exception_message}")
 
     out = trial_result_to_metadata(result)
     out["trial_dir"] = str(trial.paths.trial_dir)
     logger.info(f"Harbor trial {instance_id}: exit_status={out['exit_status']} reward={out['reward']}")
+    return _recorded(record_dir, out)
+
+
+def _record_dir(metadata: dict[str, Any]) -> Path | None:
+    """Where an eval episode is recorded, under the directory Miles's eval loop gave it; None when not recording."""
+    if (parent := metadata.get("eval_record_dir")) is None:
+        return None
+    return episode_dir(parent, str(metadata.get("instance_id", "")), metadata["miles_lifecycle"]["sample_index"])
+
+
+def _recorded(record_dir: Path | None, out: dict[str, Any]) -> dict[str, Any]:
+    if record_dir is not None:
+        finish_episode(record_dir, reward=out["reward"], status=out["exit_status"])
     return out

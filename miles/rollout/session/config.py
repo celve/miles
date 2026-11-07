@@ -1,6 +1,7 @@
 import logging
 from typing import Any
 
+from miles.rollout.session.images.launch_settings import resolve_engine_launch_settings
 from miles.router.backend import make_router_backend
 from miles.utils.media_refs import run_media_dir
 from miles.utils.output_store.config import output_store_backend_config
@@ -16,6 +17,8 @@ class SessionServerConfig(FrozenStrictBaseModel):
     backend_url: str
     # header the router places a session by; None = turns are not pinned to one engine
     routing_key_header: str | None
+    # the eval pool's router, for sessions created with evaluation=True; None means backend_url serves eval too
+    eval_backend_url: str | None
     timeout: float | None
     hf_checkpoint: str | None
     chat_template_path: str | None
@@ -33,6 +36,10 @@ class SessionServerConfig(FrozenStrictBaseModel):
     lora_adapter_path: str | None
     lora_train_only: bool
     use_session_server: bool | str | None
+    # Dense session images: the session server assembles pixel_values (--use-session-images).
+    use_session_images: bool
+    session_image_engine_settings: dict[str, Any] | None
+    session_image_text_only_samples: str
     session_message_matcher: str
     pause_generation_mode: str | None
     session_sample_picker_path: str | None
@@ -48,7 +55,7 @@ class SessionServerConfig(FrozenStrictBaseModel):
 
 
 def compute_session_server_config(
-    args, *, host: str, port: int, instance_id: str | None, backend_url: str
+    args, *, host: str, port: int, instance_id: str | None, backend_url: str, eval_backend_url: str | None
 ) -> SessionServerConfig:
     return SessionServerConfig(
         host=host,
@@ -56,6 +63,7 @@ def compute_session_server_config(
         instance_id=instance_id,
         backend_url=backend_url,
         routing_key_header=_routing_key_header(args),
+        eval_backend_url=eval_backend_url,
         timeout=args.miles_router_timeout,
         hf_checkpoint=args.hf_checkpoint,
         chat_template_path=args.chat_template_path,
@@ -73,6 +81,11 @@ def compute_session_server_config(
         lora_adapter_path=args.lora_adapter_path,
         lora_train_only=args.lora_train_only,
         use_session_server=args.use_session_server,
+        use_session_images=args.use_session_images,
+        session_image_engine_settings=(
+            resolve_engine_launch_settings(args, sglang=args.sglang) if args.use_session_images else None
+        ),
+        session_image_text_only_samples=args.session_image_text_only_samples,
         session_message_matcher=args.session_message_matcher,
         pause_generation_mode=args.pause_generation_mode,
         session_sample_picker_path=args.session_sample_picker_path,

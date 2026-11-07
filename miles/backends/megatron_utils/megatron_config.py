@@ -379,6 +379,10 @@ def compute_trainer_args(args: Namespace, trainer: MegatronTrainerConfig) -> Nam
         setattr(ans, key, value)
 
     _apply_critical_derived_overrides(ans, base=args, trainer=trainer)
+    # Local import: miles.utils.arguments imports this module.
+    from miles.utils.arguments import validate_m2po_args
+
+    validate_m2po_args(ans)
 
     if trainer.role == CRITIC_ROLE:
         ans.loss_type = "value_loss"

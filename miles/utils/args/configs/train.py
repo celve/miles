@@ -94,6 +94,16 @@ class TrainConfig(BaseConfig):
             help="The method to convert megatron weights to hugging face weights for SGLang.",
         ),
     ] = "raw"
+    freeze_vision_model: A[
+        bool,
+        Arg(
+            help=(
+                "Train with the vision tower frozen, under --megatron-to-hf-mode bridge on a provider that "
+                "supports it (Qwen-VL). Its merger and DeepStack mergers stay trainable. This changes what "
+                "the policy learns, unlike the trainer-speed flags."
+            )
+        ),
+    ] = False
     dsa_attention_backend: A[
         str,
         Arg(

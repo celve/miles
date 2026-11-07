@@ -20,6 +20,7 @@ from miles.backends.training_utils.torch_native.step_runner import StepRunner
 from miles.platforms import current_platform
 from miles.utils.args.runtime import TrainerConfig
 from miles.utils.context_utils import with_defer
+from miles.utils.data import get_steps_per_rollout
 from miles.utils.disk_backed_tensor import optimizer_state_dir_root
 from miles.utils.distributed_utils import get_gloo_group
 from miles.utils.ft_utils.indep_dp import IndepDPInfo
@@ -31,10 +32,6 @@ from miles.utils.tracking_utils.tracking import init_tracking
 from miles.utils.workers.rpc.common.wire_types import Pickled
 
 logger = logging.getLogger(__name__)
-
-
-def _steps_per_rollout(args: TrainerConfig) -> int:
-    return max(args.rollout_batch_size * args.n_samples_per_prompt // args.global_batch_size, 1)
 
 
 class TorchtitanTrainRayActor(TorchNativeTrainRayActor):
@@ -66,7 +63,7 @@ class TorchtitanTrainRayActor(TorchNativeTrainRayActor):
         config = build_trainer_config(
             args,
             hf_assets_path=args.hf_checkpoint,
-            lr_total_steps=args.num_rollout * _steps_per_rollout(args),
+            lr_total_steps=args.num_rollout * get_steps_per_rollout(args),
             dump_subdir="actor",
             with_lora=is_lora_enabled(args),
         )
@@ -98,7 +95,7 @@ class TorchtitanTrainRayActor(TorchNativeTrainRayActor):
         self.trainer.checkpointer.load()
         if args.stream_optimizer_state_to_disk:
             setup_adam_state_on_disk(self.optimizers, state_dir_root=optimizer_state_dir_root(args))
-        start_rollout_id = self.trainer.step // _steps_per_rollout(args)
+        start_rollout_id = self.trainer.step // get_steps_per_rollout(args)
 
         if with_ref:
             self.ref_runner = self._build_ref_runner(args)

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -10,16 +13,22 @@ from tests.fast.ray.rollout.conftest import make_args, make_rollout_config, make
 from tests.fast.train_parallel_config_utils import make_train_parallel_config
 from tests.fast.utils.output_store.test_plan import ALL, INDEXER, MASK, R3, fake_store_refs, response
 
+from miles.backends.training_utils.data import context_parallel
+from miles.backends.training_utils.data import rollout as data_rollout
+from miles.backends.training_utils.data.multimodal import INKLING_IMAGE_SENTINEL_ID, KIMI_VL_MEDIA_TOKEN_ID
+from miles.backends.training_utils.data.rollout import DataIterator
 from miles.ray.rollout import train_data_conversion
 from miles.ray.rollout.train_data_conversion import (
     ROLLOUT_DATA_VALUE_SPEC,
     _post_process_rewards,
     can_precompute_dp_schedule,
     convert_samples_to_train_data,
+    pad_steps_for_dp_alignment,
     split_train_data_by_dp,
     split_train_data_by_dp_raw,
     split_train_data_by_dp_scheduled_raw,
 )
+from miles.utils.dp_schedule import build_dp_schedule
 from miles.utils.object_store import RayObjectStore
 from miles.utils.output_store.plan import StorePlan, StorePlanError
 from miles.utils.sampling_mask import RolloutSamplingMask
@@ -1135,17 +1144,26 @@ class TestCanPrecomputeDpSchedule:
             args=args, data=_make_split_data(8), train_parallel_config=FULL_SCHEDULE_CONFIG
         )
 
-    def test_rejects_multimodal(self):
+    @pytest.mark.parametrize(
+        "multimodal_train_inputs",
+        [
+            {"pixel_values": torch.zeros(4, 3), "image_grid_thw": torch.tensor([[1, 2, 2]])},
+            {"grid_thws": torch.tensor([[1, 4, 4]])},
+            {"mm_vision_num_patches": torch.tensor([4])},
+        ],
+        ids=["qwen_vl", "kimi", "inkling"],
+    )
+    def test_accepts_image_batches(self, multimodal_train_inputs):
         args = make_args(balance_data=False, micro_batch_size=1, multi_lora=False)
         data = _make_split_data(8)
-        data["multimodal_train_inputs"] = [None] * 8
-        assert not can_precompute_dp_schedule(args=args, data=data, train_parallel_config=FULL_SCHEDULE_CONFIG)
+        data["multimodal_train_inputs"] = [multimodal_train_inputs] * 8
+        assert can_precompute_dp_schedule(args=args, data=data, train_parallel_config=FULL_SCHEDULE_CONFIG)
 
-    def test_rejects_token_space_media_refs(self):
+    def test_accepts_token_space_media_refs(self):
         args = make_args(balance_data=False, micro_batch_size=1, multi_lora=False)
         data = _make_split_data(8)
-        data["multimodal_inputs"] = [None] * 8
-        assert not can_precompute_dp_schedule(args=args, data=data, train_parallel_config=FULL_SCHEDULE_CONFIG)
+        data["multimodal_inputs"] = [{"images": ["/shared/a.png"]}] * 8
+        assert can_precompute_dp_schedule(args=args, data=data, train_parallel_config=FULL_SCHEDULE_CONFIG)
 
     def test_rejects_fewer_rollouts_than_gbs(self):
         args = make_args(balance_data=False, micro_batch_size=1, multi_lora=False)  # global_batch_size=8
@@ -1256,6 +1274,58 @@ class TestSplitTrainDataByDpScheduled:
                 total = sum(lengths[partition[i]] for i in mbs)
                 assert total <= 6 or len(mbs) == 1
 
+    def test_image_rollouts_of_several_samples_stay_whole_per_step(self):
+        args = make_args(
+            balance_data=False,
+            micro_batch_size=1,
+            use_dynamic_batch_size=True,
+            max_tokens_per_gpu=8,
+            global_batch_size=2,
+        )
+        rollout_ids = [0, 0, 0, 1, 1, 1, 2, 2, 3, 3]
+        data = _make_split_data(10, rollout_ids=rollout_ids)
+        data["multimodal_train_inputs"] = [{"pixel_values": torch.full((1, 3), float(i))} for i in range(10)]
+
+        shards = split_train_data_by_dp_scheduled_raw(args, data, train_parallel_config=FULL_SCHEDULE_CONFIG)
+
+        steps = _rollouts_per_step(shards, rollout_ids)
+        assert [len(step) for step in steps] == [2, 2]
+        assert sorted(rollout for step in steps for rollout in step) == [0, 1, 2, 3]
+        assert all(shard["num_rollouts"] == [2, 2] for shard in shards)
+        assert sorted(j for shard in shards for j in shard["partition"]) == list(range(10))
+        for shard in shards:
+            assert all(
+                mm is data["multimodal_train_inputs"][j]
+                for mm, j in zip(shard["multimodal_train_inputs"], shard["partition"], strict=True)
+            )
+
+    @pytest.mark.parametrize(
+        ("media_token", "multimodal_train_inputs"),
+        [
+            (KIMI_VL_MEDIA_TOKEN_ID, {"grid_thws": torch.tensor([[1, 8, 8]])}),
+            (INKLING_IMAGE_SENTINEL_ID, {"mm_vision_num_patches": torch.tensor([16])}),
+        ],
+        ids=["kimi", "inkling"],
+    )
+    def test_media_expanded_in_training_is_planned_at_its_trained_length(self, media_token, multimodal_train_inputs):
+        args = make_args(
+            balance_data=False,
+            micro_batch_size=1,
+            use_dynamic_batch_size=True,
+            max_tokens_per_gpu=40,
+            global_batch_size=4,
+        )
+        data = _make_split_data(4, lengths=[10] * 4)
+        for tokens in data["tokens"]:
+            tokens[0] = media_token
+        data["multimodal_train_inputs"] = [dict(multimodal_train_inputs) for _ in range(4)]
+
+        shards = split_train_data_by_dp_scheduled_raw(args, data, train_parallel_config=FULL_SCHEDULE_CONFIG)
+
+        for shard in shards:
+            assert shard["total_lengths"] == [10] * 4
+            assert all(len(micro_batch) * 25 <= 40 for micro_batch in shard["micro_batch_indices"])
+
     def test_dynamic_gbs_multi_step(self):
         """16 samples with dynamic_global_batch_size=8 -> 2 steps."""
         args = make_args(balance_data=False, micro_batch_size=2, use_dynamic_batch_size=False)
@@ -1266,6 +1336,94 @@ class TestSplitTrainDataByDpScheduled:
         assert shards[0]["num_microbatches"] == [2, 2]
         assert shards[0]["dynamic_global_batch_size"] == 8
         assert shards[0]["num_rollouts"] == [8, 8]
+
+
+def _tagged_image_rollouts(samples_per_rollout: list[int]) -> dict:
+    data = _make_split_data(
+        sum(samples_per_rollout), rollout_ids=[r for r, n in enumerate(samples_per_rollout) for _ in range(n)]
+    )
+    data["tokens"] = [[i, i + 1000] for i in range(len(data["tokens"]))]
+    data["multimodal_train_inputs"] = [
+        {"image_grid_thw": torch.tensor([[1, 2, 2]]), "tag": torch.tensor([[i]])} for i in range(len(data["tokens"]))
+    ]
+    return data
+
+
+def test_each_scheduled_micro_batch_carries_its_own_samples_images():
+    args = make_args(balance_data=False, micro_batch_size=1, use_dynamic_batch_size=False, global_batch_size=2)
+    shards = split_train_data_by_dp_scheduled_raw(
+        args, _tagged_image_rollouts([3, 3, 2, 2]), train_parallel_config=FULL_SCHEDULE_CONFIG
+    )
+
+    for shard in shards:
+        iterator = DataIterator(shard, micro_batch_indices=shard["micro_batch_indices"])
+        for _ in shard["micro_batch_indices"]:
+            batch = iterator.get_next(["tokens", "multimodal_train_inputs"])
+            assert [mm["tag"].item() for mm in batch["multimodal_train_inputs"]] == [t[0] for t in batch["tokens"]]
+
+
+def test_get_batch_concatenates_images_in_micro_batch_order(monkeypatch):
+    state = SimpleNamespace(cp=SimpleNamespace(rank=0, size=1), tp=SimpleNamespace(rank=0, size=1))
+    monkeypatch.setattr(data_rollout, "get_parallel_state", lambda: state)
+    monkeypatch.setattr(context_parallel, "get_parallel_state", lambda: state)
+    monkeypatch.setattr(data_rollout.current_platform, "current_device", lambda: torch.device("cpu"))
+    monkeypatch.setattr(torch.Tensor, "cuda", lambda self, *args, **kwargs: self)
+    lengths = [3, 2, 4]
+    rollout = {
+        "tokens": [torch.full((n,), i) for i, n in enumerate(lengths)],
+        "loss_masks": [torch.ones(1, dtype=torch.int) for _ in lengths],
+        "total_lengths": lengths,
+        "response_lengths": [1] * 3,
+        "multimodal_train_inputs": [
+            {"image_grid_thw": torch.tensor([[1, 2, 2]]), "tag": torch.tensor([[i], [i]])} for i in range(3)
+        ],
+    }
+    iterator = DataIterator(rollout, micro_batch_indices=[[2, 0], [1]])
+    keys = ["tokens", "loss_masks", "total_lengths", "response_lengths", "multimodal_train_inputs"]
+
+    first = data_rollout.get_batch(iterator, keys)
+    second = data_rollout.get_batch(iterator, keys)
+
+    assert first["multimodal_train_inputs"]["tag"].flatten().tolist() == [2, 2, 0, 0]
+    assert first["multimodal_num_items"]["tag"] == [2, 2]
+    assert [t[0].item() for t in first["unconcat_tokens"]] == [2, 0]
+    assert second["multimodal_train_inputs"]["tag"].flatten().tolist() == [1, 1]
+
+
+def _rollouts_per_step(shards: list[dict], rollout_ids: list[int]) -> list[set[int]]:
+    steps = [set() for _ in shards[0]["num_microbatches"]]
+    for shard in shards:
+        micro_batches = iter(shard["micro_batch_indices"])
+        for step, count in zip(steps, shard["num_microbatches"], strict=True):
+            for _ in range(count):
+                step.update(rollout_ids[shard["partition"][i]] for i in next(micro_batches))
+    return steps
+
+
+class TestSplitTrainDataRawRolloutCount:
+    def test_stamps_the_rollout_count_of_a_single_step(self):
+        args = make_args(balance_data=False, multi_lora=False, global_batch_size=5)
+        data = _make_split_data(5, rollout_ids=[7, 7, 7, 9, 9])
+
+        shards = split_train_data_by_dp_raw(args, data, dp_size=2)
+
+        assert [shard["num_rollouts"] for shard in shards] == [[2], [2]]
+
+    def test_refuses_several_steps_of_multi_sample_rollouts(self):
+        args = make_args(balance_data=False, multi_lora=False, global_batch_size=2)
+        data = _make_split_data(5, rollout_ids=[7, 7, 7, 9, 9])
+
+        with pytest.raises(ValueError, match="can_precompute_dp_schedule") as error:
+            split_train_data_by_dp_raw(args, data, dp_size=2)
+        assert "--use-dynamic-global-batch-size" not in str(error.value)
+
+    def test_single_sample_rollouts_and_multi_lora_keep_the_sample_count(self):
+        args = make_args(balance_data=False, multi_lora=False, global_batch_size=2)
+        assert "num_rollouts" not in split_train_data_by_dp_raw(args, _make_split_data(4), dp_size=2)[0]
+
+        args = make_args(balance_data=False, multi_lora=True, global_batch_size=2)
+        data = _make_split_data(5, rollout_ids=[7, 7, 7, 9, 9])
+        assert "num_rollouts" not in split_train_data_by_dp_raw(args, data, dp_size=2)[0]
 
 
 def test_delayed_dp_split_preserves_the_tinker_loss_vectors():
@@ -1322,3 +1480,128 @@ class TestOutputStoreTookEffect:
 
     def test_without_replay_there_is_nothing_to_store(self):
         assert "rollout_store_plan" not in self._convert([make_sample()], use_output_store=True)
+def _pad_args(**overrides):
+    return SimpleNamespace(
+        **{
+            "use_dynamic_batch_size": True,
+            "max_tokens_per_gpu": 8192,
+            "global_batch_size": 2,
+            "balance_data": False,
+            "balance_by_flops": False,
+            "allow_partial_train_step": False,
+            **overrides,
+        }
+    )
+
+
+def _schedule(args, data, dp_size):
+    return build_dp_schedule(
+        args,
+        make_train_parallel_config(dp_size=dp_size, supports_precomputed_schedule=True),
+        [len(t) for t in data["tokens"]],
+        global_batch_size=args.global_batch_size,
+        rollout_indices=data["rollout_ids"],
+    )
+
+
+def _pad(args, data, dp_size):
+    pad_steps_for_dp_alignment(
+        args,
+        data,
+        train_parallel_config=make_train_parallel_config(dp_size=dp_size, supports_precomputed_schedule=True),
+    )
+
+
+class TestPadStepsForDpAlignment:
+    @staticmethod
+    def _data(rollout_ids, lengths=None):
+        n = len(rollout_ids)
+        lengths = lengths or [5000] * n
+        return {
+            "tokens": [[1] * length for length in lengths],
+            "response_lengths": [10] * n,
+            "rewards": [1.0] * n,
+            "raw_reward": [1.0] * n,
+            "truncated": [0] * n,
+            "sample_indices": list(range(n)),
+            "rollout_ids": list(rollout_ids),
+            "loss_masks": [[1] * 10 for _ in range(n)],
+            "rollout_mask_sums": [10] * n,
+            "rollout_log_probs": [[-0.1] * 10 for _ in range(n)],
+            "multimodal_inputs": [{"images": ["/m/a"]}] * n,
+            "weight_versions": [[{"spans": []}]] * n,
+            "prompt_group_sizes": [1] * n,
+        }
+
+    def test_pad_rows_are_zero_loss_and_join_the_steps_first_rollout(self):
+        args = _pad_args(global_batch_size=3)
+        data = self._data([7, 8, 9])
+        _pad(args, data, dp_size=2)
+        assert data["rollout_ids"][3:] == [7]
+        assert data["tokens"][3:] == [[0, 0]]
+        assert data["loss_masks"][3:] == [[0]]
+        assert data["response_lengths"][3:] == [1]
+        assert data["rollout_mask_sums"][3:] == [10]
+        assert data["multimodal_inputs"][3:] == [None]
+        assert data["weight_versions"][3:] == [[]]
+        assert data["prompt_group_sizes"] == [1] * 3
+
+    def test_a_step_the_schedule_cannot_align_is_padded_until_it_can(self):
+        args = _pad_args(global_batch_size=3)
+        data = self._data([0, 1, 2])
+        with pytest.raises(AssertionError, match="could only produce"):
+            _schedule(args, data, dp_size=2)
+        _pad(args, data, dp_size=2)
+        schedule = _schedule(args, data, dp_size=2)
+        assert sorted(i for partition in schedule.partitions for i in partition) == [0, 1, 2, 3]
+
+    @pytest.mark.parametrize("length", [8192, 8191, 9000])
+    def test_an_already_aligned_step_is_left_alone(self, length):
+        # Full bins: a pad there would open a micro-batch of its own and break a schedule that was valid.
+        args = _pad_args()
+        data = self._data([0, 1], lengths=[length, length])
+        before = _schedule(args, data, dp_size=2)
+        _pad(args, data, dp_size=2)
+        assert len(data["tokens"]) == 2
+        assert _schedule(args, data, dp_size=2) == before
+
+    def test_pads_that_open_a_micro_batch_bring_enough_rows_to_split_it_off(self):
+        args = _pad_args(global_batch_size=3)
+        data = self._data([0, 1, 2], lengths=[8192, 8192, 8192])
+        _pad(args, data, dp_size=2)
+        schedule = _schedule(args, data, dp_size=2)
+        assert sorted(i for partition in schedule.partitions for i in partition) == list(range(len(data["tokens"])))
+
+    def test_an_eligible_partial_step_is_padded_too(self):
+        args = _pad_args(allow_partial_train_step=True)
+        data = self._data([0, 1, 2, 2, 2])
+        with pytest.raises(AssertionError, match="could only produce"):
+            _schedule(args, data, dp_size=2)
+        _pad(args, data, dp_size=2)
+        schedule = _schedule(args, data, dp_size=2)
+        assert schedule.num_rollouts == [2, 1]
+        assert sorted(i for partition in schedule.partitions for i in partition) == list(range(len(data["tokens"])))
+
+    def test_dp_one_needs_no_padding(self):
+        args = _pad_args(global_batch_size=3)
+        data = self._data([0, 1, 2])
+        _pad(args, data, dp_size=1)
+        assert len(data["tokens"]) == 3
+
+    def test_an_unknown_per_sample_key_is_refused(self):
+        data = self._data([0, 1, 2])
+        data["teacher_log_probs"] = [[0.0]] * 3
+        with pytest.raises(ValueError, match="teacher_log_probs"):
+            _pad(_pad_args(global_batch_size=3), data, dp_size=2)
+
+
+def test_a_real_harbor_2x1080p_round_needs_the_padding_and_schedules_with_it():
+    # Round 0 of a Harbor computer-1 session-server run with two 1920x1080 screenshots kept: every sample is over half the cap.
+    recorded = json.loads((Path(__file__).parent / "data" / "harbor_2x1080p_round_lengths.json").read_text())
+    args = _pad_args(global_batch_size=8)
+    data = TestPadStepsForDpAlignment._data(recorded["rollout_ids"], lengths=recorded["total_lengths"])
+    with pytest.raises(AssertionError, match="could only produce"):
+        _schedule(args, data, dp_size=2)
+    _pad(args, data, dp_size=2)
+    schedule = _schedule(args, data, dp_size=2)
+    assert sorted(i for partition in schedule.partitions for i in partition) == list(range(len(data["tokens"])))

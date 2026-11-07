@@ -25,8 +25,11 @@ from miles.backends.sglang_utils.arguments import validate_args as validate_sgla
 from miles.backends.sglang_utils.sglang_api_client import WorkerType
 from miles.backends.sglang_utils.sglang_config import ModelConfig, ServerGroupConfig, SglangConfig
 from miles.backends.torchtitan_utils.arguments import build_torchtitan_parser
+from miles.rollout.fully_async_rollout import FullyAsyncRolloutFn
+from miles.rollout.inference_rollout.inference_rollout_common import InferenceRolloutFn
 from miles.utils.args.configs.data import DataConfig
 from miles.utils.args.configs.router import RouterConfig
+from miles.utils.args.runtime import RolloutConfig, TrainerConfig
 from miles.utils.args.trainer_utils import compute_trainer_ckpt_load_config
 from miles.utils.arguments import (
     FULLY_ASYNC_ROLLOUT_PATH,
@@ -271,6 +274,57 @@ EXTERNAL_ARGS = [
     "--num-rollout",
     "1",
 ]
+
+
+class TestM2poValidation:
+    def _validated(self, extra, context_parallel_size=1):
+        parser = argparse.ArgumentParser()
+        get_miles_extra_args_provider()(parser)
+        args = parser.parse_args(extra + ["--num-rollout", "1"] + REQUIRED_ARGS)
+        args.context_parallel_size = context_parallel_size
+        miles_validate_args(args)
+        return args
+
+    def test_m2po_takes_the_papers_threshold_by_default(self):
+        assert self._validated(["--use-m2po", "--use-tis"]).m2po_tau == 0.04
+
+    @pytest.mark.parametrize(
+        ("extra", "message"),
+        [
+            (["--eps-clip-c", "3.0"], "drop --eps-clip-c"),
+            (["--advantage-estimator", "gspo"], "per sequence"),
+            (["--loss-type", "sft_loss"], "policy_loss only"),
+            (["--m2po-tau", "0"], "must be positive"),
+        ],
+    )
+    def test_m2po_refuses_what_it_would_silently_ignore(self, extra, message):
+        with pytest.raises(AssertionError, match=message):
+            self._validated(["--use-m2po", *extra])
+
+    def test_m2po_refuses_context_parallelism(self):
+        with pytest.raises(AssertionError, match="CP splits"):
+            self._validated(["--use-m2po", "--use-tis"], context_parallel_size=2)
+
+
+class TestMaxConsecutiveAbortedGroups:
+    def _validated(self, extra):
+        parser = argparse.ArgumentParser()
+        get_miles_extra_args_provider()(parser)
+        args = parser.parse_args(extra + ["--num-rollout", "1"] + REQUIRED_ARGS)
+        miles_validate_args(args)
+        return args
+
+    def test_the_default_is_four_rollout_batches(self):
+        args = self._validated([])
+
+        assert args.max_consecutive_aborted_groups == 4 * args.rollout_batch_size
+
+    def test_zero_is_kept_to_disable_the_guard(self):
+        assert self._validated(["--max-consecutive-aborted-groups", "0"]).max_consecutive_aborted_groups == 0
+
+    def test_a_negative_limit_is_refused_at_startup(self):
+        with pytest.raises(AssertionError, match="max-consecutive-aborted-groups takes 0"):
+            self._validated(["--max-consecutive-aborted-groups", "-1"])
 
 
 class TestExternalRolloutValidation:
@@ -831,10 +885,27 @@ def test_the_flag_and_a_matching_path_agree():
 
 def test_the_flag_still_rejects_a_different_rollout_function():
     """Two different selections remain a misconfiguration."""
-    args = _fully_async_candidate_args(fully_async=True, rollout_function_path="pkg.CustomRolloutFn")
+    args = _fully_async_candidate_args(fully_async=True, rollout_function_path="test:OtherRolloutFn")
 
-    with pytest.raises(AssertionError, match="pass only one"):
+    with function_registry.temporary("test:OtherRolloutFn", InferenceRolloutFn):
+        with pytest.raises(AssertionError, match="pass only one"):
+            _resolve_rollout_functions(args)
+
+
+def test_the_flag_takes_a_fully_async_subclass():
+    """A FullyAsyncRolloutFn subclass named by path refines the mode's selection instead of competing with it."""
+
+    class RecordingFullyAsyncRolloutFn(FullyAsyncRolloutFn):
+        pass
+
+    args = _fully_async_candidate_args(fully_async=True, rollout_function_path="test:RecordingFullyAsyncRolloutFn")
+
+    with function_registry.temporary("test:RecordingFullyAsyncRolloutFn", RecordingFullyAsyncRolloutFn):
         _resolve_rollout_functions(args)
+
+    assert args.fully_async is True
+    assert args.rollout_function_path == "test:RecordingFullyAsyncRolloutFn"
+    assert args.eval_function_path == "test:RecordingFullyAsyncRolloutFn"
 
 
 def test_an_ordinary_rollout_function_path_stays_untouched():
@@ -2410,6 +2481,70 @@ class TestSnapshotEvalValidation:
         with pytest.raises(AssertionError, match="eval-function-path"):
             miles_validate_args(args)
 
+    def test_colocated_snapshot_eval_reuses_save_hf_checkpoints(self, tmp_path):
+        prompts = tmp_path / "eval.jsonl"
+        prompts.write_text("{}\n")
+        args = self._parse(
+            [
+                "--colocate",
+                "--eval-num-gpus",
+                "1",
+                "--eval-interval",
+                "5",
+                "--eval-prompt-data",
+                "dummy",
+                str(prompts),
+                "--save",
+                str(tmp_path / "ckpt"),
+                "--save-interval",
+                "5",
+                "--save-hf",
+                str(tmp_path / "hf"),
+            ]
+        )
+
+        miles_validate_args(args)
+
+        assert args.eval_uses_snapshots is True
+        assert args.save_hf == str(tmp_path / "hf" / "step_{rollout_id}")
+
+    def test_colocated_snapshot_eval_refuses_an_eval_hf_dir_export(self, tmp_path):
+        args = self._snapshot_eval_args(tmp_path, "--colocate")
+        with pytest.raises(AssertionError, match="--eval-hf-dir"):
+            miles_validate_args(args)
+
+    def test_eval_server_concurrency_defaults_to_the_training_engines(self, tmp_path):
+        args = self._snapshot_eval_args(tmp_path, "--sglang-server-concurrency", "16")
+
+        miles_validate_args(args)
+
+        assert args.eval_server_concurrency == 16
+
+    @pytest.mark.parametrize("value", ["0", "-1"])
+    def test_eval_server_concurrency_must_be_positive(self, tmp_path, value):
+        args = self._snapshot_eval_args(tmp_path, "--eval-server-concurrency", value)
+        with pytest.raises(AssertionError, match="must be positive"):
+            miles_validate_args(args)
+
+    def test_eval_server_concurrency_needs_an_eval_pool(self):
+        args = self._parse(["--eval-server-concurrency", "64"])
+        with pytest.raises(AssertionError, match="--eval-num-gpus"):
+            miles_validate_args(args)
+
+    def test_eval_record_dir_is_off_by_default(self):
+        assert self._parse([]).eval_record_dir is None
+
+    def test_eval_record_dir_refuses_sandbox_agent_workers(self, tmp_path):
+        """A sandbox worker's records go with its sandbox when the call ends."""
+        args = self._parse(["--eval-record-dir", str(tmp_path)])
+        args.custom_agent_function_mode = "sandbox"
+        with pytest.raises(AssertionError, match="--eval-record-dir"):
+            miles_validate_args(args)
+
+        args = self._parse(["--eval-record-dir", str(tmp_path)])
+        args.custom_agent_function_mode = "worker"
+        miles_validate_args(args)
+
     def test_train_only_leaves_no_rollout_gpus_even_under_colocate(self):
         """The colocate normalization puts the actor's GPU count on rollout_num_gpus, which
         would claim rollout engines for a job that starts none."""
@@ -2571,6 +2706,12 @@ class TestTitoFixedTemplateConfiguration:
             "clear_thinking": False,
             "enable_thinking": True,
         }
+
+    def test_qwen3_vl_uses_native_template(self):
+        args = self._parse(["--use-session-server", "--tito-model", "qwen3_vl"])
+        miles_validate_args(args)
+        assert args.chat_template_path is None
+        assert args.apply_chat_template_kwargs == {}
 
     def test_glm53_fixed_thinking_overrides_launch_value(self):
         args = self._parse(
@@ -3195,11 +3336,9 @@ def test_skip_actor_forward_only_flag_is_parsed(extra_args, expected):
 
 def test_skip_actor_forward_only_is_gated_during_miles_validation():
     parser = get_megatron_arg_parser()
-    args = parser.parse_args(
-        ["--skip-actor-forward-only", "--global-batch-size", "32", "--num-rollout", "1"] + REQUIRED_ARGS
-    )
+    args = parser.parse_args(["--skip-actor-forward-only", "--num-rollout", "1"] + REQUIRED_ARGS)
     vars(args).update(
-        hidden_dropout=0.0,
+        hidden_dropout=0.1,
         attention_dropout=0.0,
         lora_dropout=0.0,
         moe_input_jitter_eps=None,
@@ -3209,6 +3348,19 @@ def test_skip_actor_forward_only_is_gated_during_miles_validation():
     )
 
     with pytest.raises(AssertionError, match="--skip-actor-forward-only"):
+        miles_validate_args(args)
+
+
+@pytest.mark.parametrize(
+    "extra_args",
+    [[], ["--megatron-to-hf-mode", "bridge", "--custom-model-provider-path", "pkg.provider"]],
+)
+def test_freeze_vision_model_needs_the_bridge_path_without_a_custom_provider(extra_args):
+    parser = argparse.ArgumentParser()
+    get_miles_extra_args_provider()(parser)
+    args = parser.parse_args(["--freeze-vision-model", "--num-rollout", "1"] + extra_args + REQUIRED_ARGS)
+
+    with pytest.raises(AssertionError, match="--freeze-vision-model"):
         miles_validate_args(args)
 
 
@@ -3326,8 +3478,6 @@ class TestValidateSkipActorForwardOnly:
             {"save_debug_train_data": "train-{rollout_id}.pt"},
             {"use_routing_replay": True},
             {"use_indexer_replay": True},
-            {"num_steps_per_rollout": 2},
-            {"global_batch_size": 32},
         ],
     )
     def test_incompatible_configuration_is_rejected(self, overrides):
@@ -3358,6 +3508,10 @@ class TestValidateSkipActorForwardOnly:
                 use_dynamic_global_batch_size=True,
             )
         )
+
+    @pytest.mark.parametrize("overrides", [{"num_steps_per_rollout": 2}, {"global_batch_size": 32}])
+    def test_several_optimizer_steps_pass(self, overrides):
+        validate_skip_actor_forward_only(_make_skip_actor_forward_only_args(**overrides))
 
 
 class TestRunUuidResolution:
@@ -4146,3 +4300,90 @@ class TestMultimodalTokenSpaceProcessingArgs:
     def test_an_unknown_rebuild_mode_does_not_parse(self):
         with pytest.raises(SystemExit):
             self._parse_rebuild_mode(["--multimodal-rebuild", "eager"])
+
+
+class TestPadStepsForDpAlignmentValidation:
+    def _validated(self, extra):
+        return TestMaxConsecutiveAbortedGroups._validated(self, ["--pad-steps-for-dp-alignment", *extra])
+
+    def test_it_starts_with_the_dynamic_schedule(self):
+        assert self._validated(["--use-dynamic-batch-size", "--max-tokens-per-gpu", "8192"]).pad_steps_for_dp_alignment
+
+    def test_it_needs_the_dynamic_schedule(self):
+        with pytest.raises(ValueError, match="--use-dynamic-batch-size"):
+            self._validated([])
+
+    def test_per_token_loss_is_refused(self):
+        with pytest.raises(ValueError, match="--calculate-per-token-loss"):
+            self._validated(["--use-dynamic-batch-size", "--max-tokens-per-gpu", "8192", "--calculate-per-token-loss"])
+
+
+class TestPortedCuaFlags:
+    def test_the_ported_flags_reach_the_typed_config(self):
+        config = parse_megatron_test_config(
+            "--weight-staleness-measure",
+            "token_mean",
+            "--max-consecutive-aborted-groups",
+            "3",
+            "--use-dynamic-batch-size",
+            "--max-tokens-per-gpu",
+            "1024",
+            "--pad-steps-for-dp-alignment",
+            "--eval-record-dir",
+            "/records",
+            "--use-m2po",
+            "--use-tis",
+            "--m2po-tau",
+            "0.08",
+            "--session-image-text-only-samples",
+            "keep",
+        )
+
+        assert config.weight_staleness_measure == "token_mean"
+        assert config.max_consecutive_aborted_groups == 3
+        assert config.pad_steps_for_dp_alignment is True
+        assert config.eval_record_dir == "/records"
+        assert (config.use_m2po, config.m2po_tau) == (True, 0.08)
+        assert config.session_image_text_only_samples == "keep"
+
+    def test_the_ported_flags_default_to_off(self):
+        config = parse_megatron_test_config()
+
+        assert config.freeze_vision_model is False
+        assert config.weight_staleness_measure == "oldest"
+        assert config.max_consecutive_aborted_groups == 4 * config.rollout_batch_size
+        assert config.eval_server_concurrency is None
+        assert (config.use_session_images, config.session_image_text_only_samples) == (False, "drop")
+
+    def test_freeze_vision_model_starts_on_the_bridge_path(self):
+        args = _parse_megatron_args(["--freeze-vision-model", "--megatron-to-hf-mode", "bridge"])
+
+        miles_validate_args(args)
+
+        assert args.freeze_vision_model is True
+
+    @pytest.mark.parametrize("flag", ["--weight-staleness-measure", "--session-image-text-only-samples"])
+    def test_an_unknown_choice_does_not_parse(self, flag):
+        parser = argparse.ArgumentParser()
+        get_miles_extra_args_provider()(parser)
+
+        with pytest.raises(SystemExit):
+            parser.parse_args([flag, "latest", *REQUIRED_ARGS])
+
+    @pytest.mark.parametrize(
+        ("component", "field"),
+        [
+            (TrainerConfig, "freeze_vision_model"),
+            (TrainerConfig, "use_m2po"),
+            (TrainerConfig, "m2po_tau"),
+            (RolloutConfig, "max_consecutive_aborted_groups"),
+            (RolloutConfig, "weight_staleness_measure"),
+            (RolloutConfig, "pad_steps_for_dp_alignment"),
+            (RolloutConfig, "eval_server_concurrency"),
+            (RolloutConfig, "eval_record_dir"),
+            (RolloutConfig, "use_session_images"),
+            (RolloutConfig, "session_image_text_only_samples"),
+        ],
+    )
+    def test_the_component_that_reads_a_flag_carries_it(self, component, field):
+        assert field in component.model_fields

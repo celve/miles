@@ -90,6 +90,22 @@ def test_env_kwargs_and_server_knobs_are_forwarded_when_set(monkeypatch):
     assert "HARBOR_MAX_SEQ_LEN" not in env
 
 
+def test_agent_and_verifier_classes_are_forwarded_with_their_kwargs(monkeypatch):
+    monkeypatch.setenv("E2B_API_KEY", "e2b_x")
+    knobs = {
+        "HARBOR_AGENT_IMPORT_PATH": "pkg.agent:DesktopAgent",
+        "HARBOR_AGENT_KWARGS": '{"settle_sec": 2.0}',
+        "HARBOR_VERIFIER_IMPORT_PATH": "pkg.verify:HostVerifier",
+        "HARBOR_VERIFIER_KWARGS": '{"read_limit_mb": 64}',
+    }
+    for var, value in knobs.items():
+        monkeypatch.setenv(var, value)
+
+    env = launch_common.harbor_env_vars(_args())
+
+    assert {var: env[var] for var in knobs} == knobs
+
+
 def test_agentic_wiring_is_the_shipped_wiring():
     """One shared copy: the flags the GPU e2e exercises are the flags the recipes ship."""
     args = launch_common.agentic_train_args(tito_model="qwen3", session_server_workers=4)
@@ -104,3 +120,41 @@ def test_agentic_wiring_is_the_shipped_wiring():
 
     for d in launch_common.agentic_pythonpath_dirs():
         assert Path(d).is_dir(), d
+
+
+def test_session_images_select_the_tree_server():
+    """A bare --use-session-server is v1, which refuses session images at startup."""
+    args = launch_common.agentic_train_args(tito_model="qwen3_vl", session_server_workers=4, session_images=True)
+    assert "--use-session-server v2 --use-session-images " in args
+    assert args.count("--use-session-server") == 1
+
+    assert "--use-session-server --session-server-port" in launch_common.agentic_train_args(
+        tito_model="qwen3", session_server_workers=4
+    )
+
+
+def test_with_an_agent_worker_no_local_provider_key_is_needed(monkeypatch):
+    for var in ("E2B_API_KEY", "E2B_API_KEY_FILE"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("E2B_API_URL", "https://sandbox-service.example")
+    monkeypatch.setenv("E2B_SANDBOX_URL", "http://sandbox-service")
+
+    env = launch_common.harbor_env_vars(
+        _args(e2b_api_key_file="/nonexistent/api_key", agent_worker_url="http://w:11100")
+    )
+
+    # the endpoint still selects where the worker's sandboxes come from; the key stays the worker's
+    assert env["E2B_API_URL"] == "https://sandbox-service.example"
+    assert env["E2B_SANDBOX_URL"] == "http://sandbox-service"
+    assert "E2B_API_KEY_FILE" not in env and "E2B_API_KEY" not in env
+
+
+def test_an_agent_worker_url_selects_the_worker_mode():
+    args = launch_common.agentic_train_args(
+        tito_model="qwen3_vl", session_server_workers=4, agent_worker_url="http://w:11100"
+    )
+
+    assert "--custom-agent-function-mode worker --custom-agent-function-worker-url http://w:11100" in args
+    assert "--custom-agent-function-mode" not in launch_common.agentic_train_args(
+        tito_model="qwen3_vl", session_server_workers=4
+    )

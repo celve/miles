@@ -29,15 +29,17 @@ MM_TOKEN_EXPANSION_START_LEN = "mm_token_expansion_start_len"
 def store_message_media(client_args: dict[str, Any], *, token_space: bool, media_dir: str | None) -> dict[str, Any]:
     """The request with every media source of its messages replaced by a shared path.
 
-    Without ``--multimodal-token-space-processing`` the session server carries no media: a request with
-    media is a 400. Text requests pass through unchanged.
+    Without ``--multimodal-token-space-processing`` (or the dense ``--use-session-images``, which never
+    calls this) the session server carries no media: a request with media is a 400. Text requests pass
+    through unchanged.
     """
     messages = client_args.get("messages")
     if not isinstance(messages, list) or not has_message_media(messages):
         return client_args
     if not token_space:
         raise MessageValidationError(
-            "the session server carries images, audio or video only with --multimodal-token-space-processing"
+            "the session server carries images, audio or video only with --multimodal-token-space-processing, "
+            "or images with --use-session-images"
         )
     try:
         return {**client_args, "messages": materialize_message_media(messages, media_dir)}

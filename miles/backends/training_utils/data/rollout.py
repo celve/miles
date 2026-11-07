@@ -23,6 +23,7 @@ from miles.utils.ft_utils.process_group_utils import GeneralPGUtil
 from miles.utils.object_store import ObjectStoreGetResult
 from miles.utils.ray_utils import Box
 from miles.utils.seqlen_balancing import get_seqlen_balanced_partitions
+from miles.utils.timer import timer
 from miles.utils.types import RolloutBatch
 
 logger = logging.getLogger(__name__)
@@ -101,22 +102,23 @@ class LazyMultimodalTrainInputs(Sequence):
             return out, self._stream.record_event()
 
     def get_many(self, indices) -> list:
-        indices = tuple(indices)
-        if self._rebuilder is None:
-            return [self._rebuild(i) for i in indices]
-        pending, self._pending = self._pending, None
-        if pending is not None and pending[0] == indices:
-            future = pending[1]
-        else:
-            future = self._rebuilder.submit(self._rebuild_on_stream, indices)
-        out, ready = future.result()
-        consumer = torch.cuda.current_stream(self._device)
-        consumer.wait_event(ready)
-        for mm in out:
-            for value in (mm or {}).values():
-                if value.is_cuda:
-                    value.record_stream(consumer)
-        return out
+        with timer("multimodal_rebuild"):
+            indices = tuple(indices)
+            if self._rebuilder is None:
+                return [self._rebuild(i) for i in indices]
+            pending, self._pending = self._pending, None
+            if pending is not None and pending[0] == indices:
+                future = pending[1]
+            else:
+                future = self._rebuilder.submit(self._rebuild_on_stream, indices)
+            out, ready = future.result()
+            consumer = torch.cuda.current_stream(self._device)
+            consumer.wait_event(ready)
+            for mm in out:
+                for value in (mm or {}).values():
+                    if value.is_cuda:
+                        value.record_stream(consumer)
+            return out
 
     def prefetch(self, indices) -> None:
         if self._rebuilder is not None:
@@ -566,6 +568,11 @@ class DataIterator:
     def reset(self) -> "DataIterator":
         """Reset internal offset to the start and return self."""
         self.offset = 0
+        return self
+
+    def skip_microbatches(self, count: int) -> "DataIterator":
+        """Advance past the next ``count`` micro-batches without fetching them, and return self."""
+        self.offset += count if self.micro_batch_indices is not None else count * self.micro_batch_size
         return self
 
 

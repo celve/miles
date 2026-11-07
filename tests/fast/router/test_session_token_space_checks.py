@@ -149,6 +149,8 @@ def server_args(shared_media_dir: Path, **extra) -> dict[str, Any]:
         "lora_adapter_path": None,
         "lora_train_only": False,
         "use_session_server": "v2",
+        "use_session_images": False,
+        "session_image_text_only_samples": "drop",
         "multimodal_token_space_processing": True,
         "shared_media_dir": str(shared_media_dir),
         "run_uuid": "run0",
@@ -177,7 +179,12 @@ def session_server(
     try:
         port = find_available_port(31000)
         config = compute_session_server_config(
-            args, host="127.0.0.1", port=port, instance_id=args.session_server_instance_id, backend_url=backend.url
+            args,
+            host="127.0.0.1",
+            port=port,
+            instance_id=args.session_server_instance_id,
+            backend_url=backend.url,
+            eval_backend_url=None,
         )
         server = UvicornThreadServer(SessionServer(config).app, host="127.0.0.1", port=port)
         server.start()

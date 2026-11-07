@@ -7,6 +7,7 @@ from typing import Any, Generic, TypeVar
 
 import ray
 
+from miles.rollout.agentic.remote import cancel_inflight_calls, rollout_abort_scope
 from miles.utils.function_registry import load_function
 from miles.utils.http_utils import MILES_HOST_IP_ENV, is_port_available
 
@@ -51,7 +52,7 @@ def merge_asserting_consistency(a: dict[_K, _V], b: dict[_K, _V]) -> dict[_K, _V
     return a | b
 
 
-async def call_agent_abort_hook(args) -> None:
+async def call_agent_abort_hook(args, *, every_scope: bool = False) -> None:
     """Invoke the agent plugin's optional abort hook, if it defines one.
 
     When oversampling collects enough samples, the rollout aborts SGLang, but an
@@ -63,6 +64,10 @@ async def call_agent_abort_hook(args) -> None:
     """
     from miles.utils.args.custom_view import compute_custom_function_config
 
+    # calls on an agent worker are cancelled here, as a cancelled subproc call's child would be; only this rollout's,
+    # since the dedicated eval engines' calls run beside training's in the same process
+    if cancelled := await cancel_inflight_calls(None if every_scope else rollout_abort_scope(args)):
+        logger.info(f"Cancelled {cancelled} agent call(s) running on agent workers")
     agent_function_path = args.custom_agent_function_path
     if not agent_function_path:
         return

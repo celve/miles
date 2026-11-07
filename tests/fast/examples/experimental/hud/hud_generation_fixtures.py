@@ -29,14 +29,18 @@ def failed_hud_episode(monkeypatch: pytest.MonkeyPatch) -> Any:
         turns = (
             []
             if outcome == "no_tokens"
-            else [SimpleNamespace(prompt_token_ids=[1], output_token_ids=[2, 2], output_logprobs=[-0.1, -0.2])]
+            else [
+                SimpleNamespace(
+                    prompt_token_ids=[1], output_token_ids=[2, 2], output_logprobs=[-0.1, -0.2], raw={}, error=None
+                )
+            ]
         )
         trace = SimpleNamespace(
             status="done",
             collect=lambda selector: turns,
             steps=[_ToolStep(result=SimpleNamespace(content=[screenshot]))] if outcome == "vision_mismatch" else [],
         )
-        run = SimpleNamespace(reward=0.75, trace=trace)
+        run = SimpleNamespace(reward=0.75, trace=trace, runtime=object())
         task = SimpleNamespace(run=AsyncMock(return_value=SimpleNamespace(runs=[] if outcome == "no_run" else [run])))
         sdk = ModuleType("hud")
         sdk.Task = lambda **kwargs: task

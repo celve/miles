@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 async def train(startup_info: OrchestratorStartupInfo, *, disposer: Disposer):
     args = startup_info.args
     assert not args.fully_async, "--fully-async requires the async driver: run train_async.py"
+    # Added first so it runs last, once no rollout or trainer can still read this run's media.
     disposer.add(functools.partial(release_run_media, args))
     capability = init_orchestration_script(startup_info, disposer=disposer)
     trainer_handles = create_trainer_handles(

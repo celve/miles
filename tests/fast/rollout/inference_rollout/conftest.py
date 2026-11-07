@@ -37,9 +37,11 @@ def make_state(generate_function: Callable, *, args: Any = None) -> FakeGenerate
 class StampRecordingGenerate:
     def __init__(self) -> None:
         self.stamps: list[str | None] = []
+        self.metadata: list[dict] = []
 
     async def __call__(self, input: GenerateFnInput) -> GenerateFnOutput:
         self.stamps.append(input.sample.kv_cache_namespace)
+        self.metadata.append(dict(input.sample.metadata))
         input.sample.status = Sample.Status.COMPLETED
         input.sample.reward = 1.0
         return GenerateFnOutput(samples=input.sample)
@@ -49,8 +51,9 @@ class StampRecordingGenerate:
         return stamps
 
 
-def make_eval_args(*, namespaced_radix_cache: bool = True) -> dict[str, Any]:
+def make_eval_args(*, namespaced_radix_cache: bool = True, eval_record_dir: str | None = None) -> dict[str, Any]:
     return dict(
+        eval_record_dir=eval_record_dir,
         namespaced_radix_cache=namespaced_radix_cache,
         partial_rollout=False,
         mask_offpolicy_in_partial_rollout=False,

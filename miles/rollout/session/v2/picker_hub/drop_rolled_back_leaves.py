@@ -94,10 +94,13 @@ def drop_rolled_back_leaves(
 
 
 def _same_prompt(node_id: int, sample: Sample, leaf_samples: list[Sample], nodes: dict[int, dict]) -> bool:
-    """Whether ``node_id``'s prompt tokens equal those of ``sample``'s leaf.
+    """Whether ``node_id``'s prompt equals that of ``sample``'s leaf.
 
     Tokens come from any leaf sample whose path covers the node; a node that no
     leaf sample covers, e.g. one whose leaves all truncated away, matches nothing.
+    Images are compared by content as well, because two different screenshots of
+    one size render identical placeholder tokens: equal ids would otherwise read
+    as a retry and silently discard the earlier branch.
     """
     prompt_len = nodes[sample.metadata["leaf"]["node_id"]]["completion_span"][0]
     if nodes[node_id]["completion_span"][0] != prompt_len:
@@ -114,6 +117,9 @@ def _same_prompt(node_id: int, sample: Sample, leaf_samples: list[Sample], nodes
 
 
 def _same_media(node_id: int, sample: Sample, covering: Sample) -> bool:
-    sibling_media = (covering.metadata.get("prompt_media_refs") or {}).get(str(node_id))
-    own_media = (sample.metadata.get("prompt_media_refs") or {}).get(str(sample.metadata["leaf"]["node_id"]))
-    return sibling_media == own_media
+    """Media refs in token space, image content ids under --use-session-images."""
+    return all(
+        (covering.metadata.get(key) or {}).get(str(node_id))
+        == (sample.metadata.get(key) or {}).get(str(sample.metadata["leaf"]["node_id"]))
+        for key in ("prompt_media_refs", "prompt_image_ids")
+    )

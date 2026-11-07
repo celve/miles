@@ -30,7 +30,9 @@ def logged(monkeypatch):
 
 
 def make_args(**overrides):
-    defaults = dict(wandb_always_use_train_step=False, mfu_peak_tflops=None, trainer_model_id=None)
+    defaults = dict(
+        wandb_always_use_train_step=False, mfu_peak_tflops=None, trainer_model_id=None, skip_actor_forward_only=False
+    )
     return SimpleNamespace(**{**defaults, **overrides})
 
 
@@ -85,6 +87,18 @@ def test_zero_train_time_emits_neither_throughput_nor_mfu(timer, logged):
     [payload] = logged
     assert "perf/actor_train_tflops" not in payload
     assert "perf/actor_train_mfu" not in payload
+
+
+@pytest.mark.parametrize("skip_actor_forward_only", [False, True])
+def test_log_probs_tflops_only_when_the_pass_scores_the_whole_round(timer, logged, skip_actor_forward_only):
+    run(
+        timer,
+        make_args(skip_actor_forward_only=skip_actor_forward_only),
+        times={"actor_train": 2.0, "log_probs": 1.0},
+        peak=989.0,
+    )
+    [payload] = logged
+    assert ("perf/log_probs_tflops" in payload) is not skip_actor_forward_only
 
 
 def test_non_primary_rank_logs_nothing(timer, logged):

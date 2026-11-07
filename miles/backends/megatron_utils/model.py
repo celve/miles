@@ -27,6 +27,7 @@ from miles.backends.megatron_utils.ft.indep_dp import allreduce_grads_and_losses
 from miles.backends.megatron_utils.local_weight_checksum import dump_local_weight_checksums
 from miles.backends.megatron_utils.lora.native import wrap_model_provider_with_lora
 from miles.backends.megatron_utils.optimizer_state_reset import reset_optimizer_states
+from miles.backends.megatron_utils.te_patches import install_te_training_patches
 from miles.backends.training_utils.data.rollout import DataIterator, get_batch
 from miles.backends.training_utils.data.sampling_mask import get_rollout_sampling_masks
 from miles.backends.training_utils.loss.objective import loss_function
@@ -166,6 +167,7 @@ def setup_model_and_optimizer(
     assert isinstance(args, TrainerConfig)
     assert not args.backend.moe_use_upcycling
 
+    install_te_training_patches()
     lora_attached = is_multi_lora_enabled(args) or (is_lora_enabled(args) and role == "actor")
     # Multi-LoRA and single-LoRA (actor, bridge) both build via the bridge helper,
     # which picks the adapter type internally.
@@ -296,6 +298,7 @@ def forward_only(
     store_prefix: str = "",
     fp32_output: bool = True,
     use_rollout_sampling_mask: bool = False,
+    first_step: int = 0,
 ) -> dict[str, list[torch.Tensor]]:
     """Run forward passes only and collect non-loss outputs (e.g., logprobs).
 
@@ -313,6 +316,8 @@ def forward_only(
         fp32_output: Whether Megatron should upcast the complete model output to FP32.
         use_rollout_sampling_mask: Whether to score over each rollout token's
             captured sampling support.
+        first_step: First optimizer step whose micro-batches are scored; earlier
+            steps' samples are left out and come back as None.
 
     Returns:
         Aggregated outputs keyed by ``store_prefix + key``.
@@ -322,9 +327,9 @@ def forward_only(
         args, model, DumperPhase.FWD_ONLY, rollout_id=rollout_id, store_prefix=store_prefix
     )
 
-    # reset data iterator
+    first_microbatch = sum(num_microbatches[:first_step])
     for iterator in data_iterator:
-        iterator.reset()
+        iterator.reset().skip_microbatches(first_microbatch)
 
     config = get_model_config(model[0])
 
@@ -406,7 +411,7 @@ def forward_only(
     config.timers = None
     forward_data_store = []
     num_steps_per_rollout = len(num_microbatches)
-    for step_id in range(num_steps_per_rollout):
+    for step_id in range(first_step, num_steps_per_rollout):
         # collect_non_loss_data
         forward_data_store += forward_backward_func(
             forward_step_func=forward_step,
@@ -428,7 +433,9 @@ def forward_only(
     rollout_data = {}
     # Store the results on the last stage
     if mpu.is_pipeline_last_stage():
-        aggregated = aggregate_forward_results(forward_data_store, data_iterator[0], args, store_prefix="")
+        aggregated = aggregate_forward_results(
+            forward_data_store, data_iterator[0], args, store_prefix="", first_microbatch=first_microbatch
+        )
         for key, value in aggregated.items():
             rollout_data[f"{store_prefix}{key}"] = value
     return rollout_data

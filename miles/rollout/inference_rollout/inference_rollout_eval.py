@@ -15,6 +15,7 @@ from miles.rollout.inference_rollout.inference_rollout_common import (
 )
 from miles.utils.data import Dataset
 from miles.utils.eval_config import EvalDatasetConfig
+from miles.utils.eval_record import eval_point_dir
 from miles.utils.media_refs import run_media_dir
 from miles.utils.misc import as_completed_async
 from miles.utils.processing_utils import load_processor, load_tokenizer
@@ -27,16 +28,22 @@ async def run_eval_datasets(
     state: GenerateState,
     prompt_dataset_cache: dict[Any, Dataset],
     *,
+    rollout_id: int,
     kv_cache_namespace: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     args = state.args
     assert not args.group_rm, "Group RM is not supported for eval rollout"
 
+    record_dir = eval_point_dir(args.eval_record_dir, rollout_id) if args.eval_record_dir is not None else None
     coros = []
     for dataset_cfg in args.eval_datasets:
         coros.append(
             eval_rollout_single_dataset(
-                state, dataset_cfg, prompt_dataset_cache, kv_cache_namespace=kv_cache_namespace
+                state,
+                dataset_cfg,
+                prompt_dataset_cache,
+                kv_cache_namespace=kv_cache_namespace,
+                record_dir=None if record_dir is None else f"{record_dir}/{dataset_cfg.name}",
             )
         )
     results_list = await asyncio.gather(*coros)
@@ -49,6 +56,7 @@ async def eval_rollout_single_dataset(
     prompt_dataset_cache: dict[Any, Dataset],
     *,
     kv_cache_namespace: str | None = None,
+    record_dir: str | None = None,
 ) -> dict[str, dict[str, list[Any]]]:
     args = state.args
     assert not args.group_rm, "Group RM is not supported for eval rollout"
@@ -97,6 +105,8 @@ async def eval_rollout_single_dataset(
             sample.index = sample_index
             sample_index += 1
             sample.metadata = dataset_cfg.inject_metadata(sample.metadata)
+            if record_dir is not None:
+                sample.metadata["eval_record_dir"] = record_dir
             sample.generate_function_path = x.path if (x := dataset_cfg.custom_generate_function_path) else None
             stamp_kv_cache_namespace(sample, namespace=kv_cache_namespace)
             if router_routes_by_key(args):

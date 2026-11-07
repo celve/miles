@@ -107,4 +107,4 @@ async def init_or_reset_inference_controller(
     await asyncio.wait_for(inference_controller.abort_all(), timeout=TAKE_OVER_GATE_TIMEOUT_SECONDS)
     logger.info("Asked every engine of the fleet to abort the generations it was still running")
 
-    await asyncio.wait_for(call_agent_abort_hook(args), timeout=TAKE_OVER_GATE_TIMEOUT_SECONDS)
+    await asyncio.wait_for(call_agent_abort_hook(args, every_scope=True), timeout=TAKE_OVER_GATE_TIMEOUT_SECONDS)

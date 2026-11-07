@@ -26,6 +26,7 @@ from miles.rollout.filter_hub.common_filters import (
     group_weight_version_stats,
 )
 from miles.utils.audit_utils.sample_ownership.recorder import SampleOwnershipRecorder
+from miles.utils.data import get_steps_per_rollout
 from miles.utils.function_registry import load_function
 from miles.utils.output_store.dropped import record_dropped_samples, regenerated_on_restore
 from miles.utils.types import Sample
@@ -117,6 +118,10 @@ class DataBuffer(ABC):
     def get_metrics(self, trainer_model_id: str | None = None) -> dict[str, float]:
         """Report the metrics of one policy since its previous call (its window counters reset here)."""
 
+    def admits(self, *, in_flight_groups: int) -> bool:
+        """Whether the producer may start another group, given how many it has in flight."""
+        return True
+
     def state_dict(self) -> Any:
         raise NotImplementedError(f"{type(self).__name__} must implement state_dict() for checkpointing")
 
@@ -149,6 +154,11 @@ class DefaultDataBuffer(DataBuffer):
         to aborted and stale groups: drop discards them, retry recycles their
         prompts for regeneration. Missing-reward and custom-filter rejections
         are discarded directly.
+    (3) admission: with ``--max-weight-staleness`` set, the producer starts a
+        group only while the groups in flight and buffered fit in the batches
+        that will be consumed within that staleness, as AReaL does. A drain's
+        version step is estimated from the optimizer steps per drain until two
+        drains show the one the trainer publishes.
     """
 
     def __init__(self, input: DataBufferConstructorInput):
@@ -167,6 +177,14 @@ class DefaultDataBuffer(DataBuffer):
         self._dynamic_filter = load_function(args.dynamic_sampling_filter_path)
         self._cond = asyncio.Condition()
         self._current_version: int | None = None
+        self._staleness_measure = _STALENESS_MEASURES[args.weight_staleness_measure]
+        self._estimated_versions_per_drain = (
+            get_steps_per_rollout(args) * args.update_weights_interval
+            if args.max_weight_staleness is not None
+            else None
+        )
+        self._observed_versions_per_drain: int | None = None
+        self._get_pending = False
 
         self._metric_gatherer = MetricGatherer()
         self._metric_aborted_groups = 0
@@ -193,6 +211,7 @@ class DefaultDataBuffer(DataBuffer):
         output = apply_aborted_filter(self._args, input.group)
         if not output.keep:
             self._metric_aborted_groups += 1
+            self._metric_gatherer.on_aborted_group_drop(input.group)
             # Before the handler: a retry resets the prompt group, plans included.
             record_dropped_samples([input.prompt_group, input.group])
             self._unused_handler_fn(input.prompt_group, UnusedReason.ABORTED)
@@ -218,9 +237,24 @@ class DefaultDataBuffer(DataBuffer):
             return False
         return True
 
+    def admits(self, *, in_flight_groups: int) -> bool:
+        if (limit := self._args.max_weight_staleness) is None:
+            return True
+        versions_per_drain = self._observed_versions_per_drain or self._estimated_versions_per_drain
+        # A drain follows each weight update, so only a waiting get takes groups of this version without lag.
+        batches = limit // versions_per_drain + int(self._get_pending)
+        return in_flight_groups + len(self._buffer) < batches * self._args.rollout_batch_size
+
     async def get(self, *, num_groups: int, current_version: int | None = None, **_) -> list[DataBufferInput]:
+        self._get_pending = True
+        try:
+            return await self._get(num_groups=num_groups, current_version=current_version)
+        finally:
+            self._get_pending = False
+
+    async def _get(self, *, num_groups: int, current_version: int | None) -> list[DataBufferInput]:
         if current_version is not None:
-            self._current_version = current_version
+            self._observe_version(current_version)
         async with self._cond:
             deadline = time.monotonic() + NO_PROGRESS_WARN_SECS
             while True:
@@ -247,11 +281,17 @@ class DefaultDataBuffer(DataBuffer):
                 self._record_selected_version_stats(version_stats, current_version)
             return entries
 
+    def _observe_version(self, current_version: int) -> None:
+        if self._current_version is not None and current_version > self._current_version:
+            step = current_version - self._current_version
+            self._observed_versions_per_drain = max(step, self._observed_versions_per_drain or 0)
+        self._current_version = current_version
+
     def _drop_stale(self, current_version: int | None) -> None:
         limit = self._args.max_weight_staleness
         kept: list[DataBufferInput] = []
         for entry in self._buffer:
-            staleness = group_staleness(entry.group, current_version)
+            staleness = self._staleness_measure(group_weight_version_stats(entry.group), current_version)
             if limit is None or staleness is None or staleness <= limit:
                 kept.append(entry)
             else:
@@ -340,6 +380,13 @@ class DefaultDataBuffer(DataBuffer):
         return metrics
 
 
+_STALENESS_MEASURES = {
+    "oldest": GroupWeightVersionStats.oldest_lag,
+    "token_mean": GroupWeightVersionStats.token_weighted_lag,
+    "newest": GroupWeightVersionStats.newest_lag,
+}
+
+
 # ============================ multi policy buffer =============================
 
 
@@ -347,7 +394,8 @@ class DefaultMultiDataBuffer(DataBuffer):
     """One plain ``DefaultDataBuffer`` per policy model, composed.
 
     Each policy consumes at its own pace, so each gets its own capacity, staleness accounting and
-    metrics, and the single-policy buffer stays untouched.
+    metrics, and the single-policy buffer stays untouched. Admission stays permissive: a policy
+    holding the shared producer back can starve another that a save or eval barrier waits on.
     """
 
     def __init__(self, input: DataBufferConstructorInput):

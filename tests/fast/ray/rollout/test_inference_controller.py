@@ -133,6 +133,15 @@ class _RecordingServer:
         self.calls.append(("offload",))
         self.offload_tags.append(tags)
 
+    async def pause_generation(self, mode):
+        self.calls.append(("pause_generation", mode))
+
+    async def continue_generation(self):
+        self.calls.append(("continue_generation",))
+
+    async def flush_cache(self):
+        self.calls.append(("flush_cache",))
+
     async def onload(self, tags=None):
         self.onload_tags.append(tags)
 
@@ -328,6 +337,7 @@ def _make_controller(
         run_uuid=_RUN_UUID,
     )
     controller.servers = servers
+    controller._eval_fleet = None
     controller.context_lock = ContextLock("InferenceController")
     controller._engine_provider = engines
     controller._router_providers = [_FakeWorkerProvider([])]
@@ -1140,6 +1150,23 @@ class TestMemoryLifecycleFanOut:
                 [GPU_MEMORY_TYPE_WEIGHTS],
                 [GPU_MEMORY_TYPE_KV_CACHE, GPU_MEMORY_TYPE_CUDA_GRAPH],
             ]
+
+
+class TestGenerationPausesSkipTheEvalPool:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("has_eval_fleet", [True, False])
+    async def test_training_pauses_reach_the_eval_server_only_without_a_dedicated_pool(self, has_eval_fleet):
+        default, eval_srv = _RecordingServer(model_name="default"), _RecordingServer(model_name="eval")
+        controller = _make_controller({"default": default, "eval": eval_srv})
+        controller._eval_fleet = _RecordingEvalFleet(controller.args, srv=eval_srv) if has_eval_fleet else None
+
+        await controller.pause_generation(mode="retract")
+        await controller.flush_cache()
+        await controller.continue_generation()
+
+        expected = [("pause_generation", "retract"), ("flush_cache",), ("continue_generation",)]
+        assert default.calls == expected
+        assert eval_srv.calls == ([] if has_eval_fleet else expected)
 
 
 class TestUpdatableEnginesPayload:

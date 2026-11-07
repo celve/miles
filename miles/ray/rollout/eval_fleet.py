@@ -65,6 +65,7 @@ class RolloutExecutorEvalFleet:
                 router_ip=info.router.host,
                 router_port=info.router.port,
                 engine_gpu_counts=info.engine_gpu_counts,
+                server_concurrency=args.eval_server_concurrency,
             ),
             reward_pools=reward_pools,
         )

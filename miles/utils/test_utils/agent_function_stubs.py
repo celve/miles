@@ -10,6 +10,7 @@ import threading
 import time
 from pathlib import Path
 
+from miles.rollout.agentic.agent_function import InfraAbort, report_to_caller
 from miles.rollout.agentic.rollout_limits import current_scope, rollout_lock, rollout_semaphore
 
 
@@ -30,6 +31,20 @@ async def print_and_return(**kwargs) -> str:
     return "returned by the agent"
 
 
+async def read_env(*, names: list[str], **kwargs) -> dict:
+    return {name: os.environ.get(name) for name in names}
+
+
+async def report_then_return(*, items: list, **kwargs) -> str:
+    for item in items:
+        report_to_caller(item)
+    return "done"
+
+
+async def return_value(*, value, **kwargs):
+    return value
+
+
 async def report_limits_scope(**kwargs) -> str:
     return current_scope()
 
@@ -40,6 +55,10 @@ async def fail(**kwargs) -> None:
 
 async def fail_unrebuildably(**kwargs) -> None:
     raise NeedsKeywordError("agent failed on purpose", detail="lost on the way")
+
+
+async def abort_for_infra(**kwargs) -> None:
+    raise InfraAbort("SandboxUnavailable", "the sandbox never came up")
 
 
 async def exit_without_returning(**kwargs) -> None:
@@ -55,6 +74,16 @@ async def wait_until_cancelled(*, pid_file: str, cleaned_up: str, **kwargs) -> N
     try:
         await asyncio.sleep(3600)
     except asyncio.CancelledError:
+        Path(cleaned_up).touch()
+        raise
+
+
+async def clean_up_slowly_when_cancelled(*, pid_file: str, cleaned_up: str, cleanup_s: float, **kwargs) -> None:
+    Path(pid_file).write_text(str(os.getpid()))
+    try:
+        await asyncio.sleep(3600)
+    except asyncio.CancelledError:
+        await asyncio.sleep(cleanup_s)
         Path(cleaned_up).touch()
         raise
 

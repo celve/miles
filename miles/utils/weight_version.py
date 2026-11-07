@@ -39,8 +39,16 @@ def assert_samples_weight_version_sane(args: Namespace, samples: list["Sample"])
             _assert_span_weight_version_sane(sample=sample, span=span, what="were generated under")
         for span in sample.all_prefill_weight_version_spans:
             _assert_span_weight_version_sane(sample=sample, span=span, what="had their prompt KV computed under")
-        if args.sglang.common_value("enable_prefill_weight_versions"):
+        if _prefill_weight_versions_enabled(args):
             _assert_sample_reports_prefill_weight_versions(sample)
+
+
+def _prefill_weight_versions_enabled(args: Namespace) -> bool:
+    try:
+        return args.sglang.common_value("enable_prefill_weight_versions")
+    except AttributeError:
+        # An SGLang whose ServerArgs lacks the flag (the sglang-miles pin 7b6993a3) leaves it out of the config.
+        return False
 
 
 def _assert_sample_reports_prefill_weight_versions(sample: "Sample") -> None:

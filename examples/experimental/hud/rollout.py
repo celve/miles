@@ -149,6 +149,18 @@ def _collect_turns(run) -> list:
     return [s for s in samples if s is not None and s.output_token_ids]
 
 
+def _no_response_cause(run) -> str | None:
+    """Why the policy never got a model response back, or None once it got one."""
+    from hud.agents.types import AgentStep  # noqa: PLC0415
+
+    steps = run.trace.collect(lambda s: s if isinstance(s, AgentStep) else None)
+    if not steps:
+        # HUD returns a run without a runtime, not an exception, when provisioning, connecting or starting fails.
+        return "SandboxUnavailable" if run.runtime is None else None
+    # HUD records a failed model request as an AgentStep with an error and no response.
+    return "NoModelCalls" if steps[0].raw is None and steps[0].error else None
+
+
 def _collect_images(run) -> list[PILImage.Image]:
     """Every screenshot the policy was shown, in message order.
 
@@ -396,6 +408,14 @@ def _failed(sample: Sample, reason: str, state: Any) -> Sample:
     return sample
 
 
+def _aborted(sample: Sample, reason: str, exit_status: str, state: Any) -> Sample:
+    """A write-off the policy cannot have caused: Miles drops its group instead of scoring it."""
+    sample = _failed(sample, reason, state)
+    sample.status = Sample.Status.ABORTED
+    sample.metadata["exit_status"] = exit_status
+    return sample
+
+
 async def generate(input: GenerateFnInput) -> GenerateFnOutput:
     args, sample, sampling_params = input.args, input.sample, input.sampling_params
     assert not args.partial_rollout, "Partial rollout is not supported for HUD rollouts."
@@ -423,17 +443,23 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
             # systematic failure still shows up as a rising drop count rather
             # than as silence.
             logger.warning("hud episode failed to run: %s", e, exc_info=True)
-            return GenerateFnOutput(samples=_failed(sample, f"hud episode errored: {type(e).__name__}", state))
+            return GenerateFnOutput(
+                samples=_aborted(sample, f"hud episode errored: {type(e).__name__}", "ServerUnreachable", state)
+            )
 
     run = (getattr(job, "runs", None) or [None])[
         0
     ]  # config-access-exempt: HUD jobs interrupted before an episode completes may have no runs
     if run is None:
-        return GenerateFnOutput(samples=_failed(sample, "hud episode produced no run", state))
+        return GenerateFnOutput(samples=_aborted(sample, "hud episode produced no run", "ServerUnreachable", state))
 
     sample.metadata["reward"] = float(run.reward or 0.0)
     sample.metadata["hud_trace_status"] = str(run.trace.status)
 
+    if (cause := _no_response_cause(run)) is not None:
+        return GenerateFnOutput(
+            samples=_aborted(sample, f"hud episode got no model response ({cause})", cause, state)
+        )
     turns = _collect_turns(run)
     stitched = _stitch(turns, state.tokenizer) if turns else None
     if stitched is None:

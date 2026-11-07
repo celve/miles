@@ -116,6 +116,8 @@ _ARGS_DEFAULTS = dict(
     dump_details=None,
     multi_lora=False,
     custom_loss_function_path=None,
+    use_m2po=False,
+    m2po_tau=0.04,
     # value_loss_function
     value_clip=0.2,
     # loss_function dispatcher

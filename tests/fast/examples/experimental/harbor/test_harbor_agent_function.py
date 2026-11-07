@@ -16,6 +16,9 @@ from types import SimpleNamespace
 import harbor_agent_function as haf
 import pytest
 
+from miles.rollout.agentic.agent_function import InfraAbort
+from miles.utils.eval_record import load_episode
+
 
 class _EnvironmentType(str, enum.Enum):
     DOCKER = "docker"
@@ -93,6 +96,13 @@ def tasks_dir(tmp_path, monkeypatch):
     monkeypatch.delenv("HARBOR_ENV_KWARGS", raising=False)
     monkeypatch.delenv("HARBOR_CPU_ENFORCEMENT_POLICY", raising=False)
     monkeypatch.delenv("HARBOR_MEMORY_ENFORCEMENT_POLICY", raising=False)
+    for var in (
+        "HARBOR_AGENT_IMPORT_PATH",
+        "HARBOR_AGENT_KWARGS",
+        "HARBOR_VERIFIER_IMPORT_PATH",
+        "HARBOR_VERIFIER_KWARGS",
+    ):
+        monkeypatch.delenv(var, raising=False)
     return tmp_path
 
 
@@ -265,6 +275,170 @@ def test_opencode_binding_remaps_the_openai_provider(tasks_dir, monkeypatch):
     assert "max_turns" not in cfg.agent.kwargs
 
 
+def test_opencode_cua_binding_declares_images_and_caps_turns(tasks_dir, monkeypatch):
+    monkeypatch.setenv("AGENT_MODEL_NAME", "qwen")
+    monkeypatch.setenv("HARBOR_AGENT_MAX_ITERATIONS", "30")
+    cfg = haf.build_trial_config(
+        {"instance_id": "task-1", "agent_name": "opencode-cua"}, "http://s/v1", {"max_tokens": 512, "temperature": 1.0}
+    )
+    assert cfg.agent.import_path == "examples.experimental.harbor_cua.opencode_cua:OpenCodeCUA"
+    assert cfg.agent.name is None
+    assert cfg.agent.model_name == "openai-compatible/qwen"
+    # without image input declared, OpenCode drops the screenshots the computer tool returns
+    entry = cfg.agent.kwargs["opencode_config"]["provider"]["openai-compatible"]["models"]["qwen"]
+    assert entry["modalities"]["input"] == ["text", "image"] and entry["attachment"] is True
+    assert cfg.agent.kwargs["temperature"] == 1.0
+    assert cfg.agent.kwargs["max_turns"] == 30
+    assert cfg.agent.env["OPENAI_BASE_URL"] == "http://s/v1"
+
+
+def test_a_lost_desktop_discards_an_opencode_cua_trial(tasks_dir):
+    assert "DesktopLost" in haf.HARNESS_BINDINGS["opencode-cua"].sandbox_loss_exceptions
+
+
+_SESSION_SAMPLING = {"temperature": 1.0, "top_p": 1.0, "top_k": -1, "max_tokens": 512, "stop_token_ids": [151645]}
+
+
+def _computer_1_config(**metadata):
+    return haf.build_trial_config(
+        {"instance_id": "task-1", "agent_name": "computer-1", **metadata}, "http://s/sessions/s1/v1", _SESSION_SAMPLING
+    )
+
+
+def test_computer_1_calls_the_session_from_the_worker(tasks_dir):
+    cfg = _computer_1_config()
+
+    assert cfg.agent.kwargs["api_base"] == "http://s/sessions/s1/v1"
+    assert cfg.agent.kwargs["llm_kwargs"]["api_key"] == "dummy"
+    assert cfg.agent.env == {}
+
+
+def test_computer_1_sends_miles_sampling_on_every_call(tasks_dir):
+    """The token cap rides llm_kwargs, which LiteLLM spreads into the compactor's calls as well."""
+    kwargs = _computer_1_config().agent.kwargs
+
+    assert kwargs["temperature"] == 1.0
+    assert kwargs["llm_kwargs"] == {
+        "top_p": 1.0,
+        "top_k": -1,
+        "max_tokens": 512,
+        "stop_token_ids": [151645],
+        "api_key": "dummy",
+    }
+    assert "llm_call_kwargs" not in kwargs
+
+
+def test_computer_1_leaves_an_unset_temperature_to_the_session(tasks_dir):
+    cfg = haf.build_trial_config(
+        {"instance_id": "task-1", "agent_name": "computer-1"}, "http://s/sessions/s1/v1", {"max_tokens": 64}
+    )
+
+    assert cfg.agent.kwargs["temperature"] is None
+
+
+def test_computer_1_never_receives_max_seq_len(tasks_dir, monkeypatch):
+    monkeypatch.setenv("HARBOR_MAX_SEQ_LEN", "8192")
+
+    assert "max_seq_len" not in _computer_1_config(max_seq_len=4096).agent.kwargs
+    assert "max_seq_len" not in _computer_1_config().agent.kwargs
+
+
+def test_computer_1_enables_images_on_the_generic_harness(tasks_dir):
+    kwargs = _computer_1_config().agent.kwargs
+
+    assert kwargs["enable_images"] is True
+    assert kwargs["provider"] == "litellm"
+
+
+def test_computer_1_is_built_from_the_qwen3_vl_class(tasks_dir):
+    """Harbor builds its own Computer1 whenever the config names a registered agent."""
+    cfg = _computer_1_config()
+
+    assert cfg.agent.import_path == "examples.experimental.harbor_cua.qwen_computer:Qwen3VLComputer1"
+    assert cfg.agent.name is None
+
+
+def test_computer_1_takes_its_turn_cap_and_desktop_from_the_env(tasks_dir, monkeypatch):
+    for var in ("HARBOR_AGENT_MAX_ITERATIONS", "HARBOR_CUA_DESKTOP_WIDTH", "HARBOR_CUA_DESKTOP_HEIGHT"):
+        monkeypatch.delenv(var, raising=False)
+    assert not {"max_turns", "desktop_width", "desktop_height"} & set(_computer_1_config().agent.kwargs)
+
+    monkeypatch.setenv("HARBOR_AGENT_MAX_ITERATIONS", "10")
+    monkeypatch.setenv("HARBOR_CUA_DESKTOP_WIDTH", "1280")
+    monkeypatch.setenv("HARBOR_CUA_DESKTOP_HEIGHT", "720")
+    kwargs = _computer_1_config().agent.kwargs
+
+    assert (kwargs["max_turns"], kwargs["desktop_width"], kwargs["desktop_height"]) == (10, 1280, 720)
+
+
+def test_other_bindings_keep_the_registered_class(tasks_dir):
+    cfg = haf.build_trial_config({"instance_id": "task-1", "agent_name": "terminus-2"}, "http://s/v1", {})
+
+    assert cfg.agent.name == "terminus-2"
+    assert cfg.agent.import_path is None
+
+
+@pytest.mark.parametrize("agent_name", ["computer-1", "terminus-2"])
+def test_an_agent_import_path_replaces_the_bindings_class(tasks_dir, monkeypatch, agent_name):
+    monkeypatch.setenv("HARBOR_AGENT_IMPORT_PATH", "pkg.agent:DesktopAgent")
+    cfg = haf.build_trial_config({"instance_id": "task-1", "agent_name": agent_name}, "http://s/v1", {})
+
+    assert cfg.agent.import_path == "pkg.agent:DesktopAgent"
+    assert cfg.agent.name is None
+
+
+def test_agent_kwargs_join_the_bindings_own(tasks_dir, monkeypatch):
+    monkeypatch.setenv("HARBOR_AGENT_KWARGS", '{"settle_sec": 2.0, "keep_screenshots": 1}')
+    kwargs = _computer_1_config().agent.kwargs
+
+    assert (kwargs["settle_sec"], kwargs["keep_screenshots"]) == (2.0, 1)
+    assert kwargs["api_base"] == "http://s/sessions/s1/v1"
+
+
+@pytest.mark.parametrize("owned", ["temperature", "llm_kwargs", "model_info"])
+def test_agent_kwargs_cannot_replace_what_the_binding_sets(tasks_dir, monkeypatch, owned):
+    monkeypatch.setenv("HARBOR_AGENT_KWARGS", f'{{"{owned}": 0.7}}')
+
+    with pytest.raises(ValueError, match=owned):
+        _computer_1_config()
+
+
+def test_a_verifier_class_reaches_harbor_with_its_kwargs(tasks_dir, monkeypatch):
+    monkeypatch.setenv("HARBOR_VERIFIER_IMPORT_PATH", "pkg.verify:HostVerifier")
+    monkeypatch.setenv("HARBOR_VERIFIER_KWARGS", '{"read_limit_mb": 64}')
+    monkeypatch.setenv("HARBOR_VERIFIER_TIMEOUT_SEC", "600")
+    verifier = _computer_1_config().verifier
+
+    assert (verifier.import_path, verifier.kwargs, verifier.override_timeout_sec) == (
+        "pkg.verify:HostVerifier",
+        {"read_limit_mb": 64},
+        600.0,
+    )
+
+
+def test_a_task_keeps_its_own_tests_without_a_verifier_class(tasks_dir, monkeypatch):
+    monkeypatch.delenv("HARBOR_VERIFIER_TIMEOUT_SEC", raising=False)
+    assert not hasattr(_computer_1_config(), "verifier")
+
+    monkeypatch.setenv("HARBOR_VERIFIER_TIMEOUT_SEC", "600")
+    assert _computer_1_config().verifier.import_path is None
+
+
+@pytest.mark.parametrize(
+    ("env", "match"),
+    [
+        ({"HARBOR_VERIFIER_KWARGS": '{"x": 1}'}, "HARBOR_VERIFIER_IMPORT_PATH"),
+        ({"HARBOR_AGENT_KWARGS": "[1]"}, "JSON object"),
+    ],
+)
+def test_malformed_agent_or_verifier_settings_stop_the_run(tasks_dir, monkeypatch, env, match):
+    for var, value in env.items():
+        monkeypatch.setenv(var, value)
+
+    with pytest.raises(ValueError, match=match):
+        _computer_1_config()
+
+
 @pytest.mark.parametrize(
     ("model", "expected"),
     [
@@ -375,8 +549,206 @@ def test_run_scores_a_trial_exception_zero(tasks_dir, fake_harbor):
     assert out["reward"] == 0.0 and out["exit_status"] == "AgentError"
 
 
+def _failed_trial(exc_type, *, agent_setup=False, agent_execution=False, step_results=None):
+    stamp = SimpleNamespace(started_at=datetime(2026, 1, 1), finished_at=datetime(2026, 1, 1))
+    return SimpleNamespace(
+        exception_info=SimpleNamespace(exception_type=exc_type, exception_message="boom"),
+        verifier_result=None,
+        agent_result=None,
+        environment_setup=stamp,
+        agent_setup=stamp if agent_setup else None,
+        agent_execution=stamp if agent_execution else None,
+        step_results=step_results,
+    )
+
+
+@pytest.mark.parametrize(("agent_setup", "exit_status"), [(False, "SandboxUnavailable"), (True, "AgentSetupFailed")])
+def test_run_discards_a_trial_that_failed_before_its_agent_started(tasks_dir, fake_harbor, agent_setup, exit_status):
+    fake_harbor.result = _failed_trial("EnvironmentStartTimeoutError", agent_setup=agent_setup)
+
+    with pytest.raises(InfraAbort, match="EnvironmentStartTimeoutError: boom") as raised:
+        run_async(haf.run("http://s/sessions/s1", [], {}, {"instance_id": "task-1"}))
+
+    assert raised.value.exit_status == exit_status
+
+
+@pytest.mark.parametrize("exc_type", ["APIConnectionError", "ServiceUnavailableError"])
+def test_run_discards_a_trial_whose_agent_lost_the_model_service(tasks_dir, fake_harbor, exc_type):
+    fake_harbor.result = _failed_trial(exc_type, agent_setup=True, agent_execution=True)
+
+    with pytest.raises(InfraAbort) as raised:
+        run_async(haf.run("http://s/sessions/s1", [], {}, {"instance_id": "task-1"}))
+
+    assert raised.value.exit_status == "ServerUnreachable"
+
+
+@pytest.mark.parametrize(
+    ("exc_type", "exit_status"),
+    [
+        ("AgentTimeoutError", "TimeLimitExceeded"),
+        ("RuntimeError", "AgentError"),
+        ("ApiRateLimitError", "AgentError"),
+        ("ApiInternalServerError", "AgentError"),
+        ("ApiConnectionClosedError", "AgentError"),
+        ("InternalServerError", "AgentError"),
+        ("Timeout", "AgentError"),
+    ],
+)
+def test_run_scores_a_failure_after_the_agent_started_zero(tasks_dir, fake_harbor, exc_type, exit_status):
+    fake_harbor.result = _failed_trial(exc_type, agent_setup=True, agent_execution=True)
+
+    out = run_async(haf.run("http://s/sessions/s1", [], {}, {"instance_id": "task-1"}))
+
+    assert out["reward"] == 0.0 and out["exit_status"] == exit_status
+
+
+def test_run_discards_a_computer_1_trial_whose_own_sandbox_command_failed(tasks_dir, fake_harbor):
+    fake_harbor.result = _failed_trial("RuntimeRequestError", agent_setup=True, agent_execution=True)
+
+    with pytest.raises(InfraAbort, match="RuntimeRequestError: boom") as raised:
+        run_async(haf.run("http://s/sessions/s1", [], {}, {"instance_id": "task-1", "agent_name": "computer-1"}))
+
+    assert raised.value.exit_status == "SandboxLost"
+
+
+def test_run_scores_a_runtime_request_error_from_another_harness(tasks_dir, fake_harbor):
+    fake_harbor.result = _failed_trial("RuntimeRequestError", agent_setup=True, agent_execution=True)
+
+    out = run_async(haf.run("http://s/sessions/s1", [], {}, {"instance_id": "task-1", "agent_name": "mini-swe-agent"}))
+
+    assert out["reward"] == 0.0 and out["exit_status"] == "AgentError"
+
+
+@pytest.mark.parametrize(
+    ("exc_type", "exit_status"),
+    [
+        ("OutputLengthExceededError", "AgentError"),
+        ("ContextLengthExceededError", "AgentError"),
+        ("BadGatewayError", "AgentError"),
+        ("InternalServerError", "AgentError"),
+        ("BadRequestError", "AgentError"),
+        ("AgentTimeoutError", "TimeLimitExceeded"),
+    ],
+)
+def test_run_scores_the_computer_1_failures_the_policy_can_cause(tasks_dir, fake_harbor, exc_type, exit_status):
+    fake_harbor.result = _failed_trial(exc_type, agent_setup=True, agent_execution=True)
+
+    out = run_async(haf.run("http://s/sessions/s1", [], {}, {"instance_id": "task-1", "agent_name": "computer-1"}))
+
+    assert out["reward"] == 0.0 and out["exit_status"] == exit_status
+
+
+@pytest.mark.parametrize(
+    ("exc_type", "agent_setup", "agent_execution", "exit_status"),
+    [
+        ("RuntimeRequestError", True, False, "AgentSetupFailed"),
+        ("APIConnectionError", True, True, "ServerUnreachable"),
+    ],
+)
+def test_run_keeps_the_shared_discards_for_computer_1(
+    tasks_dir, fake_harbor, exc_type, agent_setup, agent_execution, exit_status
+):
+    fake_harbor.result = _failed_trial(exc_type, agent_setup=agent_setup, agent_execution=agent_execution)
+
+    with pytest.raises(InfraAbort) as raised:
+        run_async(haf.run("http://s/sessions/s1", [], {}, {"instance_id": "task-1", "agent_name": "computer-1"}))
+
+    assert raised.value.exit_status == exit_status
+
+
+def test_run_discards_a_multi_step_trial_whose_step_lost_the_model_service(tasks_dir, fake_harbor):
+    started = SimpleNamespace(started_at=datetime(2026, 1, 1), finished_at=datetime(2026, 1, 1))
+    step = SimpleNamespace(
+        agent_execution=started,
+        exception_info=SimpleNamespace(exception_type="APIConnectionError", exception_message="connection refused"),
+    )
+    fake_harbor.result = _verdict()
+    fake_harbor.result.agent_execution = None
+    fake_harbor.result.step_results = [step]
+
+    with pytest.raises(InfraAbort, match="APIConnectionError: connection refused") as raised:
+        run_async(haf.run("http://s/sessions/s1", [], {}, {"instance_id": "task-1"}))
+
+    assert raised.value.exit_status == "ServerUnreachable"
+
+
+def test_run_counts_a_multi_step_trial_whose_step_ran_as_started(tasks_dir, fake_harbor):
+    step = SimpleNamespace(agent_execution=SimpleNamespace(started_at=datetime(2026, 1, 1), finished_at=None))
+    fake_harbor.result = _failed_trial("RuntimeError", agent_setup=True, step_results=[step])
+
+    out = run_async(haf.run("http://s/sessions/s1", [], {}, {"instance_id": "task-1"}))
+
+    assert out["reward"] == 0.0 and out["exit_status"] == "AgentError"
+
+
 def test_run_raises_on_a_missing_task_instead_of_scoring_zero(tasks_dir, fake_harbor):
     """A config error fails every sample; raising beats training on silent all-zero rewards."""
     with pytest.raises(FileNotFoundError):
         run_async(haf.run("http://s/sessions/s1", [], {}, {"instance_id": "missing"}))
     assert fake_harbor.created == []
+
+
+# --- eval recording --------------------------------------------------------
+
+
+def _recorded_metadata(tmp_path, agent_name="computer-1"):
+    return {
+        "instance_id": "task-1",
+        "agent_name": agent_name,
+        "eval_record_dir": str(tmp_path / "records" / "eval_0" / "heldout"),
+        "miles_lifecycle": {"sample_index": 5, "group_index": -1, "weight_version": ""},
+    }
+
+
+def test_run_records_an_eval_episode_with_its_verdict(tasks_dir, fake_harbor, tmp_path):
+    fake_harbor.result = _verdict(reward=1.0)
+
+    run_async(haf.run("http://s/sessions/s1", [], {}, _recorded_metadata(tmp_path)))
+
+    directory = tmp_path / "records" / "eval_0" / "heldout" / "task-1" / "5"
+    (trial,) = fake_harbor.created
+    assert trial.config.agent.kwargs["record_dir"] == str(directory)
+    episode = load_episode(directory)
+    assert (episode.stack, episode.task_id, episode.sample_index, episode.dataset) == (
+        "harbor",
+        "task-1",
+        5,
+        "heldout",
+    )
+    assert (episode.reward, episode.status) == (1.0, "Submitted")
+
+
+def test_run_records_the_cause_of_a_discarded_eval_episode(tasks_dir, fake_harbor, tmp_path):
+    fake_harbor.result = _failed_trial("RuntimeRequestError", agent_setup=True, agent_execution=True)
+
+    with pytest.raises(InfraAbort):
+        run_async(haf.run("http://s/sessions/s1", [], {}, _recorded_metadata(tmp_path)))
+
+    episode = load_episode(tmp_path / "records" / "eval_0" / "heldout" / "task-1" / "5")
+    assert (episode.reward, episode.status) == (None, "SandboxLost")
+
+
+def test_run_records_a_timed_out_eval_episode_as_scored(tasks_dir, fake_harbor, tmp_path, monkeypatch):
+    fake_harbor.result = _verdict()
+    fake_harbor.run_delay_s = 10
+    monkeypatch.setenv("AGENT_TRIAL_TIMEOUT", "0")
+
+    run_async(haf.run("http://s/sessions/s1", [], {}, _recorded_metadata(tmp_path)))
+
+    episode = load_episode(tmp_path / "records" / "eval_0" / "heldout" / "task-1" / "5")
+    assert (episode.reward, episode.status) == (0.0, "TimeLimitExceeded")
+
+
+def test_a_harness_without_a_recorder_refuses_eval_recording(tasks_dir, fake_harbor, tmp_path):
+    with pytest.raises(ValueError, match="no recorder"):
+        run_async(haf.run("http://s/sessions/s1", [], {}, _recorded_metadata(tmp_path, agent_name="terminus-2")))
+    assert fake_harbor.created == []
+
+
+def test_an_unrecorded_episode_gives_the_agent_no_record_dir(tasks_dir, fake_harbor):
+    fake_harbor.result = _verdict()
+
+    run_async(haf.run("http://s/sessions/s1", [], {}, {"instance_id": "task-1", "agent_name": "computer-1"}))
+
+    (trial,) = fake_harbor.created
+    assert "record_dir" not in trial.config.agent.kwargs

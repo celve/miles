@@ -11,15 +11,24 @@ Covers:
 from __future__ import annotations
 
 import math
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
-from tests.fast.backends.training_utils.loss.loss_test_utils import make_parallel_state
+from tests.fast.backends.training_utils.loss.loss_test_utils import make_args as make_loss_args
+from tests.fast.backends.training_utils.loss.loss_test_utils import make_batch, make_inputs, make_parallel_state
 from tests.fast.ray.rollout.conftest import make_args, make_sample
 
 from miles.backends.training_utils.data.context_parallel import get_sum_of_sample_mean
+from miles.backends.training_utils.data.rollout import get_num_rollouts
+from miles.backends.training_utils.loss import objective
 from miles.backends.training_utils.metrics import log_utils
-from miles.ray.rollout.train_data_conversion import convert_samples_to_train_data
+from miles.ray.rollout.train_data_conversion import (
+    _num_rollouts_of_single_step,
+    convert_samples_to_train_data,
+    split_train_data_by_dp_raw,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -105,3 +114,131 @@ class TestAggregateTrainLossesNumRollouts:
         losses = [self._mb(2, {"loss": 2.0}), self._mb(2, {"loss": 6.0})]
         out = log_utils.aggregate_train_losses(losses)
         assert math.isclose(out["loss"], 2.0)
+
+
+def _ones(lens: list[int]) -> list[torch.Tensor]:
+    return [torch.ones(n, dtype=torch.int) for n in lens]
+
+
+class TestSplitRolloutsLoseNothing:
+    def test_two_rollouts_in_five_samples_match_the_unsplit_loss(self):
+        # rollout 7: 6 response tokens cut 1 + 2 + 3; rollout 9: 4 tokens cut 1 + 3
+        per_token = torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 10.0, 20.0, 30.0, 40.0])
+        unsplit = get_sum_of_sample_mean([6, 4], [6, 4], _ones([6, 4]))
+        expected = unsplit(per_token).item() / 2
+        split_lens = [1, 2, 3, 1, 3]
+        split = get_sum_of_sample_mean(
+            split_lens, split_lens, _ones(split_lens), denominators=torch.tensor([6.0, 6.0, 6.0, 4.0, 4.0])
+        )
+
+        data = {"tokens": [[0]] * 5, "rollout_ids": [7, 7, 7, 9, 9], "dynamic_global_batch_size": 5}
+        (num_rollouts,) = _num_rollouts_of_single_step(SimpleNamespace(global_batch_size=5, multi_lora=False), data)
+
+        assert num_rollouts == 2
+        assert math.isclose(split(per_token).item() / num_rollouts, expected, rel_tol=1e-6)
+        assert math.isclose(split(per_token).item() / 5, expected * 2 / 5, rel_tol=1e-6)
+
+
+def test_the_loss_divides_by_the_rollout_count_the_training_side_split_stamps(monkeypatch):
+    split_args = SimpleNamespace(
+        global_batch_size=5, balance_data=False, multi_lora=False, backend=SimpleNamespace(global_batch_size=5)
+    )
+    data = {
+        "tokens": [[1, 2]] * 5,
+        "rollout_ids": [7, 7, 7, 9, 9],
+        "dynamic_global_batch_size": 5,
+        "response_lengths": [1] * 5,
+    }
+    (shard,) = split_train_data_by_dp_raw(split_args, data, dp_size=1)
+    (num_rollouts,) = get_num_rollouts(split_args, shard, num_steps=1)
+    del shard["num_rollouts"]
+    assert get_num_rollouts(split_args, shard, num_steps=1) == [5]
+
+    args = make_loss_args(use_dynamic_global_batch_size=True, calculate_per_token_loss=False)
+    inputs = make_inputs(seed=5, batch_size=1, prompt_lens=[3], response_lens=[2], vocab_size=8, args=args)
+    batch = make_batch(inputs, "policy_loss")
+    batch["dynamic_global_batch_size"] = 5
+    monkeypatch.setattr(
+        objective,
+        "get_loss_function",
+        lambda _args, _loss_fn=None: Mock(return_value=(torch.tensor(3.0), {"loss": torch.tensor(0.0)})),
+    )
+    stamped, _, _ = objective.loss_function(args, batch, 1, inputs["policy_logits"], num_rollouts=num_rollouts)
+    unstamped, _, _ = objective.loss_function(args, batch, 1, inputs["policy_logits"], num_rollouts=None)
+
+    assert num_rollouts == 2
+    assert math.isclose(stamped.item(), 3.0 / 2, rel_tol=1e-6)
+    assert math.isclose(unstamped.item(), 3.0 / 5, rel_tol=1e-6)
+
+
+def _step_loss_and_logit_grads(args, micro_batches, num_rollouts):
+    """What Megatron accumulates for one step: each micro-batch's scaled loss, divided by the micro-batch count."""
+    total = 0.0
+    grads = []
+    for batch, logits in micro_batches:
+        logits = logits.clone().requires_grad_(True)
+        loss, _, _ = objective.loss_function(
+            args, batch, len(micro_batches), logits, apply_megatron_loss_scaling=True, num_rollouts=num_rollouts
+        )
+        (loss / len(micro_batches)).backward()
+        total += loss.item() / len(micro_batches)
+        grads.append(logits.grad)
+    return total, grads
+
+
+def test_a_zero_loss_pad_micro_batch_leaves_the_step_loss_and_gradients_unchanged():
+    args = make_loss_args(
+        use_dynamic_global_batch_size=False,
+        calculate_per_token_loss=False,
+        entropy_coef=0.0,
+        observe_training_entropy=False,
+    )
+    real = make_inputs(seed=11, batch_size=2, prompt_lens=[3, 4], response_lens=[2, 3], vocab_size=8, args=args)
+    pad = make_inputs(seed=12, batch_size=1, prompt_lens=[1], response_lens=[1], vocab_size=8, args=args)
+
+    def micro_batch(inputs, index, mask_sum):
+        one = {
+            key: inputs[key][index : index + 1]
+            for key in (
+                "unconcat_tokens",
+                "log_probs",
+                "ref_log_probs",
+                "rollout_log_probs",
+                "advantages",
+                "returns",
+                "loss_masks",
+            )
+        }
+        one.update(
+            response_lens=inputs["response_lens"][index : index + 1],
+            total_lens=inputs["total_lens"][index : index + 1],
+        )
+        batch = make_batch(one, "policy_loss")
+        batch["rollout_mask_sums"] = torch.tensor([mask_sum])
+        start = sum(inputs["total_lens"][:index])
+        return batch, inputs["policy_logits"][:, start : start + inputs["total_lens"][index]]
+
+    pad_batch, pad_logits = micro_batch(pad, 0, 2)
+    pad_batch["loss_masks"] = [torch.zeros(1)]
+    without = [micro_batch(real, 0, 2), micro_batch(real, 1, 3)]
+    loss_without, grads_without = _step_loss_and_logit_grads(args, without, num_rollouts=2)
+    loss_with, grads_with = _step_loss_and_logit_grads(args, without + [(pad_batch, pad_logits)], num_rollouts=2)
+
+    assert math.isclose(loss_with, loss_without, rel_tol=1e-6, abs_tol=1e-9)
+    for a, b in zip(grads_without, grads_with[:2], strict=True):
+        assert torch.allclose(a, b, rtol=1e-6, atol=1e-9)
+    assert torch.count_nonzero(grads_with[2]) == 0
+
+
+def test_a_one_token_response_keeps_its_log_prob_a_vector_on_the_true_on_policy_path():
+    args = make_loss_args(entropy_coef=0.0, observe_training_entropy=False, true_on_policy_mode=True)
+    inputs = make_inputs(seed=12, batch_size=1, prompt_lens=[1], response_lens=[1], vocab_size=8, args=args)
+    loss, _, _ = objective.loss_function(
+        args,
+        make_batch(inputs, "policy_loss"),
+        1,
+        inputs["policy_logits"],
+        apply_megatron_loss_scaling=True,
+        num_rollouts=1,
+    )
+    assert torch.isfinite(loss)

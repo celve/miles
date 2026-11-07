@@ -71,3 +71,17 @@ def test_bridge_runtime_resolves_native_dsv4_kernel_default(backend):
     _apply_bridge_runtime_config(provider, _runtime_args(dsa_kernel_backend=backend, dsa_attention_backend="tilelang"))
 
     assert provider.dsa_kernel_backend == (backend or "cudnn")
+
+
+def test_bridge_runtime_freezes_the_vision_tower_only_when_asked():
+    provider = SimpleNamespace(freeze_vision_model=False)
+    _apply_bridge_runtime_config(provider, _runtime_args())
+    assert provider.freeze_vision_model is False
+
+    _apply_bridge_runtime_config(provider, _runtime_args(freeze_vision_model=True))
+    assert provider.freeze_vision_model is True
+
+
+def test_bridge_runtime_refuses_to_freeze_a_model_without_a_vision_tower():
+    with pytest.raises(AssertionError, match="--freeze-vision-model"):
+        _apply_bridge_runtime_config(_provider(), _runtime_args(freeze_vision_model=True))

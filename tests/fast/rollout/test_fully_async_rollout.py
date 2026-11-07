@@ -105,6 +105,8 @@ def make_args(**overrides) -> Namespace:
         rollout_batch_size=2,
         n_samples_per_prompt=N_SAMPLES_PER_PROMPT,
         max_weight_staleness=None,
+        weight_staleness_measure="oldest",
+        update_weights_interval=1,
         async_max_concurrent_samples=None,
         async_data_buffer_capacity_factor=1000.0,
         async_unused_samples_handler="drop",
@@ -128,6 +130,7 @@ def make_args(**overrides) -> Namespace:
         sglang=make_sglang_config(enable_deterministic_inference=False),
     )
     defaults.update(overrides)
+    defaults.setdefault("global_batch_size", defaults["rollout_batch_size"] * defaults["n_samples_per_prompt"])
     args = Namespace(**defaults)
     args.raw_megatron = resolve_megatron_config(args, base_args={})
     return args
@@ -184,7 +187,7 @@ async def test_eval_without_fleet_pauses_producer(monkeypatch):
     eval_release = asyncio.Event()
     eval_results = {"fake_ds": {"rewards": [1.0], "truncated": [False], "samples": []}}
 
-    async def fake_run_eval_datasets(state, cache, *, kv_cache_namespace=None):
+    async def fake_run_eval_datasets(state, cache, *, rollout_id, kv_cache_namespace=None):
         assert state is fn.state  # shared-engine eval uses the train state
         eval_started.set()
         await eval_release.wait()
@@ -226,7 +229,7 @@ async def test_eval_runs_on_dedicated_fleet(monkeypatch):
     eval_results = {"fake_ds": {"rewards": [1.0], "truncated": [False], "samples": []}}
     seen_states = []
 
-    async def fake_run_eval_datasets(state, cache, *, kv_cache_namespace=None):
+    async def fake_run_eval_datasets(state, cache, *, rollout_id, kv_cache_namespace=None):
         seen_states.append(state)
         return eval_results
 
@@ -576,6 +579,69 @@ async def test_a_dying_worker_cancels_the_step_and_is_logged(monkeypatch, caplog
         await step
 
     assert "generation exploded" in caplog.text
+
+
+def make_version_stamping_generate(engine: dict):
+    async def generate(state, group, sampling_params, evaluation=False, sample_done_callback=None):
+        await asyncio.sleep(0)
+        for sample in group:
+            sample.status = Sample.Status.COMPLETED
+            sample.weight_versions = [
+                WeightVersionsPerCall(
+                    spans=[WeightVersionSpan(version=str(engine["version"]), abs_start=0, abs_end=1)]
+                )
+            ]
+            if sample_done_callback is not None:
+                sample_done_callback()
+        return group
+
+    return generate
+
+
+async def test_the_producer_starts_only_the_groups_the_staleness_cap_lets_the_next_drains_take(monkeypatch):
+    data_source = FakeDataSource()
+    engine = {"version": 0}
+    args = make_args(rollout_batch_size=2, max_weight_staleness=2, global_batch_size=2)
+    fn = make_fn(monkeypatch, args, data_source, generate=make_version_stamping_generate(engine))
+
+    await fn(train_input(rollout_id=0, weight_version=0))
+    await asyncio.sleep(0.05)
+    assert data_source.num_get_calls == 4
+
+    engine["version"] = 2
+    await fn(train_input(rollout_id=1, weight_version=2))
+    await asyncio.sleep(0.05)
+    assert data_source.num_get_calls == 6
+
+
+async def test_a_backend_publishing_one_version_per_update_gets_the_lookahead_its_cap_allows(monkeypatch):
+    data_source = FakeDataSource()
+    engine = {"version": 0}
+    args = make_args(rollout_batch_size=2, max_weight_staleness=1, global_batch_size=2)
+    fn = make_fn(monkeypatch, args, data_source, generate=make_version_stamping_generate(engine))
+
+    await fn(train_input(rollout_id=0, weight_version=0))
+    engine["version"] = 1
+    await fn(train_input(rollout_id=1, weight_version=1))
+    await asyncio.sleep(0.05)
+
+    assert data_source.num_get_calls == 6
+
+
+async def test_a_producer_ahead_of_the_trainer_generates_no_group_that_goes_stale(monkeypatch):
+    engine = {"version": 0}
+    args = make_args(
+        rollout_batch_size=2, max_weight_staleness=2, global_batch_size=2, async_data_buffer_capacity_factor=2.0
+    )
+    fn = make_fn(monkeypatch, args, FakeDataSource(), generate=make_version_stamping_generate(engine))
+
+    for rollout_id in range(4):
+        engine["version"] = 2 * rollout_id
+        output = await fn(train_input(rollout_id=rollout_id, weight_version=engine["version"]))
+        await asyncio.sleep(0.02)
+
+        assert output.metrics["rollout/fully_async/stale_groups_filtered"] == 0
+        assert output.metrics["rollout/fully_async/max_staleness"] <= 2
 
 
 async def test_async_max_concurrent_samples_caps_in_flight_groups(monkeypatch):
@@ -2052,7 +2118,7 @@ class TestLifecycle:
         source = FakeDataSource()
         fn = make_fn(monkeypatch, make_args(rollout_batch_size=1), source)
 
-        async def fake_run_eval_datasets(state, cache, *, kv_cache_namespace=None):
+        async def fake_run_eval_datasets(state, cache, *, rollout_id, kv_cache_namespace=None):
             return {}
 
         monkeypatch.setattr(fully_async, "run_eval_datasets", fake_run_eval_datasets)
@@ -2066,7 +2132,7 @@ class TestLifecycle:
         """A failed eval that left the producer paused would stall every later training step."""
         fn = make_fn(monkeypatch, make_args(rollout_batch_size=1), FakeDataSource())
 
-        async def failing_run_eval_datasets(state, cache, *, kv_cache_namespace=None):
+        async def failing_run_eval_datasets(state, cache, *, rollout_id, kv_cache_namespace=None):
             raise RuntimeError("eval exploded")
 
         monkeypatch.setattr(fully_async, "run_eval_datasets", failing_run_eval_datasets)
@@ -2081,7 +2147,7 @@ class TestLifecycle:
         fn = make_fn(monkeypatch, make_args(rollout_batch_size=1), FakeDataSource())
         caches = []
 
-        async def fake_run_eval_datasets(state, cache, *, kv_cache_namespace=None):
+        async def fake_run_eval_datasets(state, cache, *, rollout_id, kv_cache_namespace=None):
             caches.append(cache)
             return {}
 
@@ -2099,7 +2165,7 @@ class TestLifecycle:
         fn = make_fn(monkeypatch, args, FakeDataSource())
         resumed_during_eval = []
 
-        async def fake_run_eval_datasets(state, cache, *, kv_cache_namespace=None):
+        async def fake_run_eval_datasets(state, cache, *, rollout_id, kv_cache_namespace=None):
             resumed_during_eval.append(fn._producer_resumed.is_set())
             return {}
 

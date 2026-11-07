@@ -18,3 +18,17 @@ async def report_then_hang(sandbox_key: str, **kwargs) -> None:
         await asyncio.sleep(3600)
     finally:
         report_sandbox(sandbox_key, status="finished")
+
+
+async def report_custom_phases(metadata: dict, **kwargs) -> str:
+    from miles.utils.lifecycle import TrajectoryIdentity, report_trajectory_phase, trajectory_phase
+
+    identity = TrajectoryIdentity(**metadata["miles_lifecycle"])
+    with trajectory_phase(identity, "setup"):
+        await asyncio.sleep(0)
+    with trajectory_phase(identity, "env_step", turn=1):
+        with trajectory_phase(identity, "settle", turn=1):
+            await asyncio.sleep(0)
+    report_trajectory_phase(identity, "model_call", 10.0, 12.0, turn=2)
+    report_sandbox("phase-desktop", provider="local")
+    return "reported"

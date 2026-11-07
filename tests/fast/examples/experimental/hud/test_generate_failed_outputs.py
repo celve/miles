@@ -16,7 +16,7 @@ class TestHudFailedOutputs:
     async def test_unusable_episode_returns_a_wrapped_structurally_valid_writeoff(
         self, failed_hud_episode: Callable[[str], SimpleNamespace], outcome: str
     ) -> None:
-        """Every HUD early return preserves the v2 result and the image-bearing failed sample."""
+        """Every HUD early return preserves the v2 result and the image-bearing written-off sample."""
         state = failed_hud_episode(outcome)
         sample = Sample(prompt="question", metadata={"hud_task": {"env": "unit", "id": "task"}})
 
@@ -26,7 +26,7 @@ class TestHudFailedOutputs:
 
         assert isinstance(result, GenerateFnOutput)
         assert result.samples is sample
-        assert sample.status == Sample.Status.FAILED
+        assert sample.status == (Sample.Status.ABORTED if outcome == "no_run" else Sample.Status.FAILED)
         assert sample.remove_sample
         assert sample.tokens == [1, 2, 3]
         assert sample.response_length == 0

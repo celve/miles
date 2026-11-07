@@ -26,6 +26,7 @@ from miles.rollout.base_types import (
 )
 from miles.rollout.data_source import RolloutDataSource
 from miles.rollout.inference_rollout import inference_rollout_common
+from miles.rollout.inference_rollout.compatibility import LegacyRolloutFnAdapter
 from miles.rollout.inference_rollout.inference_rollout_common import GenerateState
 from miles.utils.args.component_rollout import InferenceRuntimeImmutState, InferenceRuntimeMutState
 from miles.utils.audit_utils.event_analyzer.rules.sample_ownership.models import SampleOwnershipViolation
@@ -258,6 +259,7 @@ class TestSetEvalFleetInfo:
             rollout_top_p=1.0,
             save_debug_rollout_data=None,
             sglang_server_concurrency=2,
+            eval_server_concurrency=None,
             wandb_always_use_train_step=False,
         )
         executor._inference_controller_provider = provider
@@ -294,6 +296,27 @@ class TestSetEvalFleetInfo:
             engine_count=2, gpu_count=2
         )
         assert second.generate_state is None
+
+
+    async def test_a_legacy_eval_function_is_refused_when_the_fleet_is_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A legacy fn reads the router from args, which the eval fleet's generate state never reaches."""
+        monkeypatch.setattr(rollout_executor_module, "RolloutExecutorEvalFleet", lambda *args, **kwargs: object())
+
+        def legacy_rollout_fn(args, rollout_id, data_source, evaluation=False):
+            return {}
+
+        executor = RolloutExecutor.__new__(RolloutExecutor)
+        executor.args = Namespace(eval_function_path="cua_lite:generate_rollout")
+        executor._eval_fleet = None
+        executor._inference_controller_provider = None
+        executor.eval_generate_rollout = LegacyRolloutFnAdapter(
+            RolloutFnConstructorInput(args=executor.args, data_source=None), legacy_rollout_fn
+        )
+        info = EvalFleetInfo(router=HostAndPort(host="10.0.0.2", port=31000), num_gpus=1, num_gpus_per_engine=1)
+
+        with pytest.raises(ValueError, match="--eval-num-gpus"):
+            await executor.set_eval_fleet_info(info)
+        assert executor._eval_fleet is None
 
 
 class _FakeDataSource(RolloutDataSource):

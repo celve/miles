@@ -39,14 +39,14 @@ async def _echo_generate(input: GenerateFnInput) -> GenerateFnOutput:
 
 
 class TestInferenceRolloutFnKvCacheNamespace:
-    def _make_fn(self, monkeypatch, generate_function=_echo_generate, *, partition: bool = True):
+    def _make_fn(self, monkeypatch, generate_function=_echo_generate, *, partition: bool = True, eval_record_dir=None):
         captured: dict[str, str | None] = {}
 
         async def fake_generate_rollout_async(state, rollout_id, get_samples, *, kv_cache_namespace=None):
             captured["kv_cache_namespace"] = kv_cache_namespace
             return SimpleNamespace(), []
 
-        args = SimpleNamespace(**make_eval_args(namespaced_radix_cache=partition))
+        args = SimpleNamespace(**make_eval_args(namespaced_radix_cache=partition, eval_record_dir=eval_record_dir))
         monkeypatch.setattr(
             inference_rollout_common,
             "GenerateState",
@@ -106,6 +106,22 @@ class TestInferenceRolloutFnKvCacheNamespace:
         await fn(RolloutFnEvalInput(rollout_id=4, invocation_id="eval-call"))
 
         assert recorder.take_stamps() == {None}
+
+    async def test_recording_hands_each_eval_sample_its_eval_points_directory(self, monkeypatch):
+        recorder = StampRecordingGenerate()
+        fn, _ = self._make_fn(monkeypatch, recorder, eval_record_dir="/records")
+
+        await fn(RolloutFnEvalInput(rollout_id=4, invocation_id="eval-call"))
+
+        assert [metadata["eval_record_dir"] for metadata in recorder.metadata] == ["/records/eval_4/fake_ds"] * 2
+
+    async def test_without_recording_eval_samples_carry_no_record_directory(self, monkeypatch):
+        recorder = StampRecordingGenerate()
+        fn, _ = self._make_fn(monkeypatch, recorder)
+
+        await fn(RolloutFnEvalInput(rollout_id=4, invocation_id="eval-call"))
+
+        assert recorder.metadata == [{}, {}]
 
 
 class TestFailedGenerationHandsOverItsOutputStoreRefs:

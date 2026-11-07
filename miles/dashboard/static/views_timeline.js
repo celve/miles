@@ -18,6 +18,7 @@ const PHASE_COLORS = {
   log_probs: "#8b7bd8",
   ref_log_probs: "#4a3aa7",
   data_preprocess: "#eda100",
+  multimodal_rebuild: "#157f91",
   train_wait: "#efe8dc",
   update_weights: "#e87ba4",
   ref_model_update: "#008300",

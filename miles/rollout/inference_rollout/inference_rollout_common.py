@@ -255,6 +255,7 @@ class InferenceRolloutFn(BaseRolloutFn):
         results = await run_eval_datasets(
             state,
             self.eval_prompt_dataset_cache,
+            rollout_id=input.rollout_id,
             kv_cache_namespace=compute_kv_cache_namespace(state.args, input),
         )
         return RolloutFnEvalOutput(data=results)
