@@ -1,0 +1,24 @@
+# Reward pools for scoring generated clips, for --reward-pool-config and evaluate.py. Model paths follow /root/models.
+- name: videoalign
+  scorer_path: miles.rollout.rm_hub.video.videoalign.VideoAlignScorer
+  scorer_kwargs:
+    checkpoint_path: /root/models/VideoReward
+    base_model_path: /root/models/Qwen2-VL-2B-Instruct
+  num_workers: 1
+  uses_gpu: true
+  batch_size: 4
+- name: judge
+  scorer_path: miles.rollout.rm_hub.video.vlm_judge.VlmJudgeScorer
+  scorer_kwargs:
+    model_path: /root/models/Qwen3-VL-8B-Instruct
+  num_workers: 1
+  uses_gpu: true
+  batch_size: 4
+- name: pickscore
+  scorer_path: miles.rollout.rm_hub.video.pickscore.VideoPickScoreScorer
+  scorer_kwargs:
+    processor_path: /root/models/CLIP-ViT-H-14-laion2B-s32B-b79K
+    model_path: /root/models/PickScore_v1
+  num_workers: 1
+  uses_gpu: true
+  batch_size: 8

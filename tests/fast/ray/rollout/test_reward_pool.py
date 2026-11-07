@@ -34,7 +34,7 @@ class _Handle:
         if self.cell_index in self.cluster.dead:
             raise WorkerUnreachableError("actor died")
         self.cluster.calls.append((self.cell_index, list(prompts)))
-        return [float(len(prompt)) for prompt in prompts]
+        return [None if prompt == "unscorable" else len(prompt) for prompt in prompts]
 
     async def sleep(self):
         self._lifecycle("sleep")
@@ -113,6 +113,12 @@ async def test_batches_go_round_robin_across_calls_and_scores_keep_input_order()
 
     assert first == [1.0, 2.0, 3.0] and second == [4.0, 1.0]
     assert sorted(cluster.calls) == [(0, ["a", "bb"]), (0, ["dddd", "e"]), (1, ["ccc"])]
+
+
+async def test_a_scorer_none_stays_none_so_the_missing_reward_filter_can_drop_it():
+    client = _client(_Cluster(num_workers=1), _config(num_workers=1))
+
+    assert await client.score([None] * 3, ["a", "unscorable", "ccc"]) == [1.0, None, 3.0]
 
 
 async def test_a_worker_that_died_is_restarted_and_scores_the_same_batch():

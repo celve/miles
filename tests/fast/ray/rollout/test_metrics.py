@@ -771,6 +771,23 @@ class TestEvalMetrics:
         assert payload["eval/gsm8k"] == 0.5
         assert not any(key.startswith("alpha/") for key in payload)
 
+    def test_an_eval_group_whose_rewards_are_missing_counts_as_no_uniform_group(self, monkeypatch):
+        """A scorer that could not score a clip leaves its eval sample's reward None."""
+        calls: list[tuple[dict, str]] = []
+        monkeypatch.setattr(
+            "miles.ray.rollout.metrics.tracking.log",
+            lambda _args, payload, step_key: calls.append((payload, step_key)),
+        )
+        args = make_args(log_passrate=False, advantage_estimator="grpo", reward_key=None)
+        samples = make_samples_grouped(2, 2, rewards=[None, None, 1.0, 1.0])
+
+        log_eval_rollout_data(0, args, {"video": {"rewards": [None, None, 1.0, 1.0], "samples": samples}})
+
+        [(payload, _)] = calls
+        assert payload["eval/video-none_reward_ratio"] == 0.5
+        assert payload["eval/video/zero_std/count_1.0"] == 1
+        assert payload["eval/video/zero_std/percentage"] == 0.5
+
 
 class TestObservedGpuThroughput:
     @pytest.mark.parametrize("gpu_count", [0, 4])
