@@ -34,9 +34,7 @@ def read_clip(path: str) -> Clip | None:
     return Clip(frames=torch.from_numpy(np.stack(frames)).permute(0, 3, 1, 2), fps=fps)
 
 
-def score_clips(
-    paths: list[str], requests: list[str], score_clip: Callable[[Clip, str], float]
-) -> list[float | None]:
+def score_clips(paths: list[str], requests: list[str], score_clip: Callable[[Clip, str], float]) -> list[float | None]:
     """`score_clip(clip, request)` for each clip, one at a time, so a clip that cannot be read or whose scoring
     raises scores None while the others keep their scores."""
     scores = []

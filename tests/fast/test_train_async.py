@@ -231,13 +231,9 @@ class TestColocatedRewardPools:
         self, monkeypatch: pytest.MonkeyPatch
     ):
         events: list[str] = []
-        args = _make_args(
-            fully_async=True,
-            colocate=True,
-            offload_rollout=True,
-            num_rollout=2,
-            reward_pools=[SimpleNamespace(needs_offload=True)],
-        )
+        args = _make_args(fully_async=True, colocate=True, offload_rollout=True, num_rollout=2)
+        # Set after parsing, which declares the run's pools from its flags.
+        args.reward_pools = [SimpleNamespace(needs_offload=True)]
         _install_driver_fakes(monkeypatch, args, events)
 
         await with_disposer(train_async_driver.train, _startup_info(args))
@@ -252,13 +248,9 @@ class TestColocatedRewardPools:
         self, monkeypatch: pytest.MonkeyPatch
     ):
         events: list[str] = []
-        args = _make_args(
-            fully_async=True,
-            colocate=True,
-            offload_rollout=True,
-            num_rollout=2,
-            reward_pools=[SimpleNamespace(needs_offload=False)],
-        )
+        args = _make_args(fully_async=True, colocate=True, offload_rollout=True, num_rollout=2)
+        # Set after parsing, which declares the run's pools from its flags.
+        args.reward_pools = [SimpleNamespace(needs_offload=False)]
         _install_driver_fakes(monkeypatch, args, events)
 
         await with_disposer(train_async_driver.train, _startup_info(args))
