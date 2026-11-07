@@ -111,6 +111,21 @@ class FakeInferenceController:
     async def onload_kv(self) -> None:
         self.events.append("onload_kv")
 
+    async def offload_kv(self) -> None:
+        self.events.append("offload_kv")
+
+    async def offload_weights(self) -> None:
+        self.events.append("offload_weights")
+
+    async def pause_generation(self, *, mode: str) -> None:
+        self.events.append("pause_generation")
+
+    async def flush_cache(self) -> None:
+        self.events.append("flush_cache")
+
+    async def continue_generation(self) -> None:
+        self.events.append("continue_generation")
+
     async def onload_weights(self) -> None:
         self.events.append("onload_weights")
 

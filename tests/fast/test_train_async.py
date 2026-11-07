@@ -226,6 +226,46 @@ class TestPipelinedGeneration:
         assert components.actor_model.trained == [0, 1, 2]
 
 
+class TestColocatedRewardPools:
+    async def test_a_fully_async_pool_sharing_training_gpus_sleeps_with_the_engines_and_wakes_before_generation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        events: list[str] = []
+        args = _make_args(
+            fully_async=True,
+            colocate=True,
+            offload_rollout=True,
+            num_rollout=2,
+            reward_pools=[SimpleNamespace(needs_offload=True)],
+        )
+        _install_driver_fakes(monkeypatch, args, events)
+
+        await with_disposer(train_async_driver.train, _startup_info(args))
+
+        first = events[: events.index("actor_train:0")]
+        assert first.index("offload_weights") < first.index("offload_reward_pools")
+        after = events[events.index("actor_train:0") :]
+        assert after.index("onload_kv") < after.index("onload_reward_pools") < after.index("continue_generation")
+        assert events.count("offload_reward_pools") == events.count("onload_reward_pools") == 2
+
+    async def test_a_run_whose_pools_never_share_training_gpus_never_asks_them_to_sleep(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        events: list[str] = []
+        args = _make_args(
+            fully_async=True,
+            colocate=True,
+            offload_rollout=True,
+            num_rollout=2,
+            reward_pools=[SimpleNamespace(needs_offload=False)],
+        )
+        _install_driver_fakes(monkeypatch, args, events)
+
+        await with_disposer(train_async_driver.train, _startup_info(args))
+
+        assert "offload_reward_pools" not in events and "onload_reward_pools" not in events
+
+
 class TestCriticValuesHandoff:
     async def test_async_critic_outputs_reach_the_actor_and_are_released_after_training(
         self, monkeypatch: pytest.MonkeyPatch

@@ -97,6 +97,8 @@ async def train(startup_info: OrchestratorStartupInfo, *, disposer: Disposer):
         await inference_controller.prepare_rollout(rollout_id)
         return await rollout_executor.get(rollout_id)
 
+    offloads_reward_pools = any(pool.needs_offload for pool in args.reward_pools)
+
     # async train loop.
     rollout_data_next_future = await eager_create_task(prepare_and_generate(args.start_rollout_id))
     for rollout_id in range(args.start_rollout_id, args.num_rollout):
@@ -116,6 +118,8 @@ async def train(startup_info: OrchestratorStartupInfo, *, disposer: Disposer):
             if args.offload_rollout:
                 await inference_controller.offload_kv()
                 await inference_controller.offload_weights()
+            if offloads_reward_pools:
+                await rollout_executor.offload_reward_pools()
         else:
             # Start the next rollout early.
             if has_next_rollout and not defer_next_drain:
@@ -162,6 +166,8 @@ async def train(startup_info: OrchestratorStartupInfo, *, disposer: Disposer):
         if args.colocate:
             if args.offload_rollout:
                 await inference_controller.onload_kv()
+            if offloads_reward_pools:
+                await rollout_executor.onload_reward_pools()
             await inference_controller.continue_generation()
             if rollout_id + 1 < args.num_rollout:
                 rollout_data_next_future = await eager_create_task(prepare_and_generate(rollout_id + 1))
