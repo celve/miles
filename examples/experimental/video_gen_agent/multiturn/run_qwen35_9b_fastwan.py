@@ -179,6 +179,7 @@ def _train_args(args: ScriptArgs) -> str:
         # Generation dominates an episode, so every episode of a round is in flight at once (LIN-2634).
         f"--sglang-server-concurrency {args.rollout_batch_size * args.n_samples_per_prompt} "
         f"--custom-rollout-log-function-path {AGENT}.multiturn.episode_metrics.log_episodes "
+        f"--custom-eval-rollout-log-function-path {AGENT}.multiturn.episode_metrics.log_eval_episodes "
     )
 
     multimodal_args = (

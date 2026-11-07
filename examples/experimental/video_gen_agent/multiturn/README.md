@@ -44,7 +44,7 @@ python -m examples.experimental.video_gen_agent.multiturn.fold_sweep --engine-ur
 
 ## What to read in a run
 
-- `eval/heldout`: the planner on the held-out requests, greedy; step 0 is the untrained planner.
+- `eval/heldout`: the planner on the held-out requests, greedy; step 0 is the untrained planner. It is the mean episode reward: [`episode_metrics.py`](episode_metrics.py)'s eval log hook keeps one row per episode, so episodes that folded into more branches do not weigh more. In training, `episode/reward` is the same per-episode mean, while `rollout/` rewards count each branch.
 - `perf/multimodal_rebuild_time`: the trainer's wait for its media in a step, the number to compare with and without `--no-feature-cache`.
 - `train/train_rollout_logprob_abs_diff`: the train/rollout log-prob gap, which TimeLens keeps near 0.006.
 - `episode/prompt_tokens_per_turn`, `episode/peak_prompt_tokens`, `episode/turn_seconds`: each policy call's prompt, as the engine counted it, and its wall time, per episode; with `episode/folded_clips`, `episode/recalls`, `episode/shots_submitted` and `episode/samples` (branches per episode), from [`episode_metrics.py`](episode_metrics.py), the rollout log hook, which also prunes the feature cache.

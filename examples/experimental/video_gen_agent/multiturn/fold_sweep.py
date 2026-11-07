@@ -45,7 +45,7 @@ def make_clips(clip_dir: str, count: int, *, width: int, height: int, frames: in
     Path(clip_dir).mkdir(parents=True, exist_ok=True)
     paths = []
     for index in range(count):
-        path = Path(clip_dir) / f"shot_{index}_{width}x{height}_{frames}f.mp4"
+        path = Path(clip_dir) / f"shot_{index}_{width}x{height}_{frames}f_{fps}fps.mp4"
         if not path.exists():
             with av.open(str(path), mode="w", format="mp4") as container:
                 stream = container.add_stream("libx264", rate=fps)

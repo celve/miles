@@ -1,6 +1,8 @@
 import json
 import os
 
+import av
+
 import pytest
 from examples.experimental.video_gen_agent.multiturn import fold_sweep
 from fastapi import FastAPI, Request
@@ -55,3 +57,11 @@ async def test_each_k_replays_the_same_episode_and_folding_cuts_the_prompt(engin
     assert summary["peak_prompt_tokens"] == 1100 and summary["prompt_tokens_total"] == 4300
     assert json.loads(json.dumps(summary))["turns"] == kept
     assert "AGENT_VIDEO_GEN_KEEP_CLIPS" not in os.environ
+
+
+def test_synthetic_clips_take_the_requested_frame_rate(tmp_path):
+    (at_24,) = fold_sweep.make_clips(str(tmp_path), 1, width=64, height=48, frames=9, fps=24)
+    (at_8,) = fold_sweep.make_clips(str(tmp_path), 1, width=64, height=48, frames=9, fps=8)
+
+    with av.open(at_8) as container:
+        assert at_8 != at_24 and container.streams.video[0].average_rate == 8

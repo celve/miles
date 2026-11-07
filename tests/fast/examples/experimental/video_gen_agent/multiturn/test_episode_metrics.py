@@ -18,8 +18,8 @@ def _samples():
         [500, None], [0.5, 1.5], folded=0, recalls=0, submitted={"clip_id": "clip_1", "path": "/kept/b.mp4"}
     )
     # A folded episode comes back as one sample per branch, each with the episode's record.
-    return [Sample(metadata={"session_id": "a", "video_gen": folded}) for _ in range(3)] + [
-        Sample(metadata={"session_id": "b", "video_gen": plain}),
+    return [Sample(reward=1.0, metadata={"session_id": "a", "video_gen": folded}) for _ in range(3)] + [
+        Sample(reward=0.0, metadata={"session_id": "b", "video_gen": plain}),
         Sample(metadata={"session_id": "c"}),
     ]
 
@@ -30,6 +30,7 @@ def test_each_episode_counts_once_however_many_branches_it_left():
         "episode/folded_clips": 1.0,
         "episode/recalls": 0.5,
         "episode/samples": 2.0,
+        "episode/reward": 0.5,
         "episode/prompt_tokens_per_turn": 1250.0,
         "episode/peak_prompt_tokens": 1750.0,
         "episode/shots_submitted": 2.0,

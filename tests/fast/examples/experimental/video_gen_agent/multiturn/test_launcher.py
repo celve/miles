@@ -5,10 +5,14 @@ from examples.experimental.video_gen_agent.multiturn.run_qwen35_9b_fastwan impor
 from tests.fast.fixtures.args_fixtures import parse_megatron_test_config
 from transformers import Qwen3_5Config
 
+from miles.ray.rollout import metrics
 from miles.utils.args.custom_view import compute_custom_function_config
+from miles.utils.types import Sample
 
 
-def test_the_launchers_layout_parses_with_the_generator_and_eval_engine_on_gpus_of_their_own(monkeypatch, tmp_path):
+@pytest.fixture
+def recipe_config(monkeypatch, tmp_path):
+    """The launcher's argv, parsed by Miles against a stand-in Qwen3.5 config."""
     monkeypatch.delenv("WANDB_API_KEY", raising=False)
     # Megatron probes the GPU architecture for TP > 1; a CPU host has none.
     monkeypatch.setattr("megatron.training.arguments.get_device_arch_version", lambda: 10)
@@ -16,8 +20,11 @@ def test_the_launchers_layout_parses_with_the_generator_and_eval_engine_on_gpus_
     text |= {"rms_norm_eps": 1e-5, "tie_word_embeddings": True}
     Qwen3_5Config(text_config=text).save_pretrained(tmp_path / "Qwen3.5-9B")
     args = ScriptArgs(run_id="test", model_dir=str(tmp_path))
+    return parse_megatron_test_config("--ffn-hidden-size", "256", *shlex.split(_train_args(args)))
 
-    config = parse_megatron_test_config("--ffn-hidden-size", "256", *shlex.split(_train_args(args)))
+
+def test_the_launchers_layout_parses_with_the_generator_and_eval_engine_on_gpus_of_their_own(recipe_config):
+    config = recipe_config
 
     policy, generator, eval_model = config.sglang.models
     assert [group.engine_kind for group in generator.server_groups] == ["diffusion"]
@@ -41,6 +48,7 @@ def test_the_launchers_layout_parses_with_the_generator_and_eval_engine_on_gpus_
     assert [dataset.name for dataset in config.eval_datasets] == ["heldout"]
     # Each fold opens a branch with a different request; the default picker keeps it as a sample.
     assert config.session_sample_picker_path == "miles.rollout.session.v2.picker_hub.drop_same_prompt_retries"
+    assert config.custom_eval_rollout_log_function_path.path.endswith("multiturn.episode_metrics.log_eval_episodes")
     log_hook = config.custom_rollout_log_function_path
     assert log_hook.path.endswith("multiturn.episode_metrics.log_episodes")
     # The hook prunes the cache through the view of the args Miles hands it.
@@ -80,3 +88,22 @@ def test_the_feature_cache_is_on_by_default_and_shared_under_the_run():
 def test_a_gpu_split_that_does_not_fill_the_node_is_refused():
     with pytest.raises(AssertionError, match="adds up to 7, not 8"):
         ScriptArgs(eval_gpus=0)
+
+
+def _eval_sample(session_id: str, reward: float) -> Sample:
+    sample = Sample(tokens=[1, 2, 3], response_length=1, loss_mask=[1], reward=reward, status=Sample.Status.COMPLETED)
+    sample.metadata = {"session_id": session_id}
+    return sample
+
+
+def test_heldout_reward_counts_each_episode_once_however_many_branches_folding_left(recipe_config, monkeypatch):
+    logged = []
+    monkeypatch.setattr(metrics.tracking, "log", lambda args, log_dict, step_key: logged.append(log_dict))
+    # Episode "a" scored 1 and folded twice (three branches); episode "b" scored 0 and never folded.
+    samples = [_eval_sample("a", 1.0)] * 3 + [_eval_sample("b", 0.0)]
+    data = {"heldout": {"rewards": [s.reward for s in samples], "truncated": [False] * 4, "samples": samples}}
+
+    metrics.log_eval_rollout_data(0, recipe_config, data)
+
+    (log_dict,) = logged
+    assert log_dict["eval/heldout"] == 0.5
