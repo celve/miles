@@ -2030,6 +2030,24 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=1e-4,
                 help="The threshold for Off-Policy Sequence Masking (OPSM).",
             )
+            parser.add_argument(
+                "--use-m2po",
+                action="store_true",
+                default=False,
+                help=(
+                    "Replace PPO's ratio clip with M2PO's second-moment mask (https://arxiv.org/abs/2510.01161): "
+                    "the surrogate is the unclipped ratio times the advantage, and in each micro-batch the "
+                    "trust-region tokens with the largest (log pi_theta/pi_rollout)^2 are masked until the rest "
+                    "average at most --m2po-tau. Needs rollout log-probs; composes with --use-tis or "
+                    "--use-rollout-logprobs. --eps-clip and --eps-clip-high then set only the m2po_ppo_clipfrac metric."
+                ),
+            )
+            parser.add_argument(
+                "--m2po-tau",
+                type=float,
+                default=0.04,
+                help="M2PO's second-moment threshold tau_M2 (0.04 in every experiment of the paper).",
+            )
             return parser
 
         def add_on_policy_distillation_arguments(parser):
@@ -3589,6 +3607,17 @@ def _resolve_sample_ownership_check(args: argparse.Namespace) -> None:
         )
 
 
+def validate_m2po_args(args) -> None:
+    """--use-m2po's launch constraints; compute_trainer_args checks them again after per-trainer overrides."""
+    if not getattr(args, "use_m2po", False):
+        return
+    assert args.loss_type == "policy_loss", "--use-m2po applies to --loss-type policy_loss only."
+    assert args.advantage_estimator != "gspo", "--use-m2po masks tokens, but GSPO's ratio is per sequence."
+    assert args.eps_clip_c is None, "--use-m2po replaces PPO clipping, dual-clip included: drop --eps-clip-c."
+    assert args.m2po_tau > 0, f"--m2po-tau must be positive, got {args.m2po_tau}."
+    assert args.context_parallel_size == 1, "--use-m2po masks a micro-batch's tokens, which CP splits across ranks."
+
+
 def miles_validate_args(args):
     from miles.backends.training_utils.weight_update.session import weight_update_selector
 
@@ -3890,6 +3919,8 @@ def miles_validate_args(args):
 
     if args.use_rollout_logprobs:
         assert not args.use_tis, "use_rollout_logprobs and use_tis cannot be set at the same time."
+
+    validate_m2po_args(args)
 
     if args.get_mismatch_metrics:
         assert (

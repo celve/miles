@@ -86,6 +86,19 @@ def _make_args(megatron_config: str | None = None, **overrides) -> Namespace:
     return Namespace(**{**parser_defaults(), **defaults})
 
 
+class TestM2poPerTrainer:
+    def test_a_trainer_override_cannot_split_m2po_micro_batches_across_cp_ranks(self, tmp_path):
+        path = _write_yaml({"trainers": [{"model_id": "a", "overrides": {"context_parallel_size": 2}}]}, tmp_path)
+
+        with pytest.raises(AssertionError, match="CP splits"):
+            _model_args(_make_args(path, use_m2po=True), model_id="a")
+
+    def test_a_trainer_override_without_m2po_keeps_its_cp(self, tmp_path):
+        path = _write_yaml({"trainers": [{"model_id": "a", "overrides": {"context_parallel_size": 2}}]}, tmp_path)
+
+        assert _model_args(_make_args(path), model_id="a").context_parallel_size == 2
+
+
 class TestResolveMegatronConfig:
     def test_a_run_without_the_flag_synthesizes_a_plain_actor_trainer(self):
         """Legacy single policy runs must keep working, with no model id anywhere downstream."""
