@@ -221,7 +221,7 @@ async def test_the_held_out_eval_scores_the_planner_and_the_raw_request_baseline
         for dataset in _EVAL_DATASETS
     }
 
-    results = await run_eval_datasets(fn.state, cache)
+    results = await run_eval_datasets(fn.state, cache, rollout_id=0)
 
     assert {name: result["rewards"] for name, result in results.items()} == {"heldout": [5.0], "heldout_raw": [5.0]}
     assert sorted(body["prompt"] for body in seen) == ["a cat", "a tabby cat"]
