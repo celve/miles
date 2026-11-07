@@ -53,6 +53,7 @@ Not fully verified — for experimental and development use.
 - **[tau-bench](./experimental/tau-bench)**: Training in an agentic multi-turn tool use environment (Tau-bench).
 - **[verifiers](./experimental/verifiers)**: Training on a Prime Intellect Verifiers environment instead of a Miles prompt dataset.
 - **[video_reward](./experimental/video_reward)**: Score generated video against its request on GPU reward pools from a text-policy run, and calibrate the scorers on labelled clip pairs.
+- **[video_gen_agent/phase0](./experimental/video_gen_agent/phase0)**: Single-turn planner RL: a text planner rewrites each video request into one prompt for a frozen generator, trained with GRPO on a judge's score of the clip.
 
 <!-- docs:exclude:start -->
 ## These READMEs are the documentation site
