@@ -328,7 +328,7 @@ class InferenceEngineSpec(BaseCommandSpec):
     def env_var(self, ctx: WorkerLaunchContext) -> dict[str, str]:
         env_vars = compute_inference_engine_env_vars(ctx.args)
         if self.server_group_config.engine_kind == "diffusion":
-            env_vars |= compute_diffusion_engine_env_vars(ctx.args)
+            env_vars |= compute_diffusion_engine_env_vars(ctx.args, update_weights=self.model_cfg.update_weights)
         return env_vars
 
     def launch_command(self, ctx: LaunchCommandContext) -> str:
@@ -349,6 +349,7 @@ class InferenceEngineSpec(BaseCommandSpec):
                 base_gpu_id=ctx.local_gpu_ids[0],
                 num_gpus_per_engine=server_group_config.num_gpus_per_engine,
                 sglang_overrides=server_group_config.overrides,
+                update_weights=self.model_cfg.update_weights,
                 nccl_port=ctx.self_addrs["nccl"].port,
                 host=ctx.self_addrs["primary"].host,
                 port=ctx.self_addrs["primary"].port,

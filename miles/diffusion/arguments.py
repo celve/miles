@@ -280,3 +280,59 @@ def validate_diffusion_sglang_config(sglang) -> None:
                 f"--model-kind diffusion serves regular single-GPU engine groups, got {group.worker_type.value} "
                 f"with {group.num_gpus_per_engine} GPUs per engine"
             )
+
+
+def validate_frozen_diffusion_models(config) -> None:
+    """A text run may serve diffusion models frozen, as tools, from regular engine groups on GPUs of their own."""
+    for index, model in enumerate(config.sglang.models):
+        kinds = {group.engine_kind for group in model.server_groups}
+        if "diffusion" not in kinds:
+            continue
+        unsupported = [
+            what
+            for what, violated in [
+                (
+                    "update_weights: true; a text run trains no diffusion model, so set update_weights: false",
+                    model.update_weights,
+                ),
+                ("engine_kind text groups beside its diffusion groups", len(kinds) > 1),
+                # The first model's router is the run's default router, which the text rollout sends its requests to.
+                ("the first place in --sglang-config, whose router serves the text policy", index == 0),
+                ("a router other than --use-miles-router", not config.use_miles_router),
+                *(
+                    (f"a {group.worker_type.value} group; diffusion engines serve as regular", True)
+                    for group in model.server_groups
+                    if group.worker_type != WorkerType.REGULAR
+                ),
+                *(
+                    (f"an engine on GPUs {first}-{last}, across nodes of {config.num_gpus_per_node} GPUs", True)
+                    for first, last in _engine_gpu_ranges(model, config)
+                    if first // config.num_gpus_per_node != last // config.num_gpus_per_node
+                ),
+                *(
+                    ("GPUs shared with training, where the engines would have to sleep", True)
+                    for group in model.server_groups
+                    if group.needs_offload
+                ),
+            ]
+            if violated
+        ]
+        if unsupported:
+            raise ValueError(
+                f"model {model.name!r} serves engine_kind diffusion in a text run, which does not support: "
+                + "; ".join(unsupported)
+            )
+
+
+def _engine_gpu_ranges(model, config):
+    """First and last GPU of each of the model's engines in this deployment's placement group."""
+    # Deferred: the placement module imports the Ray orchestration stack, which argument parsing otherwise avoids.
+    from miles.ray.placement_group import _get_placement_group_layout
+
+    # engine_main launches one server per engine, so an engine sees only the GPUs of the node it starts on.
+    _, rollout_offset = _get_placement_group_layout(config)
+    for group_index, group in enumerate(model.server_groups):
+        scaling = config.sglang_scaling.group(model_name=model.name, group_index=group_index)
+        start = rollout_offset + scaling.gpu_offset
+        for first in range(start, start + scaling.num_gpus, group.num_gpus_per_engine):
+            yield first, first + group.num_gpus_per_engine - 1

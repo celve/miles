@@ -24,7 +24,7 @@ def _args(**overrides):
     return SimpleNamespace(**(values | overrides))
 
 
-def _launch(overrides, **args):
+def _launch(overrides, update_weights=True, **args):
     argv = shlex.split(
         compute_diffusion_engine_launch_cmd(
             _args(**args),
@@ -32,6 +32,7 @@ def _launch(overrides, **args):
             base_gpu_id=1,
             num_gpus_per_engine=1,
             sglang_overrides=overrides,
+            update_weights=update_weights,
             nccl_port=15001,
             host="[::1]",
             port=15000,
@@ -100,18 +101,6 @@ def test_a_cell_picks_its_client_from_its_engine_kind():
 
     assert client_class("diffusion") is DiffusionApiClient
     assert client_class("text") is SGLangApiClient
-
-
-def test_a_text_run_rejects_a_diffusion_group(tmp_path):
-    from tests.fast.fixtures.args_fixtures import parse_fsdp_test_config
-    from tests.fast.ray.rollout.conftest import make_sglang_config_yaml
-
-    config_path = tmp_path / "sglang.yaml"
-    config_path.write_text(
-        make_sglang_config_yaml(server_groups=[{"worker_type": "regular", "num_gpus": 1, "engine_kind": "diffusion"}])
-    )
-    with pytest.raises(ValueError, match="engine_kind diffusion"):
-        parse_fsdp_test_config("--rollout-num-gpus", "1", "--sglang-config", str(config_path))
 
 
 @dataclasses.dataclass
