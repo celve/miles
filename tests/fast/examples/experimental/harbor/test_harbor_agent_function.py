@@ -336,6 +336,25 @@ def test_computer_1_leaves_an_unset_temperature_to_the_session(tasks_dir):
     assert cfg.agent.kwargs["temperature"] is None
 
 
+def test_a_samples_turn_cap_wins_over_the_launch_default(tasks_dir, monkeypatch):
+    monkeypatch.setenv("HARBOR_AGENT_MAX_ITERATIONS", "30")
+    assert _computer_1_config().agent.kwargs["max_turns"] == 30
+    assert _computer_1_config(max_turns=120).agent.kwargs["max_turns"] == 120
+
+
+def test_a_turn_cap_for_a_binding_without_one_is_refused(tasks_dir):
+    with pytest.raises(ValueError, match="takes no max_turns"):
+        haf.build_trial_config({"instance_id": "task-1", "agent_name": "mini-swe-agent", "max_turns": 9}, "http://s/v1", {})
+
+
+def test_a_samples_environment_kwargs_win_per_key(tasks_dir, monkeypatch):
+    monkeypatch.setenv("HARBOR_ENV_KWARGS", '{"prebuilt_template_id": "default-tpl", "sandbox_timeout_secs": 600}')
+    cfg = _computer_1_config(harbor_env_kwargs={"prebuilt_template_id": "lin2699-cw-pymol"})
+    assert cfg.environment.kwargs == {"prebuilt_template_id": "lin2699-cw-pymol", "sandbox_timeout_secs": 600}
+    with pytest.raises(ValueError, match="JSON object"):
+        _computer_1_config(harbor_env_kwargs="lin2699-cw-pymol")
+
+
 def test_computer_1_never_receives_max_seq_len(tasks_dir, monkeypatch):
     monkeypatch.setenv("HARBOR_MAX_SEQ_LEN", "8192")
 

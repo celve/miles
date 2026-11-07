@@ -219,8 +219,128 @@ def test_the_turn_cap_fallback_carries_one_screen(tmp_path, latest, history_imag
 
 @pytest.mark.parametrize(
     ("kwargs", "match"),
-    [({"screenshot_width": 1280}, "together"), ({"keep_screenshots": 0}, "at least 1")],
+    [
+        ({"screenshot_width": 1280}, "together"),
+        ({"keep_screenshots": 0}, "at least 1"),
+        ({"keep_turns": 0}, "at least 1"),
+        ({"loop_limit": 1}, "at least 2"),
+    ],
 )
 def test_inconsistent_settings_are_refused(tmp_path, kwargs, match):
     with pytest.raises(ValueError, match=match):
         _agent(tmp_path, **kwargs)
+
+
+def _reply(action):
+    return {"role": "assistant", "content": f'{{"analysis": "a", "plan": "p", "action": {action}}}'}
+
+
+def _turns(n):
+    messages = [_image_turn("instruction")]
+    for i in range(n):
+        messages += [_reply(f'{{"type": "click", "x": {i}, "y": 0}}'), _image_turn(f"t{i + 1}")]
+    return messages[:-1]
+
+
+def _run_queries(tmp_path, monkeypatch, agent, histories):
+    seen = []
+
+    async def fake_query(self, chat, prompt, *args, **kwargs):
+        seen.append([dict(m) for m in chat.messages])
+
+    monkeypatch.setattr(Computer1, "_query_litellm", fake_query)
+    chat = SimpleNamespace(messages=[])
+    for extra in histories:
+        chat.messages += extra
+        asyncio.run(agent._query_litellm(chat, [_image_turn("now")]))
+    return seen
+
+
+def test_turns_beyond_keep_turns_collapse_to_one_line_each(tmp_path, monkeypatch):
+    agent = _agent(tmp_path, keep_turns=2)
+    seen = _run_queries(tmp_path, monkeypatch, agent, [_turns(4)])
+
+    head, summary, *kept = seen[0]
+    assert head["content"][0]["text"] == "instruction"
+    assert summary["content"].splitlines()[1:] == ['1. {"type":"click","x":0,"y":0}', '2. {"type":"click","x":1,"y":0}']
+    assert [m["role"] for m in kept] == ["user", "assistant", "user", "assistant"]
+    assert '"x": 3' in kept[-1]["content"]
+
+
+def test_the_summary_grows_across_calls_without_renumbering(tmp_path, monkeypatch):
+    agent = _agent(tmp_path, keep_turns=1)
+    later = [_image_turn("t5"), _reply('{"type": "type", "text": "hi"}')]
+    seen = _run_queries(tmp_path, monkeypatch, agent, [_turns(3), later])
+
+    lines = seen[1][1]["content"].splitlines()[1:]
+    assert lines == [f'{i + 1}. {{"type":"click","x":{i},"y":0}}' for i in range(3)]
+    assert len(seen[1]) == 4
+
+
+def test_a_short_history_is_left_alone(tmp_path, monkeypatch):
+    seen = _run_queries(tmp_path, monkeypatch, _agent(tmp_path, keep_turns=3), [_turns(3)])
+    assert seen[0] == _turns(3)
+
+
+def _record_executions(monkeypatch):
+    executed = []
+
+    async def fake_execute(self, action, episode):
+        executed.append(action)
+
+    monkeypatch.setattr(Computer1, "_execute_action", fake_execute)
+    return executed
+
+
+@pytest.mark.parametrize(
+    ("actions", "executed_before_stop"),
+    [
+        ([ComputerAction(type="click", x=5, y=5)] * 5, 4),
+        ([ComputerAction(type="click", x=5, y=5), ComputerAction(type="key", keys=["Tab"])] * 5, 9),
+    ],
+)
+def test_the_action_that_closes_a_loop_is_never_executed(tmp_path, monkeypatch, actions, executed_before_stop):
+    executed = _record_executions(monkeypatch)
+    agent = _agent(tmp_path, loop_limit=5)
+    with pytest.raises(dc.LoopDetected):
+        for action in actions:
+            asyncio.run(agent._execute_action(action, 0))
+    assert len(executed) == executed_before_stop
+    assert agent._early_termination_reason == "loop_detected"
+
+
+@pytest.mark.parametrize(
+    "actions",
+    [[ComputerAction(type="click", x=5, y=5)] * 4, [ComputerAction(type="click", x=i, y=5) for i in range(5)]],
+)
+def test_actions_short_of_a_loop_all_execute(tmp_path, monkeypatch, actions):
+    executed = _record_executions(monkeypatch)
+    agent = _agent(tmp_path, loop_limit=5)
+    for action in actions:
+        asyncio.run(agent._execute_action(action, 0))
+    assert len(executed) == len(actions)
+
+
+def test_a_detected_loop_ends_the_run_without_an_error(tmp_path, monkeypatch):
+    async def looping_run(self, *args, **kwargs):
+        raise dc.LoopDetected("click")
+
+    monkeypatch.setattr(dc.Qwen3VLComputer1, "run", looping_run)
+    asyncio.run(_agent(tmp_path, loop_limit=5).run("task", FakeEnvironment(), SimpleNamespace()))
+
+
+def test_harbors_own_llm_calls_can_be_kept_off_the_policy(tmp_path, monkeypatch):
+    calls = []
+
+    async def fallback(self, instruction):
+        calls.append(instruction)
+
+    monkeypatch.setattr(Computer1, "_maybe_write_final_answer_fallback", fallback)
+    off = _agent(tmp_path, compaction=False, final_answer_fallback=False)
+    asyncio.run(off._maybe_write_final_answer_fallback("task"))
+    assert calls == []
+    assert asyncio.run(off._compactor.maybe_proactively_compact(SimpleNamespace(messages=[]), "p", "task")) is None
+    assert asyncio.run(off._compactor.reactive_compaction(SimpleNamespace(messages=[]), "p", "task")) is None
+
+    asyncio.run(_agent(tmp_path)._maybe_write_final_answer_fallback("task"))
+    assert calls == ["task"]

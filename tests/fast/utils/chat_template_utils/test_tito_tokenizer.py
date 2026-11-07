@@ -967,6 +967,29 @@ class TestMergeTokensBoundary:
         expected = tito.apply_chat_template(new, add_generation_prompt=True, tokenize=True)
         assert (merged == expected) is matches_template
 
+    @pytest.mark.parametrize(
+        "template_kwargs",
+        [{"enable_thinking": False}, {"enable_thinking": False, "add_vision_id": True}],
+    )
+    def test_qwen38_image_turn_after_a_model_stop(self, template_kwargs):
+        tito = get_tito_tokenizer(
+            _get_tokenizer("Qwen/Qwen3.8-27B", TITOTokenizerType.QWEN38_SMALL),
+            tokenizer_type=TITOTokenizerType.QWEN38_SMALL,
+            chat_template_kwargs=template_kwargs,
+        )
+        image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}
+        old = [
+            {"role": "user", "content": [image, {"type": "text", "text": "Screen 1. What next?"}]},
+            {"role": "assistant", "content": "Click Save."},
+        ]
+        new = [*old, {"role": "user", "content": [image, {"type": "text", "text": "Screen 2. What next?"}]}]
+        stopped = tito.apply_chat_template(old[:1], add_generation_prompt=True, tokenize=True)
+        stopped += tito.tokenizer.encode("Click Save.<|im_end|>", add_special_tokens=False)
+
+        merged = tito.merge_tokens(old, new, stopped)
+
+        assert merged == tito.apply_chat_template(new, add_generation_prompt=True, tokenize=True)
+
     # -- GLM47: strip ambiguous boundary tokens --
 
     def test_glm47_strips_observation(self, glm47_tito: GLM47TITOTokenizer):

@@ -1,4 +1,4 @@
-"""GRPO on Qwen3-VL-4B through Harbor's ``computer-1`` CUA agent, one node.
+"""GRPO on Qwen3-VL-4B, or Qwen3.8-27B, through Harbor's ``computer-1`` CUA agent, one node.
 
 Each episode runs one Harbor trial in the rollout worker, pointed at a recording
 proxy in front of Miles's sglang router; the recorded calls become one training
@@ -20,6 +20,8 @@ Needs, before ``execute``:
   PyMuPDF 2.0's import loads ONNX layout models on every core, ~350 CPU-s per trial, which starves a GPU box's harness.
 
 Args:
+    --model-name: ``qwen3-vl-4b`` (default) or ``qwen3.8-27b``, which runs with thinking off, through
+        ``--rollout-path session`` only, with full activation recompute (it has no DeepStack mergers to lose).
     --harbor-env-type: Harbor ``EnvironmentType`` for the trials (required).
     --harbor-tasks-dir: where ``prepare`` writes the generated task directories.
     --harbor-trials-dir: where Harbor writes trial directories on the worker.
@@ -47,6 +49,10 @@ Args:
         when the workers' value, after ``--extra-env-vars``, is above 0, the run refuses
         unless the workers' SGLang clears it on weight updates (celve/sglang 55bdbddf84,
         sgl-project/sglang#47480). 0 runs on an older SGLang.
+    --drop-zero-std-groups: with ``--rollout-path session``, refuse groups whose rewards are all equal, which GRPO
+        gives zero advantage, and keep sampling groups until the batch is full of live ones.
+    --use-tis: correct the train/rollout mismatch with truncated importance sampling instead of taking the PPO ratio
+        against the engine's log-probs (``--use-rollout-logprobs``).
     --media-refs: with ``--rollout-path session``, hand the trainer each retained
         screenshot as a file under ``--output-dir``/media instead of pixel tensors; the
         trainer rebuilds the pixels with SGLang's token-space processor, which the
@@ -60,13 +66,16 @@ Usage:
     python3 scripts/run_qwen3_vl_4b_harbor_cua.py --harbor-env-type e2b --mode eval
     python3 scripts/run_qwen3_vl_4b_harbor_cua.py --harbor-env-type e2b --rollout-path session
     python3 scripts/run_qwen3_vl_4b_harbor_cua.py --harbor-env-type e2b --rollout-path session --media-refs
+    python3 scripts/run_qwen3_vl_4b_harbor_cua.py --model-name qwen3.8-27b --num-gpus-per-node 8 --eval-num-gpus 0 --harbor-env-type e2b \
+        --rollout-path session --skip-prepare --data-dir <train.jsonl and eval.jsonl> --harbor-tasks-dir <task dirs>
 """
 
+import json
 import os
 import shlex
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -76,13 +85,50 @@ from examples.experimental.harbor.launch_common import agentic_pythonpath_dirs, 
 from miles.utils.external_utils import command_utils
 from miles.utils.external_utils.command_utils.common import _pythonpath_with_sources
 
-HF_REPO = "Qwen/Qwen3-VL-4B-Instruct"
-MODEL_NAME = "Qwen3-VL-4B-Instruct"
-WANDB_GROUP = "qwen3-vl-4b-harbor-cua"
 GENERATE_FN = "examples.experimental.harbor_cua.rollout.generate"
-# text_config.rope_theta of Qwen/Qwen3-VL-4B-Instruct; the shared qwen3-4B model args
-# default to 1000000, which is the text model's, not this checkpoint's.
-ROTARY_BASE = 5_000_000
+
+
+@dataclass(frozen=True)
+class _Recipe:
+    hf_repo: str
+    # The text model Megatron loads for this checkpoint, as geo3k's VLM recipe maps it.
+    megatron_model_type: str
+    tito_model: str
+    tensor_model_parallel_size: int
+    # MODEL_ARGS_ROTARY_BASE, where the shared model args' default is not the checkpoint's text_config rope_theta.
+    rotary_base: int | None = None
+    chat_template_kwargs: dict = field(default_factory=dict)
+    # The generate path's recorder and OSWorld runner speak Qwen3-VL only.
+    session_only: bool = False
+    # Qwen3-VL's bridge vision tower inherits recompute and returns its DeepStack features detached, so those mergers
+    # never train under it; a checkpoint without DeepStack can recompute.
+    recompute: bool = False
+
+    @property
+    def model_name(self) -> str:
+        return self.hf_repo.split("/")[-1]
+
+
+_RECIPES = {
+    "qwen3-vl-4b": _Recipe(
+        hf_repo="Qwen/Qwen3-VL-4B-Instruct",
+        megatron_model_type="qwen3-4B",
+        tito_model="qwen3_vl",
+        tensor_model_parallel_size=2,
+        # The shared qwen3-4B model args default to 1000000, which is the text model's, not this checkpoint's.
+        rotary_base=5_000_000,
+    ),
+    "qwen3.8-27b": _Recipe(
+        hf_repo="Qwen/Qwen3.8-27B",
+        megatron_model_type="qwen3.8-27B",
+        tito_model="qwen38small",
+        tensor_model_parallel_size=4,
+        # computer-1 replays replies without their reasoning, so a thinking turn would never match the stored one.
+        chat_template_kwargs={"enable_thinking": False},
+        session_only=True,
+        recompute=True,
+    ),
+}
 _FIND_SGLANG = (
     "import importlib.util; s = importlib.util.find_spec('sglang'); "
     "print(next(iter(s.submodule_search_locations or []), '') if s else '')"
@@ -91,6 +137,7 @@ _FIND_SGLANG = (
 
 @dataclass
 class ScriptArgs(command_utils.ExecuteTrainConfig):
+    model_name: Literal["qwen3-vl-4b", "qwen3.8-27b"] = "qwen3-vl-4b"
     num_gpus_per_node: int = 2
     num_rollout: int = 30
     rollout_batch_size: int = 4
@@ -142,6 +189,10 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     eval_server_concurrency: int = 32
     freeze_vision_model: Literal["auto", "on", "off"] = "auto"
     media_refs: bool = False
+    drop_zero_std_groups: bool = False
+    # Truncated importance sampling against the engine's log-probs on a recomputed old policy, in place of
+    # --use-rollout-logprobs (Miles refuses the two together).
+    use_tis: bool = False
     # Keeps the resent screenshot's ViT embedding (~42 MB at 1080p) for 64 desktops.
     vlm_cache_size_mb: int = 4096
     # megatron by default because LIN-2046 measured FSDP training Qwen3-VL with linear
@@ -149,15 +200,24 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     # three-image sample) while megatron-bridge reconstructs the 3-D positions itself.
     # fsdp stays selectable for throughput and plumbing work, never for a result.
     backend: Literal["megatron", "fsdp"] = "megatron"
-    tensor_model_parallel_size: int = 2
+    # Empty takes the recipe's.
+    tensor_model_parallel_size: int | None = None
     skip_prepare: bool = False
     eval_interval: int = 5
     wandb_project: str = "miles-harbor-cua"
     extra_args: str = ""
 
     @property
+    def recipe(self) -> _Recipe:
+        return _RECIPES[self.model_name]
+
+    @property
     def model_path(self) -> str:
-        return f"{self.model_dir}/{MODEL_NAME}"
+        return f"{self.model_dir}/{self.recipe.model_name}"
+
+    @property
+    def tensor_parallel(self) -> int:
+        return self.tensor_model_parallel_size or self.recipe.tensor_model_parallel_size
 
     @property
     def global_batch_size(self) -> int:
@@ -192,7 +252,7 @@ def prepare(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
     """``harbor_env`` comes from ``main``; warming needs the same backend as the run."""
     U = args.create_backend()
     U.exec_command_cpu(f"mkdir -p {args.model_dir}")
-    U.exec_command_cpu(f"hf download {HF_REPO} --local-dir {args.model_path}")
+    U.exec_command_cpu(f"hf download {args.recipe.hf_repo} --local-dir {args.model_path}")
     U.exec_command_cpu(
         f"cd {command_utils.repo_base_dir} && python -m examples.experimental.harbor_cua.make_harbor_cua_tasks "
         f"--tasks-dir {args.harbor_tasks_dir} --data-dir {args.data_dir} "
@@ -234,7 +294,12 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
         # carries instance_id, family, variant and split onto Sample.metadata
         "--metadata-key metadata "
         "--apply-chat-template "
-        "--rollout-shuffle "
+        + (
+            f"--apply-chat-template-kwargs {shlex.quote(json.dumps(args.recipe.chat_template_kwargs))} "
+            if args.recipe.chat_template_kwargs
+            else ""
+        )
+        + "--rollout-shuffle "
         f"--num-rollout {args.rollouts} "
         f"--rollout-batch-size {args.rollout_batch_size} "
         f"--n-samples-per-prompt {args.n_samples_per_prompt} "
@@ -247,11 +312,12 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
     if args.rollout_path == "session":
         cua_args = (
             agentic_train_args(
-                tito_model="qwen3_vl",
+                tito_model=args.recipe.tito_model,
                 session_server_workers=args.session_server_workers,
                 session_images=True,
                 session_server_external_host=args.session_server_external_host,
                 agent_worker_url=args.agent_worker_url,
+                drop_zero_std_groups=args.drop_zero_std_groups,
             )
             # The session server's per-sample cap, where the generate path caps by --rollout-max-context-len.
             + "--max-seq-len 32768 "
@@ -306,9 +372,9 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
         "--entropy-coef 0.00 "
         "--eps-clip 0.2 "
         "--eps-clip-high 0.28 "
-        # The recorder's whole purpose: the importance ratio is taken against the
+        # Without --use-tis, the recorder's whole purpose: the importance ratio is taken against the
         # logprobs the engine reported, not against a trainer recomputation.
-        "--use-rollout-logprobs "
+        + ("--use-tis " if args.use_tis else "--use-rollout-logprobs ")
     )
 
     optimizer_args = (
@@ -341,13 +407,16 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
         # The save dir, not the HF one: on a fresh run it holds no Megatron checkpoint, so
         # megatron_config falls back to --ref-load through the bridge, and a rerun resumes.
         f"--load {args.output_dir}/ckpt "
-        f"--tensor-model-parallel-size {args.tensor_model_parallel_size} "
+        f"--tensor-model-parallel-size {args.tensor_parallel} "
         "--sequence-parallel "
         "--pipeline-model-parallel-size 1 "
         "--context-parallel-size 1 "
-        # No activation recompute: the bridge's Qwen3-VL vision tower inherits it, and its
-        # checkpointed forward returns the DeepStack features detached, so those mergers never train.
-        "--attention-dropout 0.0 "
+        + (
+            "--recompute-granularity full --recompute-method uniform --recompute-num-layers 1 "
+            if args.recipe.recompute
+            else ""
+        )
+        + "--attention-dropout 0.0 "
         "--hidden-dropout 0.0 "
         "--accumulate-allreduce-grads-in-fp32 "
         "--attention-softmax-in-fp32 "
@@ -370,7 +439,7 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
     )
 
     wandb_args = (
-        f"--use-wandb --wandb-project {args.wandb_project} --wandb-group {WANDB_GROUP} "
+        f"--use-wandb --wandb-project {args.wandb_project} --wandb-group {args.model_name}-harbor-cua "
         if os.environ.get("WANDB_API_KEY")
         else ""
     )
@@ -394,10 +463,9 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
             # Megatron's LR scheduler asserts a positive decay length, which --num-rollout 0
             # makes zero; nothing trains here and the schedule is constant, so 1 is inert.
             backend_args += "--lr-decay-iters 1 "
-        # Set here, not in the worker environment: scripts/models/qwen3-4B.py reads this
-        # while the model args are expanded in *this* process, and defaults to 1000000.
-        # Qwen3-VL-4B-Instruct's text_config.rope_theta is 5000000, read off the checkpoint.
-        os.environ["MODEL_ARGS_ROTARY_BASE"] = str(ROTARY_BASE)
+        # Set here, not in the worker environment: the model args are expanded in *this* process.
+        if args.recipe.rotary_base is not None:
+            os.environ["MODEL_ARGS_ROTARY_BASE"] = str(args.recipe.rotary_base)
     U.execute_train(
         train_args=(
             f"{ckpt_args} {rollout_args} {cua_args} {eval_args} {grpo_args} "
@@ -412,10 +480,7 @@ def execute(args: ScriptArgs, harbor_env: dict[str, str] | None = None):
 
 
 def _megatron_model_type(args: ScriptArgs) -> str | None:
-    """The text model Megatron loads for this checkpoint, as geo3k's VLM recipe maps it."""
-    if args.backend != "megatron":
-        return None
-    return "qwen3-4B"
+    return args.recipe.megatron_model_type if args.backend == "megatron" else None
 
 
 def _worker_env(args: ScriptArgs, harbor_env: dict[str, str]) -> dict:
@@ -483,6 +548,15 @@ def main(args: ScriptArgs):
         raise typer.BadParameter(
             "--rollout-path session runs computer-1 in the rollout worker, not the OSWorld runner"
         )
+    if args.backend == "megatron" and (args.num_gpus_per_node * args.num_nodes) % args.tensor_parallel:
+        raise typer.BadParameter(
+            f"--model-name {args.model_name} trains at tensor parallel {args.tensor_parallel}, which "
+            f"{args.num_nodes} node(s) of --num-gpus-per-node {args.num_gpus_per_node} cannot divide"
+        )
+    if args.recipe.session_only and args.rollout_path != "session":
+        raise typer.BadParameter(f"--model-name {args.model_name} trains through --rollout-path session only")
+    if args.drop_zero_std_groups and args.rollout_path != "session":
+        raise typer.BadParameter("--drop-zero-std-groups is implemented for --rollout-path session only")
     if args.media_refs and args.rollout_path != "session":
         raise typer.BadParameter("--media-refs is implemented for --rollout-path session only")
     if args.agent_worker_url and args.rollout_path != "session":

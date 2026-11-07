@@ -157,6 +157,8 @@ class HarnessBinding:
     sandbox_loss_exceptions: frozenset[str] = frozenset()
     # the agent takes a ``record_dir`` kwarg and writes its steps there (miles.utils.eval_record)
     records_steps: bool = False
+    # the agent takes a ``max_turns`` kwarg, so a sample's ``metadata["max_turns"]`` can cap its episode
+    accepts_max_turns: bool = False
 
 
 def _terminus_kwargs(
@@ -348,6 +350,7 @@ HARNESS_BINDINGS: dict[str, HarnessBinding] = {
         model_name=lambda model: "/".join(_opencode_provider_model(model)),
         import_path=_OPENCODE_CUA,
         sandbox_loss_exceptions=frozenset({"DesktopLost"}),
+        accepts_max_turns=True,
     ),
     # Its actions' failures return to the policy as observations; an escaping runtime error is a harness command's.
     "computer-1": HarnessBinding(
@@ -357,6 +360,7 @@ HARNESS_BINDINGS: dict[str, HarnessBinding] = {
         accepts_max_seq_len=False,
         sandbox_loss_exceptions=frozenset({"RuntimeRequestError"}),
         records_steps=True,
+        accepts_max_turns=True,
     ),
 }
 # Any other installed agent that speaks OpenAI chat completions.
@@ -389,10 +393,11 @@ def _ensure_provider_key() -> None:
         os.environ[key_env] = resolve_provider_api_key(key_env, spec["file_env_var"], spec["default_path"])
 
 
-def _environment_config():
+def _environment_config(task_env_kwargs: dict[str, Any] | None = None):
     """``HARBOR_ENV_TYPE`` straight through to Harbor's ``EnvironmentType``: adding a
     backend is Harbor's job, not a branch here. Backend-specific settings ride in
-    ``HARBOR_ENV_KWARGS`` (a JSON object) as ``EnvironmentConfig.kwargs``."""
+    ``HARBOR_ENV_KWARGS`` (a JSON object) as ``EnvironmentConfig.kwargs``, with a
+    sample's own ``harbor_env_kwargs`` (such as its app's ``prebuilt_template_id``) winning per key."""
     from harbor.models.environment_type import EnvironmentType
     from harbor.models.trial.config import EnvironmentConfig
 
@@ -400,7 +405,7 @@ def _environment_config():
     if not raw:
         raise ValueError("set HARBOR_ENV_TYPE to the Harbor environment type to run trials on (e.g. e2b, daytona)")
     env_type = EnvironmentType(raw)  # raises on an unknown backend instead of guessing
-    kwargs = json.loads(os.getenv("HARBOR_ENV_KWARGS", "{}") or "{}")
+    kwargs = {**json.loads(os.getenv("HARBOR_ENV_KWARGS", "{}") or "{}"), **(task_env_kwargs or {})}
     if env_type == EnvironmentType.DAYTONA:
         # a killed worker never reaches Harbor's teardown, and Harbor's Daytona defaults (0) never reclaim;
         # the stop timer outlasts the trial cap because an in-sandbox agent looks idle to Daytona
@@ -430,6 +435,13 @@ def _environment_config():
         if value := os.getenv(var, "").strip():
             policies[field] = value
     return EnvironmentConfig(type=env_type, delete=True, kwargs=kwargs, **overrides, **policies)
+
+
+def _task_env_kwargs(metadata: dict[str, Any]) -> dict[str, Any]:
+    value = metadata.get("harbor_env_kwargs") or {}
+    if not isinstance(value, dict):
+        raise ValueError(f"metadata harbor_env_kwargs must be a JSON object, got {type(value).__name__}")
+    return value
 
 
 def _agent_name(metadata: dict[str, Any]) -> str:
@@ -462,6 +474,11 @@ def build_trial_config(
     }
     if max_seq_len is not None and binding.accepts_max_seq_len:
         agent_kwargs["max_seq_len"] = max_seq_len
+    if (max_turns := metadata.get("max_turns")) is not None:
+        if not binding.accepts_max_turns:
+            raise ValueError(f"metadata max_turns caps an episode, but the {agent_name} binding takes no max_turns")
+        # The sample's own cap wins over HARBOR_AGENT_MAX_ITERATIONS, which is the launch-wide default.
+        agent_kwargs["max_turns"] = int(max_turns)
     if record_dir is not None:
         if not binding.records_steps:
             raise ValueError(
@@ -502,7 +519,7 @@ def build_trial_config(
             kwargs=agent_kwargs,
             extra_allowed_hosts=_allowed_hosts("HARBOR_AGENT_ALLOWED_HOSTS"),
         ),
-        environment=_environment_config(),
+        environment=_environment_config(_task_env_kwargs(metadata)),
         trials_dir=Path(os.getenv("HARBOR_TRIALS_DIR", "/tmp/harbor_trials")),
         timeout_multiplier=float(os.getenv("HARBOR_TIMEOUT_MULTIPLIER", "2.0")),
         **extra,

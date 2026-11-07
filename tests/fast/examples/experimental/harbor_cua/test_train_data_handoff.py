@@ -128,5 +128,5 @@ def test_the_rotary_base_is_set_where_the_model_args_are_expanded():
     source = _launcher_source()
 
     assert 'os.environ["MODEL_ARGS_ROTARY_BASE"]' in source
-    assert "ROTARY_BASE = 5_000_000" in source
+    assert "rotary_base=5_000_000" in source
     assert "MODEL_ARGS_ROTARY_BASE" not in source.split("def _worker_env")[1]

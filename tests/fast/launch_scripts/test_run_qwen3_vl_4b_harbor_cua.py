@@ -224,3 +224,55 @@ def test_the_vision_tower_freezes_from_3000_training_episodes(monkeypatch, tmp_p
     command, _ = _train_command(monkeypatch, tmp_path, **overrides)
 
     assert ("--freeze-vision-model" in command) == freezes
+
+
+def test_qwen38_trains_with_thinking_off_through_its_own_tito_family(monkeypatch, tmp_path):
+    command, env = _train_command(monkeypatch, tmp_path, model_name="qwen3.8-27b", rollout_path="session")
+
+    assert "--tito-model qwen38small" in command
+    assert """--apply-chat-template-kwargs '{"enable_thinking": false}'""" in command
+    assert re.search(r"--hf-checkpoint \S+/Qwen3.8-27B ", command)
+    assert "--tensor-model-parallel-size 4" in command
+    assert "--recompute-granularity full --recompute-method uniform --recompute-num-layers 1" in command
+    assert "MODEL_ARGS_ROTARY_BASE" not in env
+
+
+def test_qwen3_vl_keeps_its_recipe(monkeypatch, tmp_path):
+    command, _ = _train_command(monkeypatch, tmp_path, rollout_path="session")
+
+    assert "--tito-model qwen3_vl" in command
+    assert "--apply-chat-template-kwargs" not in command
+    assert "--tensor-model-parallel-size 2" in command
+    assert "--recompute-granularity" not in command
+
+
+def test_qwen38_refuses_the_generate_path():
+    launcher = import_launch_script(LAUNCHER)
+
+    with pytest.raises(typer.BadParameter, match="--rollout-path session only"):
+        launcher.main(harbor_env_type="e2b", model_name="qwen3.8-27b", num_gpus_per_node=8)
+
+
+def test_dead_groups_are_dropped_only_when_asked(monkeypatch, tmp_path):
+    dropping, _ = _train_command(
+        monkeypatch, tmp_path, model_name="qwen3.8-27b", rollout_path="session", drop_zero_std_groups=True
+    )
+    keeping, _ = _train_command(monkeypatch, tmp_path, model_name="qwen3.8-27b", rollout_path="session")
+
+    assert "--dynamic-sampling-filter-path miles.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std" in dropping
+    assert "--dynamic-sampling-filter-path miles.rollout.filter_hub.dynamic_sampling_filters.check_no_aborted" in keeping
+
+
+def test_tis_replaces_the_rollout_logprob_ratio(monkeypatch, tmp_path):
+    tis, _ = _train_command(monkeypatch, tmp_path, rollout_path="session", use_tis=True)
+    default, _ = _train_command(monkeypatch, tmp_path, rollout_path="session")
+
+    assert "--use-tis" in tis and "--use-rollout-logprobs" not in tis
+    assert "--use-rollout-logprobs" in default and "--use-tis" not in default
+
+
+def test_an_allocation_the_tensor_parallel_group_does_not_fit_is_refused():
+    launcher = import_launch_script(LAUNCHER)
+
+    with pytest.raises(typer.BadParameter, match="tensor parallel 4"):
+        launcher.main(harbor_env_type="e2b", model_name="qwen3.8-27b", rollout_path="session")
