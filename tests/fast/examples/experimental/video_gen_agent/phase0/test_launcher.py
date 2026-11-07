@@ -22,7 +22,9 @@ def test_the_launchers_layout_parses_with_the_generator_and_judge_on_gpus_of_the
     assert config.reward_scaling.pools["judge"].gpu_offset == 4
     assert not config.colocate and config.actor_num_gpus_per_node == 2
     assert not config.group_rm and isinstance(config.custom_rm_path.config, PlannerRewardConfig)
-    assert config.custom_rm_path.config.video_clip_dir == "/root/shared_data/test/clips"
+    rm_config = config.custom_rm_path.config
+    assert rm_config.video_clip_dir == "/root/shared_data/test/clips"
+    assert (rm_config.video_num_inference_steps, rm_config.video_guidance_scale) == (3, 1.0)
     assert [dataset.name for dataset in config.eval_datasets] == ["heldout", "heldout_raw"]
 
 
