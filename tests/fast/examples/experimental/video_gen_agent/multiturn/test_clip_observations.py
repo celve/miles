@@ -47,7 +47,7 @@ def tokenizer(model_path):
 @pytest.fixture(scope="module")
 def processor_core(model_path):
     pytest.importorskip("sglang.srt.multimodal.token_space_mm_process.processor")
-    pytest.importorskip("decord", reason="SGLang decodes videos with decord, which has no macOS wheel")
+    _skip_unless_sglang_decodes_video()
     from miles.backends.training_utils.data.token_space_media_process import (
         RolloutEngineProcessorArgs,
         build_trainer_processor,
@@ -69,6 +69,19 @@ def processor_core(model_path):
     return build_trainer_processor(
         engine_args, mm_processor_worker_num=1, mm_io_worker_num=0, device=torch.device("cpu")
     ).core
+
+
+def _skip_unless_sglang_decodes_video():
+    """SGLang decodes clips with torchcodec (which needs FFmpeg) or decord; macOS hosts often have neither."""
+    import tempfile
+
+    from sglang.srt.utils.video_decoder import VideoDecoderWrapper
+
+    with tempfile.TemporaryDirectory() as folder:
+        try:
+            VideoDecoderWrapper(_write_clip(Path(folder) / "probe.mp4", (0, 0, 0)), device="cpu")
+        except Exception as e:  # noqa: BLE001 - any missing backend or library
+            pytest.skip(f"SGLang cannot decode video here: {e!r}"[:200])
 
 
 class _PlannerEngine(TokenSpaceEngine):
