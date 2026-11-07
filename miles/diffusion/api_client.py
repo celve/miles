@@ -72,6 +72,7 @@ class DiffusionApiClient(SGLangApiClient):
         num_inference_steps: int | None = None,
         guidance_scale: float | None = None,
         negative_prompt: str | None = None,
+        image_path: str | None = None,
         extra_sampling_params: dict[str, Any] | None = None,
     ) -> str:
         """Generate one clip and return the path of its mp4, ``<output_dir>/<sha256>.mp4``.
@@ -89,6 +90,7 @@ class DiffusionApiClient(SGLangApiClient):
             "num_inference_steps": num_inference_steps,
             "guidance_scale": guidance_scale,
             "negative_prompt": negative_prompt,
+            "image_path": [image_path] if image_path else None,
             "extra_sampling_params": extra_sampling_params,
             "num_outputs_per_prompt": 1,
             "rollout": False,

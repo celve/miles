@@ -14,7 +14,11 @@ from examples.experimental.video_gen_agent.generator import Clip, ClipRequest
 from tests.fast.rollout.session.test_token_space_images import TokenSpaceEngine, _samples
 from tests.fast.rollout.session.test_token_space_videos import _make_core, _write_clip
 
+from miles.rollout.session.samples.codec import COMPUTED_FIELDS_V2, decode_samples_and_merge_input_sample
+from miles.utils.args.configs.session import SessionConfig
+from miles.utils.function_registry import load_function
 from miles.utils.media_refs import collect_media_refs
+from miles.utils.types import Sample
 
 MODEL = "Qwen/Qwen3.5-0.8B"
 VIDEO_PAD = "<|video_pad|>"
@@ -145,3 +149,80 @@ def test_a_generated_clip_is_observed_in_token_space_and_reaches_the_trainers_sa
     (sample,) = _samples(core, session_id, "v2")
     assert sample.multimodal_inputs == {"videos": [str(Path(clip).resolve())]}
     assert sample.tokens == engine.prompts[-1] + engine.output_ids
+
+
+class _ScriptedPlannerEngine(TokenSpaceEngine):
+    """Expands media as SGLang does, and answers the n-th request with the n-th scripted tool call."""
+
+    def __init__(self, core, tokenizer, calls: list[tuple[str, dict]]):
+        super().__init__(core, tokenizer)
+        self.calls = calls
+
+    async def do_proxy(self, request, path, *, body, headers):
+        result = await super().do_proxy(request, path, body=body, headers=headers)
+        response = json.loads(result["response_body"])
+        name, arguments = self.calls[len(self.bodies) - 1]
+        call = {"id": f"call-{len(self.bodies)}", "type": "function"}
+        response["choices"][0]["message"]["tool_calls"] = [
+            call | {"function": {"name": name, "arguments": json.dumps(arguments)}}
+        ]
+        result["response_body"] = json.dumps(response)
+        return result
+
+
+class _ShadedMp4Generator:
+    """A real mp4 per request, each a different colour, under the env's fake dir."""
+
+    def __init__(self):
+        self.clip_dir = Path(os.environ["AGENT_VIDEO_GEN_FAKE_DIR"])
+        self.calls = 0
+
+    async def generate(self, request: ClipRequest) -> Clip:
+        self.calls += 1
+        return Clip(path=_write_clip(self.clip_dir / f"shot{self.calls}.mp4", (60 * self.calls, 10, 10)))
+
+
+def test_a_folded_episode_branches_once_per_fold_and_every_branch_carries_the_submission(
+    monkeypatch, tmp_path, tokenizer, processor_core, model_path
+):
+    for name, value in {
+        "AGENT_VIDEO_GEN_GENERATOR": f"{__name__}._ShadedMp4Generator",
+        "AGENT_VIDEO_GEN_FAKE_DIR": str(tmp_path),
+        "AGENT_VIDEO_GEN_SUBMITTED_DIR": str(tmp_path / "kept"),
+        "AGENT_VIDEO_GEN_CLIP_OBSERVATIONS": "1",
+        "AGENT_VIDEO_GEN_KEEP_CLIPS": "1",
+    }.items():
+        monkeypatch.setenv(name, value)
+    calls = [("generate", {"prompt": f"take {i}"}) for i in (1, 2, 3)] + [("submit", {"clip_id": "clip_3"})]
+    engine = _ScriptedPlannerEngine(processor_core, tokenizer, calls)
+    # The recipe's picker: the run's default, which keeps a sibling sent with a different request.
+    core, registry = _make_core("v2", model_path, tokenizer, engine, tmp_path / "media")
+    core.sample_picker = load_function(SessionConfig.model_fields["session_sample_picker_path"].default)
+    session_id = registry.create_session()
+
+    async def post(url, payload):
+        reply = await core.chat_completions(session_id, method="POST", query="", headers={}, body=json.dumps(payload))
+        assert reply.status_code == 200, reply.body
+        return json.loads(reply.body)
+
+    monkeypatch.setattr(env, "post", post)
+    prompt = [{"role": "user", "content": "A red square slides right."}]
+    result = asyncio.run(env.run_agent("http://session", prompt, {"max_tokens": 8}, {}))
+
+    clips = [str(Path(c["path"]).resolve()) for c in result["video_gen"]["clips"]]
+    pad_id = tokenizer.convert_tokens_to_ids(VIDEO_PAD)
+    sent = [collect_media_refs(body["messages"], None) or {} for body in engine.bodies]
+    assert [refs.get("videos") for refs in sent] == [None, clips[:1], clips[1:2], clips[2:]]
+    # Each engine prompt expands exactly one clip, however many the episode has made.
+    assert all(prompt.count(pad_id) == engine.prompts[1].count(pad_id) > 1 for prompt in engine.prompts[1:])
+
+    reply = asyncio.run(core.collect_samples(session_id, max_seq_len=None, agent_metadata=result))
+    assert reply.status_code == 200, reply.body
+    samples = decode_samples_and_merge_input_sample(reply.body, Sample(), fields=COMPUTED_FIELDS_V2).samples
+    # Clips 2 and 3 each pushed a clip out of view: two folds, two branches beside the first.
+    assert sorted(s.multimodal_inputs["videos"][0] for s in samples) == sorted(clips)
+    assert {s.metadata["video_gen"]["submitted"]["path"] for s in samples} == {
+        result["video_gen"]["submitted"]["path"]
+    }
+    # Every policy turn trains once across the branches.
+    assert sum(sum(s.loss_mask) for s in samples) == len(calls) * len(engine.output_ids)

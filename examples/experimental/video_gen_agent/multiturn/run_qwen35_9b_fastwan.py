@@ -16,11 +16,14 @@ Args:
         judge shares the planner's GPU.
     --num-rollout, --rollout-batch-size, --n-samples-per-prompt: GRPO steps, requests per step, episodes per request.
     --feature-cache / --no-feature-cache: share the engines' disk item feature cache with the trainer.
+    --max-extends, --max-turns: multi-shot episodes, each extend continuing a clip as a new shot (0: single-shot).
+    --keep-clips, --fold: keep the last K clips in view and fold older ones to a note or a keyframe (0: no folding).
     --model-dir, --data-dir: where models and the requests live; checkpoints and clips go under --output-dir.
 
 Example:
     python examples/experimental/video_gen_agent/multiturn/run_qwen35_9b_fastwan.py
     python examples/experimental/video_gen_agent/multiturn/run_qwen35_9b_fastwan.py --num-rollout 2 --rollout-batch-size 4
+    python examples/experimental/video_gen_agent/multiturn/run_qwen35_9b_fastwan.py --max-extends 5 --max-turns 12 --keep-clips 2
 """
 
 import json
@@ -68,6 +71,10 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     rollout_batch_size: int = 32
     n_samples_per_prompt: int = 8
     max_generations: int = 3
+    max_extends: int = 0
+    max_turns: int = 8
+    keep_clips: int = 0
+    fold: str = "text"
     eval_interval: int = 10
     heldout_percent: int = 10
     feature_cache: bool = True
@@ -128,7 +135,11 @@ def _agent_env(args: ScriptArgs) -> dict[str, str]:
         "AGENT_VIDEO_GEN_CLIP_DIR": f"{args.run_dir}/clips",
         "AGENT_VIDEO_GEN_SUBMITTED_DIR": f"{args.run_dir}/submitted",
         "AGENT_VIDEO_GEN_MAX_GENERATIONS": str(args.max_generations),
+        "AGENT_VIDEO_GEN_MAX_EXTENDS": str(args.max_extends),
+        "AGENT_VIDEO_GEN_MAX_TURNS": str(args.max_turns),
         "AGENT_VIDEO_GEN_CLIP_OBSERVATIONS": "1",
+        "AGENT_VIDEO_GEN_KEEP_CLIPS": str(args.keep_clips),
+        "AGENT_VIDEO_GEN_FOLD": args.fold,
     }
 
 
@@ -167,6 +178,7 @@ def _train_args(args: ScriptArgs) -> str:
         "--router miles "
         # Generation dominates an episode, so every episode of a round is in flight at once (LIN-2634).
         f"--sglang-server-concurrency {args.rollout_batch_size * args.n_samples_per_prompt} "
+        f"--custom-rollout-log-function-path {AGENT}.multiturn.episode_metrics.log_episodes "
     )
 
     multimodal_args = (
@@ -182,7 +194,6 @@ def _train_args(args: ScriptArgs) -> str:
             "--sglang-enable-token-space-preprocess-cache "
             "--sglang-token-space-preprocess-cache-trust-url "
             f"--sglang-token-space-preprocess-cache-dir {args.run_dir}/feature_cache "
-            f"--custom-rollout-log-function-path {AGENT}.multiturn.feature_cache.prune_feature_cache "
         )
 
     # No --group-rm: the env reward scores episodes sample by sample, and eval refuses it.

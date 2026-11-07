@@ -1,6 +1,7 @@
 """The env's generator wrapper against fake multimodal_gen servers behind the real Miles router."""
 
 import os
+from dataclasses import replace
 
 import pytest
 from examples.experimental.video_gen_agent.generator import ClipRequest, GeneratorUnavailable
@@ -42,6 +43,16 @@ async def test_a_request_becomes_one_clip_with_the_envs_shape_and_the_launchers_
     assert (body["num_frames"], body["fps"], body["width"], body["height"]) == (9, 4, _WIDTH, _HEIGHT)
     assert (body["num_inference_steps"], body["guidance_scale"]) == (3, 1.0)
     assert os.path.dirname(clip.path) == str(clip_dir) and os.path.getsize(clip.path) > 0
+    assert "image_path" not in body
+
+
+async def test_an_extension_sends_the_frame_it_continues_from(clip_generator):
+    clip_generator, seen, _ = clip_generator
+
+    await clip_generator.generate(replace(_request("it sinks", seconds=2), image_path="/clips/a.mp4.last.png"))
+
+    (body,) = seen
+    assert body["image_path"] == ["/clips/a.mp4.last.png"] and body["prompt"] == "it sinks"
 
 
 async def test_a_failing_generator_is_an_outage_not_a_policy_failure(clip_generator):

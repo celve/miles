@@ -5,6 +5,8 @@ from examples.experimental.video_gen_agent.multiturn.run_qwen35_9b_fastwan impor
 from tests.fast.fixtures.args_fixtures import parse_megatron_test_config
 from transformers import Qwen3_5Config
 
+from miles.utils.args.custom_view import compute_custom_function_config
+
 
 def test_the_launchers_layout_parses_with_the_generator_and_eval_engine_on_gpus_of_their_own(monkeypatch, tmp_path):
     monkeypatch.delenv("WANDB_API_KEY", raising=False)
@@ -34,6 +36,13 @@ def test_the_launchers_layout_parses_with_the_generator_and_eval_engine_on_gpus_
     assert config.multimodal_token_space_processing and not config.group_rm
     assert config.custom_rm_path.config.video_reward_pool == "judge"
     assert [dataset.name for dataset in config.eval_datasets] == ["heldout"]
+    # Each fold opens a branch with a different request; the default picker keeps it as a sample.
+    assert config.session_sample_picker_path == "miles.rollout.session.v2.picker_hub.drop_same_prompt_retries"
+    log_hook = config.custom_rollout_log_function_path
+    assert log_hook.path.endswith("multiturn.episode_metrics.log_episodes")
+    # The hook prunes the cache through the view of the args Miles hands it.
+    hook_args = compute_custom_function_config(config, log_hook)
+    assert hook_args.sglang.common_value("token_space_preprocess_cache_dir") == "/root/shared_data/test/feature_cache"
 
 
 def test_the_env_is_set_for_clip_observations_with_phase_0s_clips():
@@ -46,6 +55,14 @@ def test_the_env_is_set_for_clip_observations_with_phase_0s_clips():
         "24",
     )
     assert env["AGENT_VIDEO_GEN_CLIP_DIR"] == "/root/shared_data/test/clips"
+    assert (env["AGENT_VIDEO_GEN_KEEP_CLIPS"], env["AGENT_VIDEO_GEN_MAX_EXTENDS"]) == ("0", "0")
+
+
+def test_multi_shot_folding_reaches_the_env():
+    env = _agent_env(ScriptArgs(run_id="test", max_extends=5, max_turns=12, keep_clips=2, fold="keyframe"))
+
+    assert env["AGENT_VIDEO_GEN_MAX_EXTENDS"] == "5" and env["AGENT_VIDEO_GEN_MAX_TURNS"] == "12"
+    assert env["AGENT_VIDEO_GEN_KEEP_CLIPS"] == "2" and env["AGENT_VIDEO_GEN_FOLD"] == "keyframe"
 
 
 def test_the_feature_cache_is_on_by_default_and_shared_under_the_run():
@@ -53,8 +70,8 @@ def test_the_feature_cache_is_on_by_default_and_shared_under_the_run():
 
     assert "--sglang-enable-token-space-preprocess-cache --sglang-token-space-preprocess-cache-trust-url" in argv
     assert "--sglang-token-space-preprocess-cache-dir /root/shared_data/test/feature_cache " in argv
-    assert "multiturn.feature_cache.prune_feature_cache" in argv
-    assert "preprocess-cache" not in _train_args(ScriptArgs(run_id="test", feature_cache=False))
+    without = _train_args(ScriptArgs(run_id="test", feature_cache=False))
+    assert "preprocess-cache" not in without and "multiturn.episode_metrics.log_episodes" in without
 
 
 def test_a_gpu_split_that_does_not_fill_the_node_is_refused():

@@ -24,17 +24,37 @@ The launcher downloads the three models, converts Qwen3.5-9B to `torch_dist`, wr
 
 Clips are Phase 0's: 832×480, 2 s at 24 fps (49 frames), FastWan's 3-step schedule without CFG, so `eval/heldout` here and Phase 0's `eval/heldout_raw` (the request sent to the generator as it is) share requests, clips settings and judge. The planner watches each clip at 4 fps.
 
+## Multi-shot episodes and clip folding
+
+A multi-shot episode builds a longer video from shots: `--max-extends E` lets the planner continue a clip E times, each new shot generated image-to-video from the last frame of the one before (FastWan2.2-TI2V-5B takes a frame), and submitting the last shot submits all of them joined. Its clips soon outgrow the context, and SGLang re-encodes every clip of a conversation through the ViT on every turn, so `--keep-clips K` keeps only the last K clips in view and folds the older ones to a note (`--fold text`, the default) or a keyframe (`--fold keyframe`); the planner can `recall` a folded clip. The env's options are in [`env.py`](../env.py).
+
+```bash
+# up to 3 generations and 5 extends an episode, the last 2 clips in view
+python examples/experimental/video_gen_agent/multiturn/run_qwen35_9b_fastwan.py --max-extends 5 --max-turns 12 --keep-clips 2
+```
+
+Every fold opens a session v2 branch, which becomes a sample with the episode's reward; the default sample picker keeps it. A K-fold episode of N clips therefore trains up to N − K + 1 samples, each repeating the folded history before its own turns as prompt.
+
+[`fold_sweep.py`](fold_sweep.py) measures what K costs at the engine: it replays one fixed N-shot episode through the env for each K against an OpenAI-compatible VLM engine and reports prompt tokens and engine seconds per turn.
+
+```bash
+python -m examples.experimental.video_gen_agent.multiturn.fold_sweep --engine-url http://127.0.0.1:30000 \
+    --make-clips 8 --keep 0 1 2 3 --out sweep.json
+```
+
 ## What to read in a run
 
 - `eval/heldout`: the planner on the held-out requests, greedy; step 0 is the untrained planner.
 - `perf/multimodal_rebuild_time`: the trainer's wait for its media in a step, the number to compare with and without `--no-feature-cache`.
 - `train/train_rollout_logprob_abs_diff`: the train/rollout log-prob gap, which TimeLens keeps near 0.006.
+- `episode/prompt_tokens_per_turn`, `episode/peak_prompt_tokens`, `episode/turn_seconds`: each policy call's prompt, as the engine counted it, and its wall time, per episode; with `episode/folded_clips`, `episode/recalls`, `episode/shots_submitted` and `episode/samples` (branches per episode), from [`episode_metrics.py`](episode_metrics.py), the rollout log hook, which also prunes the feature cache.
 
 ## Disk use
 
-The feature cache never evicts, so the recipe prunes it: [`feature_cache.py`](feature_cache.py), the rollout log hook, removes every entry written before the rollout just generated, which training has already used (a removed entry reads back as a miss and is computed again). The cache then holds about two rollouts' clips.
+The feature cache never evicts, so the recipe prunes it: [`feature_cache.py`](feature_cache.py), called from the rollout log hook, removes every entry written before the rollout just generated, which training has already used (a removed entry reads back as a miss and is computed again). The cache then holds about two rollouts' clips.
 
 - One clip's features at the planner's sampling (832×480, 8 frames at 4 fps) are `pixel_values_videos` of 6240 × 1536 float32, 36.6 MiB, for 1560 visual tokens (measured with Qwen3.5's video processor).
 - A step makes at most 32 × 8 episodes × 3 clips = 768 clips, 27.4 GiB of features; an eval at most 95 × 3 = 285 clips, 10.2 GiB.
 - Budget the cache directory for two steps and one eval in flight: about 65 GiB. Without the prune a 200-step run would need up to 153,600 clips' features, 5.4 TiB.
+- A multi-shot run makes up to 3 + E clips an episode (`--max-extends E`, plus a keyframe PNG per extended or folded clip), so scale these by (3 + E) / 3.
 - The clips themselves (`clips/`, mp4, under 1 MB each) and the submitted copies (`submitted/`) are kept for the whole run: at most 160 k files, under 160 GB.

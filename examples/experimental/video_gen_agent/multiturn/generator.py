@@ -47,6 +47,7 @@ class RouterClipGenerator:
                 output_dir=self.clip_dir,
                 num_inference_steps=self.num_inference_steps,
                 guidance_scale=self.guidance_scale,
+                image_path=request.image_path,
             )
         except httpx.HTTPError as error:
             raise GeneratorUnavailable(f"the generator's router failed: {error!r}") from error
