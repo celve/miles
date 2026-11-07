@@ -10,7 +10,6 @@ import uuid
 from pathlib import Path
 
 import av
-import numpy as np
 
 
 def last_frame(clip_path: str) -> str:
@@ -27,24 +26,24 @@ def last_frame(clip_path: str) -> str:
 
 def join_shots(clip_paths: list[str], *, fps: int, output_dir: str) -> str:
     """Join shots into ``<output_dir>/<sha256>.mp4``; each later shot loses its first frame, the one it continues from."""
-    frames = [frame for index, path in enumerate(clip_paths) for frame in _frames(path)[1 if index else 0 :]]
-    height, width, _ = frames[0].shape
     partial = Path(output_dir) / f"{uuid.uuid4().hex}.mp4.part"
     partial.parent.mkdir(parents=True, exist_ok=True)
-    with av.open(str(partial), mode="w", format="mp4") as container:
-        stream = container.add_stream("libx264", rate=fps)
-        stream.width, stream.height, stream.pix_fmt = width, height, "yuv420p"
-        for frame in frames:
-            container.mux(stream.encode(av.VideoFrame.from_ndarray(frame, format="rgb24")))
-        container.mux(stream.encode())
+    with av.open(str(partial), mode="w", format="mp4") as output:
+        stream = output.add_stream("libx264", rate=fps)
+        for index, path in enumerate(clip_paths):
+            with av.open(path) as shot:
+                source = shot.streams.video[0]
+                if index == 0:
+                    stream.width, stream.height, stream.pix_fmt = source.width, source.height, "yuv420p"
+                for position, frame in enumerate(shot.decode(source)):
+                    if index and not position:
+                        continue
+                    pixels = frame.to_ndarray(format="rgb24")
+                    output.mux(stream.encode(av.VideoFrame.from_ndarray(pixels, format="rgb24")))
+        output.mux(stream.encode())
     destination = partial.with_name(f"{hashlib.sha256(partial.read_bytes()).hexdigest()}.mp4")
     os.replace(partial, destination)
     return str(destination)
-
-
-def _frames(clip_path: str) -> list[np.ndarray]:
-    with av.open(clip_path) as container:
-        return [frame.to_ndarray(format="rgb24") for frame in container.decode(video=0)]
 
 
 def _write_atomically(destination: Path, write) -> None:
