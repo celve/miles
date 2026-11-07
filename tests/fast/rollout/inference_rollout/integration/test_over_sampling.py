@@ -1,4 +1,5 @@
 import pytest
+from tests.fast.fixtures.rollout_fixtures import RolloutEnvConfig
 from tests.fast.rollout.inference_rollout.integration.utils import (
     filter_by_reward,
     integration_env_config,
@@ -56,16 +57,25 @@ _ONE_WRONG_ROWS = [
 ]
 
 
+_NO_OVER_SAMPLING_ARGV = ["--rollout-batch-size", "3", "--dynamic-sampling-filter-path", "test:filter_by_reward"]
+_LEGACY_DRIVER_ARGV = [
+    "--rollout-function-path",
+    "miles.rollout.sglang_rollout.generate_rollout",
+    "--eval-function-path",
+    "miles.rollout.sglang_rollout.generate_rollout",
+    "--custom-generate-function-path",
+    "miles.rollout.sglang_rollout.generate",
+]
+
+
 @pytest.mark.parametrize(
     "rollout_env",
     [
+        pytest.param(integration_env_config(_NO_OVER_SAMPLING_ARGV, data_rows=_ONE_WRONG_ROWS), id="class_driver"),
         pytest.param(
-            integration_env_config(
-                ["--rollout-batch-size", "3", "--dynamic-sampling-filter-path", "test:filter_by_reward"],
-                data_rows=_ONE_WRONG_ROWS,
-            ),
-            id="no_over_sampling",
-        )
+            RolloutEnvConfig(extra_argv=_LEGACY_DRIVER_ARGV + _NO_OVER_SAMPLING_ARGV, data_rows=_ONE_WRONG_ROWS),
+            id="legacy_driver",
+        ),
     ],
     indirect=True,
 )

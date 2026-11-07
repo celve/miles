@@ -457,8 +457,8 @@ class RolloutRelatedRolloutOnlyConfig(BaseConfig):
                 "Regardless of whether partial rollout is used or filters are applied, "
                 "the sampling granularity is always determined by this value. "
                 "If this value is None, rollout_batch_size will be used as the default over_sampling_batch_size; "
-                "then the standard rollout replaces each dropped group with one new group instead of a whole batch, "
-                "so no surplus group is left to abort at the end of the round."
+                "then the synchronous rollouts replace each dropped group with one new group instead of a whole batch, "
+                "so under group-level submission no surplus group is left to abort at the end of the round."
             )
         ),
     ] = None

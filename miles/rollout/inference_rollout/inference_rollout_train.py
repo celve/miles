@@ -116,7 +116,8 @@ async def generate_rollout_async(
     scheduler = make_submission_scheduler(args, default="group")
 
     # Without over-sampling (the default), a dropped group is replaced by one group, not by a whole new batch whose
-    # surplus is aborted at the end of the round; asked-for over-sampling keeps refilling whole batches.
+    # surplus is aborted at the end of the round; asked-for over-sampling keeps refilling whole batches. Sample-level
+    # submission (#1673) still admits a group per finished group's worth of samples, which is its purpose.
     over_sampling = args.over_sampling_batch_size > target_data_size
 
     pendings = set()
