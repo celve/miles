@@ -32,6 +32,9 @@ def test_the_launchers_layout_parses_with_the_generator_and_eval_engine_on_gpus_
     assert config.eval_num_gpus == 1 and config.eval_uses_snapshots and eval_model.name == "eval"
     assert config.eval_hf_dir == "/root/shared_data/test/eval_snapshots"
     assert config.multimodal_token_space_processing and not config.group_rm
+    # Group-level submission and no over-sampling: a dropped group is replaced and nothing is aborted at round end.
+    assert config.rollout_submission_granularity in (None, "group")
+    assert config.over_sampling_batch_size == config.rollout_batch_size
     assert config.custom_rm_path.config.video_reward_pool == "judge"
     assert [dataset.name for dataset in config.eval_datasets] == ["heldout"]
 

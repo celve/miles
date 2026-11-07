@@ -510,6 +510,9 @@ async def generate_rollout_async(
     # target_data_size is the total number of valid samples to get
     target_data_size = args.rollout_batch_size
 
+    # Without over-sampling (the default), a dropped group is replaced by one group, not by a whole new batch.
+    over_sampling = args.over_sampling_batch_size > target_data_size
+
     data = []
     all_data = []
     aborted_streak = 0
@@ -518,7 +521,8 @@ async def generate_rollout_async(
     while len(data) < target_data_size:
         while state.remaining_batch_size < target_data_size:
             # get samples from the buffer and submit the generation requests.
-            samples = data_source(args.over_sampling_batch_size)
+            unfilled = target_data_size - state.remaining_batch_size
+            samples = data_source(args.over_sampling_batch_size if over_sampling else unfilled)
             state.submit_generate_tasks(samples)
 
         # wait for the generation to finish
