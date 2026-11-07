@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
-from examples.experimental.video_gen_agent.reward import stub_score
+from examples.experimental.video_gen_agent.reward import StubClipScorer, stub_score
 from tests.fast.fixtures.generation_fixtures import extra_argv_for_variant
 from tests.fast.fixtures.rollout_fixtures import RolloutEnvConfig
 from tests.fast.rollout.inference_rollout.integration.utils import MODULAR_ROLLOUT_BASE_ARGV, load_and_call_rollout
@@ -13,6 +13,14 @@ from tests.fast.rollout.inference_rollout.integration.utils import MODULAR_ROLLO
 from miles.utils.test_utils.mock_sglang_server import ProcessResult
 
 REQUEST = "A paper boat drifts down a rain gutter."
+
+
+class _StubPool:
+    async def score(self, outputs, prompts):
+        return StubClipScorer().score_batch(outputs, prompts)
+
+
+_POOLS = {"judge": _StubPool()}
 
 
 def _config(mode: str) -> RolloutEnvConfig:
@@ -24,6 +32,8 @@ def _config(mode: str) -> RolloutEnvConfig:
         mode,
         "--custom-rm-path",
         "examples.experimental.video_gen_agent.reward.reward_func",
+        "--video-reward-pool",
+        "judge",
     ]
     argv += ["--max-consecutive-aborted-groups", "1"]
     return RolloutEnvConfig(
@@ -68,7 +78,7 @@ def test_submitted_clip_is_scored_in_the_reward_step(rollout_env, env_vars):
     prompts: list[str] = []
     rollout_env.mock_server.process_fn = _policy(prompts)
 
-    out = load_and_call_rollout(rollout_env.args, rollout_env.data_source, mode="train")
+    out = load_and_call_rollout(rollout_env.args, rollout_env.data_source, mode="train", reward_pools=_POOLS)
 
     samples = [s for group in out.samples for sub in group for s in (sub if isinstance(sub, list) else [sub])]
     assert samples
@@ -93,6 +103,6 @@ def test_generator_outage_aborts_the_group(rollout_env, env_vars):
     rollout_env.mock_server.process_fn = _policy([])
 
     with pytest.raises(RuntimeError, match="exit_status 'GeneratorUnavailable'"):
-        load_and_call_rollout(rollout_env.args, rollout_env.data_source, mode="train")
+        load_and_call_rollout(rollout_env.args, rollout_env.data_source, mode="train", reward_pools=_POOLS)
 
     assert not Path(tmp_path / "submitted").exists()

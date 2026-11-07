@@ -72,10 +72,14 @@ def integration_env_config(
     )
 
 
-def load_and_call_rollout(args, data_source, mode: str = "train") -> RolloutFnOutput:
+def load_and_call_rollout(args, data_source, mode: str = "train", reward_pools=None) -> RolloutFnOutput:
     function_path = args.rollout_function_path if mode == "train" else args.eval_function_path
     fn = load_rollout_function(
-        RolloutFnConstructorInput(args=_compute_rollout_function_config(args, function_path), data_source=data_source),
+        RolloutFnConstructorInput(
+            args=_compute_rollout_function_config(args, function_path),
+            data_source=data_source,
+            reward_pools=reward_pools or {},
+        ),
         function_path,
     )
     if mode == "train":

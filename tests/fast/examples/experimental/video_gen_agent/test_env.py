@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import examples.experimental.video_gen_agent.env as env
 import pytest
@@ -139,7 +140,7 @@ async def test_turn_cap_without_submit_ends_the_episode_with_no_clip(options):
     assert sent[1][-1] == {"role": "user", "content": "Call generate or submit. Generations left: 3. Turns left: 2."}
     assert result["video_gen"]["submitted"] is None and result["video_gen"]["turns"] == 3
     sample = Sample(metadata=result)
-    assert await reward_func(None, [sample]) == [0.0]
+    assert await reward_func(SimpleNamespace(video_reward_pool="judge"), [sample], judge_pool=None) == [0.0]
 
 
 @pytest.mark.asyncio
@@ -257,39 +258,60 @@ def test_options_come_from_the_environment(monkeypatch):
         env.VideoGenEnvOptions.from_env()
 
 
+class _StubPool:
+    """A reward pool client over the stub scorer, recording what it is asked to score."""
+
+    def __init__(self, broken: bool = False):
+        self.calls: list[tuple[list[str], list[str]]] = []
+        self.broken = broken
+
+    async def score(self, outputs, prompts):
+        self.calls.append((list(outputs), list(prompts)))
+        if self.broken:
+            raise RuntimeError("judge down")
+        return reward.StubClipScorer().score_batch(outputs, prompts)
+
+
+_ARGS = SimpleNamespace(video_reward_pool="judge")
+
+
 @pytest.mark.asyncio
-async def test_reward_scores_each_distinct_clip_once(monkeypatch, tmp_path):
+async def test_reward_scores_each_distinct_clip_once_on_the_pool(tmp_path):
     clips = [tmp_path / "a.mp4", tmp_path / "b.mp4"]
     for clip in clips:
         clip.write_bytes(clip.name.encode())
-    scored: list[list[str]] = []
-    real_score_batch = reward._SCORER.score_batch
-
-    def counting_score_batch(outputs, prompts):
-        scored.append(outputs)
-        assert prompts == [REQUEST] * len(outputs)
-        return real_score_batch(outputs, prompts)
-
-    monkeypatch.setattr(reward._SCORER, "score_batch", counting_score_batch)
+    pool = _StubPool()
 
     def sample(path):
         submitted = {"clip_id": "clip_1", "path": str(path), "prompt": "x"} if path else None
         return Sample(metadata={"video_gen": {"request": REQUEST, "submitted": submitted}})
 
-    rewards = await reward_func(None, [sample(clips[0]), sample(clips[1]), sample(clips[0]), sample(None)])
+    rewards = await reward_func(
+        _ARGS, [sample(clips[0]), sample(clips[1]), sample(clips[0]), sample(None)], judge_pool=pool
+    )
 
-    assert scored == [[str(clips[0]), str(clips[1])]]
+    assert pool.calls == [([str(clips[0]), str(clips[1])], [REQUEST, REQUEST])]
     assert rewards == [stub_score(str(clips[0])), stub_score(str(clips[1])), stub_score(str(clips[0])), 0.0]
     assert 0 <= rewards[0] < 1
 
 
 @pytest.mark.asyncio
-async def test_reward_scorer_failure_is_a_missing_reward(monkeypatch):
-    def broken(outputs, prompts):
-        raise RuntimeError("judge down")
-
-    monkeypatch.setattr(reward._SCORER, "score_batch", broken)
+async def test_reward_pool_failure_is_a_missing_reward():
     submitted = {"clip_id": "clip_1", "path": "/nowhere.mp4", "prompt": "x"}
     samples = [Sample(metadata={"video_gen": {"request": REQUEST, "submitted": submitted}}), Sample(metadata={})]
 
-    assert await reward_func(None, samples) == [None, 0.0]
+    assert await reward_func(_ARGS, samples, judge_pool=_StubPool(broken=True)) == [None, 0.0]
+
+
+@pytest.mark.asyncio
+async def test_an_episode_without_a_submission_never_calls_the_pool():
+    pool = _StubPool()
+
+    assert await reward_func(_ARGS, [Sample(metadata={})], judge_pool=pool) == [0.0]
+    assert pool.calls == []
+
+
+@pytest.mark.asyncio
+async def test_reward_names_an_undeclared_pool():
+    with pytest.raises(AssertionError, match="--video-reward-pool judge is not a declared pool"):
+        await reward_func(_ARGS, [Sample(metadata={})], other_pool=_StubPool())
