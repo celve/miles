@@ -42,6 +42,7 @@ def _runtime_args(**overrides):
     return SimpleNamespace(
         backend=SimpleNamespace(**values),
         enable_mtp_training=False,
+        freeze_vision_model=values.pop("freeze_vision_model", False),
         dsa_attention_backend=values.get("dsa_attention_backend"),
     )
 
@@ -83,5 +84,5 @@ def test_bridge_runtime_freezes_the_vision_tower_only_when_asked():
 
 
 def test_bridge_runtime_refuses_to_freeze_a_model_without_a_vision_tower():
-    with pytest.raises(AssertionError, match="--freeze-vision-model"):
+    with pytest.raises(ValueError, match="--freeze-vision-model"):
         _apply_bridge_runtime_config(_provider(), _runtime_args(freeze_vision_model=True))

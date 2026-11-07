@@ -70,6 +70,14 @@ def _apply_bridge_runtime_config(provider, args: TrainerConfig) -> None:
     provider.fp32_residual_connection = args.backend.fp32_residual_connection
     provider.deterministic_mode = args.backend.deterministic_mode
 
+    # The provider freezes inside provide(), before DDP wrapping, so frozen params get no grad buffer or optimizer state.
+    if args.freeze_vision_model:
+        if not hasattr(
+            provider, "freeze_vision_model"
+        ):  # config-access-exempt: only bridge providers of VL models have a vision tower to freeze
+            raise ValueError(f"--freeze-vision-model: {type(provider).__name__} has no vision tower to freeze")
+        provider.freeze_vision_model = True
+
     # activation recompute (silently dropped before -> no checkpointing -> OOM at long context)
     provider.recompute_granularity = args.backend.recompute_granularity
     provider.recompute_method = args.backend.recompute_method
@@ -113,12 +121,6 @@ def _apply_bridge_runtime_config(provider, args: TrainerConfig) -> None:
         provider.moe_router_bias_update_rate = args.backend.moe_router_bias_update_rate
     if args.backend.moe_aux_loss_coeff is not None:
         provider.moe_aux_loss_coeff = args.backend.moe_aux_loss_coeff
-
-    if args.freeze_vision_model:
-        assert hasattr(  # config-access-exempt: probes whether the Megatron-Bridge provider has a vision tower
-            provider, "freeze_vision_model"
-        ), f"--freeze-vision-model: {type(provider).__name__} has no vision tower to freeze"
-        provider.freeze_vision_model = True
 
     # Imported here: test_bridge_mtp_detachment.py exec()s this function's AST in a bare namespace (no module names).
     from miles.utils.megatron_bridge_utils import apply_dsa_backend_args
