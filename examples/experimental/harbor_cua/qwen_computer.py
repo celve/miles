@@ -1,11 +1,12 @@
 """Harbor's ``computer-1``, reading Qwen3-VL's clicks on the 0..999 grid it emits whatever the prompt asks for."""
 
-from dataclasses import asdict
+import json
+from dataclasses import asdict, replace
 from typing import Any
 
 from harbor.agents.computer_1.computer_1 import Computer1
 from harbor.agents.computer_1.providers.base import ModelStep
-from harbor.agents.computer_1.providers.generic import GenericJsonProvider
+from harbor.agents.computer_1.providers.generic import GenericJsonProvider, _extract_json_object
 from harbor.agents.computer_1.runtime import CoordinateSpace
 from harbor.llms.base import LLMResponse
 
@@ -13,6 +14,47 @@ from miles.utils.eval_record import EpisodeWriter, decode_data_url
 
 # The screen upstream OSWorld's Qwen3-VL agent names (osworld_qwen/qwen3vl.py); the runtime scales it to the desktop.
 QWEN3_VL_SCREEN = 1000
+# Harbor reads a point it cannot parse as none, and executes such an action at (0, 0).
+_NEEDS_POINT = frozenset(
+    {
+        "click",
+        "double_click",
+        "right_click",
+        "triple_click",
+        "mouse_move",
+        "mouse_down",
+        "mouse_up",
+        "drag",
+        "type_text_at",
+    }
+)
+
+
+def _scalar_point(action: dict) -> dict:
+    """The action with its point as scalar ``x`` and ``y`` when the reply wrote it as a pair, as Qwen3.8 often does."""
+    x, y = action.get("x"), action.get("y")
+    if isinstance(x, list) and len(x) == 2 and (y is None or y == x):
+        return {**action, "x": x[0], "y": x[1]}
+    if isinstance(x, list) and len(x) == 1 and isinstance(y, list) and len(y) == 1:
+        return {**action, "x": x[0], "y": y[0]}
+    coordinate = action.get("coordinate")
+    if x is None and isinstance(coordinate, list) and len(coordinate) == 2:
+        return {**action, "x": coordinate[0], "y": coordinate[1]}
+    return action
+
+
+def _with_scalar_point(response: LLMResponse) -> LLMResponse:
+    json_str, _ = _extract_json_object(response.content)
+    try:
+        data = json.loads(json_str) if json_str else None
+    except json.JSONDecodeError:
+        return response
+    if not isinstance(data, dict) or not isinstance(data.get("action"), dict):
+        return response
+    action = _scalar_point(data["action"])
+    if action is data["action"]:
+        return response
+    return replace(response, content=response.content.replace(json_str, json.dumps({**data, "action": action})))
 
 
 class Qwen3VLJsonProvider(GenericJsonProvider):
@@ -40,7 +82,15 @@ class Qwen3VLJsonProvider(GenericJsonProvider):
         return super().follow_up_messages(step, observation, screenshot_ref)
 
     def parse(self, llm_response: LLMResponse) -> ModelStep:
-        step = super().parse(llm_response)
+        parsed = super().parse(_with_scalar_point(llm_response))
+        # The history keeps the reply the engine generated; the session server matches its tokens against it.
+        step = replace(parsed, llm_response=llm_response, message=llm_response.content if parsed.message else "")
+        if step.action is not None and step.action.type in _NEEDS_POINT and None in (step.action.x, step.action.y):
+            step = ModelStep(
+                needs_retry=True,
+                feedback=f'ERROR: a {step.action.type!r} action needs integer "x" and "y", e.g. "x": 500, "y": 300',
+                llm_response=llm_response,
+            )
         if step.action is not None:
             step.action.source = CoordinateSpace.NORMALIZED_0_999.value
         if self.record is not None:

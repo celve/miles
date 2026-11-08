@@ -490,6 +490,16 @@ def test_verdict_maps_reward_metrics_and_timings():
     assert "agent_setup_time" not in m
 
 
+def test_an_agent_reward_gate_scores_the_trial_zero():
+    gated = _verdict(reward=1.0)
+    gated.agent_result.metadata = {"reward_gate": "typed shell or code text"}
+    out = haf.trial_result_to_metadata(gated)
+
+    assert out["reward"] == 0.0
+    assert out["eval_report"] == {"reward": 1.0}
+    assert out["agent_metrics"]["reward_gate"] == "typed shell or code text"
+
+
 @pytest.mark.parametrize(
     ("exc_type", "exit_status"),
     [

@@ -16,14 +16,22 @@ from harbor.agents.computer_1.runtime import ComputerAction, RuntimeRequestError
 class FakeEnvironment:
     default_user = "user"
 
-    def __init__(self, fail_on: str = ""):
+    def __init__(self, fail_on: str = "", display: str = "1920 1080", block_output: str = "blocked: /usr/bin/xterm"):
         self.commands: list[str] = []
+        self.users: list[str | None] = []
         self._fail_on = fail_on
+        self._display = display
+        self._block_output = block_output
 
     async def exec(self, command, timeout_sec=None, user=None, **_):
         self.commands.append(command)
+        self.users.append(user)
         if self._fail_on and self._fail_on in command:
             return SimpleNamespace(return_code=1, stdout="", stderr="boom")
+        if "getdisplaygeometry" in command:
+            return SimpleNamespace(return_code=0, stdout=self._display + "\n", stderr="")
+        if "gsettings" in command:
+            return SimpleNamespace(return_code=0, stdout=self._block_output, stderr="")
         return SimpleNamespace(return_code=0, stdout="ok" if "X11-unix" in command else "", stderr="")
 
 
@@ -87,6 +95,23 @@ def test_start_uses_the_running_display_and_launches_nothing(sleeps):
     assert "X11-unix/X1" in joined
     for launched in ("Xvfb", "startxfce4", "x11vnc", "chromium"):
         assert launched not in joined
+
+
+def test_clicks_follow_the_display_not_the_configured_size(sleeps):
+    env = FakeEnvironment(display="1920 1080")
+    session = dc.DesktopSession(
+        environment=env,
+        agent_dir="/logs/agent",
+        desktop_width=1024,
+        desktop_height=900,
+        settle_sec=0,
+        screenshot_size=None,
+    )
+    asyncio.run(session.start())
+    asyncio.run(session.execute(ComputerAction(type="click", x=999, y=999, source="normalized_completion")))
+
+    assert (session.geometry.desktop_width, session.geometry.desktop_height) == (1920, 1080)
+    assert "mousemove 1919 1079 click 1" in env.commands[-1]
 
 
 def test_the_session_lives_while_the_display_does():
@@ -262,7 +287,10 @@ def test_turns_beyond_keep_turns_collapse_to_one_line_each(tmp_path, monkeypatch
 
     head, summary, *kept = seen[0]
     assert head["content"][0]["text"] == "instruction"
-    assert summary["content"].splitlines()[1:] == ['1. {"type":"click","x":0,"y":0}', '2. {"type":"click","x":1,"y":0}']
+    assert summary["content"].splitlines()[1:] == [
+        '1. {"type":"click","x":0,"y":0}',
+        '2. {"type":"click","x":1,"y":0}',
+    ]
     assert [m["role"] for m in kept] == ["user", "assistant", "user", "assistant"]
     assert '"x": 3' in kept[-1]["content"]
 
@@ -344,3 +372,56 @@ def test_harbors_own_llm_calls_can_be_kept_off_the_policy(tmp_path, monkeypatch)
 
     asyncio.run(_agent(tmp_path)._maybe_write_final_answer_fallback("task"))
     assert calls == ["task"]
+
+
+def test_the_terminal_block_runs_as_root_before_the_first_screen(tmp_path, monkeypatch):
+    seen = []
+
+    async def first_screen(self, instruction, environment, context):
+        seen.append(len(environment.commands))
+
+    monkeypatch.setattr(dc.Qwen3VLComputer1, "run", first_screen)
+    env = FakeEnvironment()
+    asyncio.run(_agent(tmp_path, block_terminal="ga").run("task", env, SimpleNamespace(metadata=None)))
+
+    assert seen == [1] and env.users == ["root"]
+    assert "gnome-terminal" in env.commands[0] and env.commands[0].endswith(" block ga")
+    assert (tmp_path / "terminal_block.txt").read_text() == "blocked: /usr/bin/xterm"
+
+
+def test_a_block_that_leaves_a_terminal_loses_the_sandbox(tmp_path):
+    env = FakeEnvironment(block_output="STILL-RUNNABLE gnome-terminal")
+
+    with pytest.raises(RuntimeRequestError, match="STILL-RUNNABLE"):
+        asyncio.run(_agent(tmp_path, block_terminal="ga").run("task", env, SimpleNamespace(metadata=None)))
+
+
+@pytest.mark.parametrize(
+    ("typed", "gated"),
+    [("cat > /tmp/out.csv << EOF", True), ("import bpy", True), ("Quarterly report", False), ("=SUM(A1:A9)", False)],
+)
+def test_typed_shell_or_code_gates_the_reward(tmp_path, monkeypatch, typed, gated):
+    _record_executions(monkeypatch)
+
+    async def one_action(self, instruction, environment, context):
+        await self._execute_action(ComputerAction(type="type", text=typed), 0)
+
+    monkeypatch.setattr(dc.Qwen3VLComputer1, "run", one_action)
+    context = SimpleNamespace(metadata={"n_episodes": 1})
+    asyncio.run(_agent(tmp_path, gate_typed_code=True).run("task", FakeEnvironment(), context))
+
+    assert (dc.REWARD_GATE in context.metadata) is gated
+    assert context.metadata["n_episodes"] == 1
+
+
+def test_without_the_gate_typed_code_is_not_marked(tmp_path, monkeypatch):
+    _record_executions(monkeypatch)
+
+    async def one_action(self, instruction, environment, context):
+        await self._execute_action(ComputerAction(type="type", text="cat > /tmp/out.csv"), 0)
+
+    monkeypatch.setattr(dc.Qwen3VLComputer1, "run", one_action)
+    context = SimpleNamespace(metadata=None)
+    asyncio.run(_agent(tmp_path).run("task", FakeEnvironment(), context))
+
+    assert context.metadata is None

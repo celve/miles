@@ -52,7 +52,8 @@ Env vars (read on the rollout worker):
   HARBOR_OVERRIDE_STORAGE_MB
                          per-sandbox disk, Harbor's ``override_storage_mb``
   HARBOR_CUA_DESKTOP_WIDTH / HARBOR_CUA_DESKTOP_HEIGHT
-                         computer-1's desktop size (Harbor's default 1024x900)
+                         computer-1's desktop size (Harbor's default 1024x900); a
+                         desktop-mode agent clicks on the display's own size instead
   HARBOR_AGENT_IMPORT_PATH
                          ``module:Class`` Harbor builds instead of the binding's agent
   HARBOR_AGENT_KWARGS    JSON object added to ``AgentConfig.kwargs``; a key the
@@ -575,6 +576,9 @@ def trial_result_to_metadata(result) -> dict[str, Any]:
         if timing is not None and (duration := _timing_duration_sec(timing)) is not None:
             metrics[key] = duration
 
+    # An agent that saw its episode earn reward by a forbidden route (DesktopQwen3VLComputer1's gate_typed_code) vetoes it.
+    if metrics.get("reward_gate"):
+        reward = 0.0
     return {"reward": reward, "exit_status": exit_status, "eval_report": rewards, "agent_metrics": metrics}
 
 
