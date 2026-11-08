@@ -413,13 +413,14 @@ def _clip_request(
         return None, "negative_prompt must be a string"
     if not isinstance(seed, int) or isinstance(seed, bool):
         return None, "seed must be an integer"
-    if not isinstance(seconds, (int, float)) or isinstance(seconds, bool) or seconds <= 0:
+    # `not >` also rejects NaN, which the qwen3_coder parser passes through as a JSON number.
+    if not isinstance(seconds, (int, float)) or isinstance(seconds, bool) or not seconds > 0:
         return None, "seconds must be a positive number"
     request = ClipRequest(
         prompt=prompt,
         negative_prompt=negative_prompt,
         seed=seed,
-        seconds=min(float(seconds), options.max_seconds),
+        seconds=float(min(seconds, options.max_seconds)),
         width=options.width,
         height=options.height,
         fps=options.fps,
