@@ -30,7 +30,6 @@ def test_each_episode_counts_once_however_many_branches_it_left():
         "episode/folded_clips": 1.0,
         "episode/recalls": 0.5,
         "episode/samples": 2.0,
-        "episode/reward": 0.5,
         "episode/prompt_tokens_per_turn": 1250.0,
         "episode/peak_prompt_tokens": 1750.0,
         "episode/shots_submitted": 2.0,

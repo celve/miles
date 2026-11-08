@@ -20,6 +20,7 @@ Run-wide options come from ``AGENT_VIDEO_GEN_*`` env vars, which worker and sand
                                    is deleted at run end (required)
   AGENT_VIDEO_GEN_MAX_GENERATIONS  generations per episode, at most 3 (default 3)
   AGENT_VIDEO_GEN_MAX_EXTENDS      extends per episode, beside the generations; 0 offers no extend tool (default 0)
+  AGENT_VIDEO_GEN_MIN_SHOTS        shots a submitted video needs; a shorter chain is refused (default 0: any)
   AGENT_VIDEO_GEN_MAX_TURNS        policy turns per episode (default 8)
   AGENT_VIDEO_GEN_MAX_SECONDS      longest clip in seconds; longer requests are cut to it (default 5)
   AGENT_VIDEO_GEN_WIDTH / _HEIGHT / _FPS  every clip's shape (default 832x480 at 16 fps)
@@ -105,6 +106,7 @@ class VideoGenEnvOptions:
     generator: str = ""
     max_generations: int = 3
     max_extends: int = 0
+    min_shots: int = 0
     max_turns: int = 8
     max_seconds: float = 5.0
     width: int = 832
@@ -130,11 +132,16 @@ class VideoGenEnvOptions:
                 raise ValueError(
                     f"{_ENV_PREFIX}{name.upper()} must be positive, got {getattr(self, name)}"
                 )  # config-access-exempt: iterates the options dataclass's own fields
-        for name in ("max_extends", "keep_clips"):
+        for name in ("max_extends", "min_shots", "keep_clips"):
             if getattr(self, name) < 0:  # config-access-exempt: iterates the options dataclass's own fields
                 raise ValueError(
                     f"{_ENV_PREFIX}{name.upper()} must not be negative, got {getattr(self, name)}"
                 )  # config-access-exempt: iterates the options dataclass's own fields
+        if self.min_shots > 1 + self.max_extends:
+            raise ValueError(
+                f"{_ENV_PREFIX}MIN_SHOTS {self.min_shots} needs MAX_EXTENDS of at least {self.min_shots - 1}, "
+                f"got {self.max_extends}"
+            )
         if self.fold not in _FOLDS:
             raise ValueError(f"{_ENV_PREFIX}FOLD is one of {', '.join(_FOLDS)}, got {self.fold!r}")
         if self.keep_clips and not self.clip_observations:
@@ -259,6 +266,8 @@ def _system_prompt(options: VideoGenEnvOptions) -> str:
             "last frame, and submitting the last shot submits all its shots joined in order, as one video. "
             f"You have {options.max_extends} extends."
         )
+    if options.min_shots > 1:
+        text += f" The video must have at least {options.min_shots} shots: extend until it does, then submit its last shot."
     if options.keep_clips:
         folded_to = "a note" if options.fold == "text" else "their last frame"
         text += (
@@ -416,6 +425,11 @@ async def _submit(episode: _Episode, arguments: dict) -> str:
     if error:
         return error
     shots = _shots(episode, clip)
+    if len(shots) < episode.options.min_shots:
+        return (
+            f"Error: the video needs at least {episode.options.min_shots} shots, and {clip.clip_id} has "
+            f"{len(shots)}; extend it first. {episode.budget()}"
+        )
     submitted_dir = episode.options.submitted_dir
     if len(shots) == 1:
         path = _keep(clip.path, submitted_dir)

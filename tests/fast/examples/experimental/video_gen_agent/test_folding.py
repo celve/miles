@@ -284,3 +284,35 @@ def test_folding_needs_clip_observations_and_a_known_fold(monkeypatch):
     monkeypatch.setenv("AGENT_VIDEO_GEN_MAX_EXTENDS", "4")
     options = env.VideoGenEnvOptions.from_env()
     assert (options.keep_clips, options.fold, options.max_extends) == (2, "keyframe", 4)
+
+
+@pytest.mark.asyncio
+async def test_a_video_shorter_than_min_shots_is_refused_until_it_is_extended(options):
+    options.setenv("AGENT_VIDEO_GEN_MAX_EXTENDS", "2")
+    options.setenv("AGENT_VIDEO_GEN_MIN_SHOTS", "2")
+    sent = _script(
+        options,
+        [_call("generate", {"prompt": "a boat"})],
+        [_call("submit", {"clip_id": "clip_1"})],
+        [_call("extend", {"clip_id": "clip_1", "prompt": "it sinks"})],
+        [_call("submit", {"clip_id": "clip_2"})],
+    )
+
+    submitted = (await _run())["video_gen"]["submitted"]
+
+    assert "The video must have at least 2 shots" in sent[0]["messages"][0]["content"]
+    refused = sent[2]["messages"][-1]["content"]
+    assert (
+        refused
+        == "Error: the video needs at least 2 shots, and clip_1 has 1; extend it first. Generations left: 2. Extends left: 2. Turns left: 6."
+    )
+    assert submitted["shots"] == ["clip_1", "clip_2"]
+
+
+def test_min_shots_needs_enough_extends(monkeypatch):
+    monkeypatch.setenv("AGENT_VIDEO_GEN_GENERATOR", "some.generator")
+    monkeypatch.setenv("AGENT_VIDEO_GEN_SUBMITTED_DIR", "/kept")
+    monkeypatch.setenv("AGENT_VIDEO_GEN_MIN_SHOTS", "4")
+    monkeypatch.setenv("AGENT_VIDEO_GEN_MAX_EXTENDS", "2")
+    with pytest.raises(ValueError, match="MIN_SHOTS 4 needs MAX_EXTENDS of at least 3, got 2"):
+        env.VideoGenEnvOptions.from_env()

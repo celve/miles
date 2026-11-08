@@ -70,9 +70,12 @@ def test_the_env_is_set_for_clip_observations_with_phase_0s_clips():
 
 
 def test_multi_shot_folding_reaches_the_env():
-    env = _agent_env(ScriptArgs(run_id="test", max_extends=5, max_turns=12, keep_clips=2, fold="keyframe"))
+    env = _agent_env(
+        ScriptArgs(run_id="test", max_extends=5, min_shots=4, max_turns=12, keep_clips=2, fold="keyframe")
+    )
 
     assert env["AGENT_VIDEO_GEN_MAX_EXTENDS"] == "5" and env["AGENT_VIDEO_GEN_MAX_TURNS"] == "12"
+    assert env["AGENT_VIDEO_GEN_MIN_SHOTS"] == "4"
     assert env["AGENT_VIDEO_GEN_KEEP_CLIPS"] == "2" and env["AGENT_VIDEO_GEN_FOLD"] == "keyframe"
 
 
