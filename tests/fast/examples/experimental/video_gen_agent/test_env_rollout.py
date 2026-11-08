@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 import pytest
+from examples.experimental.video_gen_agent.generator import Clip, ClipRequest
 from examples.experimental.video_gen_agent.multiturn.generator import URL_ENV
 from examples.experimental.video_gen_agent.reward import StubClipScorer, stub_score
 from tests.fast.fixtures.generation_fixtures import extra_argv_for_variant
@@ -20,6 +21,11 @@ REQUEST = "A paper boat drifts down a rain gutter."
 class _StubPool:
     async def score(self, outputs, prompts):
         return StubClipScorer().score_batch(outputs, prompts)
+
+
+class _BrokenGenerator:
+    async def generate(self, request: ClipRequest) -> Clip:
+        raise KeyError("fps")
 
 
 _POOLS = {"judge": _StubPool()}
@@ -124,3 +130,32 @@ def test_the_multiturn_hook_hands_the_env_the_generators_router(rollout_env, env
     args = rollout_env.args
     assert os.environ[URL_ENV] == f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
     assert out.samples
+
+
+@pytest.mark.parametrize("rollout_env", [pytest.param(_config("inline"), id="inline")], indirect=True)
+def test_a_turn_cut_at_the_token_limit_ends_the_episode_unsubmitted(rollout_env, env_vars):
+    prompts: list[str] = []
+
+    def process_fn(prompt: str) -> ProcessResult:
+        prompts.append(prompt)
+        return ProcessResult(text="Let me picture the gutter first", finish_reason="length")
+
+    rollout_env.mock_server.process_fn = process_fn
+
+    out = load_and_call_rollout(rollout_env.args, rollout_env.data_source, mode="train", reward_pools=_POOLS)
+
+    samples = [s for group in out.samples for sub in group for s in (sub if isinstance(sub, list) else [sub])]
+    assert len(prompts) == 1 and samples
+    for sample in samples:
+        assert sample.metadata["video_gen"]["submitted"] is None and sample.metadata["video_gen"]["turns"] == 1
+        assert sample.reward == 0.0
+
+
+@pytest.mark.parametrize("rollout_env", [pytest.param(_config("inline"), id="inline")], indirect=True)
+def test_an_env_fault_aborts_the_group_instead_of_training_it(rollout_env, env_vars):
+    monkeypatch, _ = env_vars
+    monkeypatch.setenv("AGENT_VIDEO_GEN_GENERATOR", f"{__name__}._BrokenGenerator")
+    rollout_env.mock_server.process_fn = _policy([])
+
+    with pytest.raises(RuntimeError, match="exit_status 'EnvError'"):
+        load_and_call_rollout(rollout_env.args, rollout_env.data_source, mode="train", reward_pools=_POOLS)
