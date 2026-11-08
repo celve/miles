@@ -26,11 +26,11 @@ Clips are Phase 0's: 832×480, 2 s at 24 fps (49 frames), FastWan's 3-step sched
 
 ## Multi-shot episodes and clip folding
 
-A multi-shot episode builds a longer video from shots: `--max-extends E` lets the planner continue a clip E times, each new shot generated image-to-video from the last frame of the one before (FastWan2.2-TI2V-5B takes a frame), and submitting the last shot submits all of them joined. Its clips soon outgrow the context, and SGLang re-encodes every clip of a conversation through the ViT on every turn, so `--keep-clips K` keeps only the last K clips in view and folds the older ones to a note (`--fold text`, the default) or a keyframe (`--fold keyframe`); the planner can `recall` a folded clip. The env's options are in [`env.py`](../env.py).
+A multi-shot episode builds a longer video from shots: `--max-extends E` lets the planner continue a clip E times, each new shot generated image-to-video from the last frame of the one before (FastWan2.2-TI2V-5B takes a frame), and submitting the last shot submits all of them joined. An untrained planner rarely extends on its own, so `--min-shots N` makes submit refuse a video of fewer than N shots. Its clips soon outgrow the context, and SGLang re-encodes every clip of a conversation through the ViT on every turn, so `--keep-clips K` keeps only the last K clips in view and folds the older ones to a note (`--fold text`, the default) or a keyframe (`--fold keyframe`); the planner can `recall` a folded clip. The env's options are in [`env.py`](../env.py).
 
 ```bash
-# up to 3 generations and 5 extends an episode, the last 2 clips in view
-python examples/experimental/video_gen_agent/multiturn/run_qwen35_9b_fastwan.py --max-extends 5 --max-turns 12 --keep-clips 2
+# videos of at least 4 shots (up to 3 generations and 5 extends an episode), the last 2 clips in view
+python examples/experimental/video_gen_agent/multiturn/run_qwen35_9b_fastwan.py --max-extends 5 --min-shots 4 --max-turns 12 --keep-clips 2
 ```
 
 Every fold opens a session v2 branch, which becomes a sample with the episode's reward; the default sample picker keeps it. A K-fold episode of N clips therefore trains up to N − K + 1 samples, each repeating the folded history before its own turns as prompt.
@@ -44,7 +44,7 @@ python -m examples.experimental.video_gen_agent.multiturn.fold_sweep --engine-ur
 
 ## What to read in a run
 
-- `eval/heldout`: the planner on the held-out requests, greedy; step 0 is the untrained planner. It is the mean episode reward: [`episode_metrics.py`](episode_metrics.py)'s eval log hook keeps one row per episode, so episodes that folded into more branches do not weigh more. In training, `episode/reward` is the same per-episode mean, while `rollout/` rewards count each branch.
+- `eval/heldout`: the planner on the held-out requests, greedy; step 0 is the untrained planner. It is the mean episode reward: [`episode_metrics.py`](episode_metrics.py)'s eval log hook keeps one row per episode, so episodes that folded into more branches do not weigh more. In training, Miles' `rollout/episode_raw_reward` is the per-episode mean; `rollout/raw_reward_unfiltered` counts each branch.
 - `perf/multimodal_rebuild_time`: the trainer's wait for its media in a step, the number to compare with and without `--no-feature-cache`.
 - `train/train_rollout_logprob_abs_diff`: the train/rollout log-prob gap, which TimeLens keeps near 0.006.
 - `episode/prompt_tokens_per_turn`, `episode/peak_prompt_tokens`, `episode/turn_seconds`: each policy call's prompt, as the engine counted it, and its wall time, per episode; with `episode/folded_clips`, `episode/recalls`, `episode/shots_submitted` and `episode/samples` (branches per episode), from [`episode_metrics.py`](episode_metrics.py), the rollout log hook, which also prunes the feature cache.
