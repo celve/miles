@@ -7,6 +7,7 @@ the session is alive.
 
 import asyncio
 import json
+import logging
 import shlex
 from dataclasses import asdict
 from pathlib import PurePosixPath
@@ -14,6 +15,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from examples.experimental.harbor_cua.qwen_computer import Qwen3VLComputer1, Qwen3VLJsonProvider
+from examples.experimental.harbor_cua.terminal_block import BLOCK_SCRIPT, typed_code
 from harbor.agents.computer_1.runtime import (
     _DEFAULT_DISPLAY,
     _RUNTIME_DIR,
@@ -26,9 +28,14 @@ from harbor.agents.computer_1.runtime import (
 )
 from harbor.environments.base import BaseEnvironment
 
+logger = logging.getLogger(__name__)
+
 # zoom crops the next frame, against which Qwen3-VL's grid clicks are then mis-scaled.
 UNAVAILABLE_ACTIONS = frozenset({"zoom", "navigate", "go_back", "go_forward"})
 _UNCHANGED_SCREEN_ACTIONS = frozenset({"wait", "sleep", *TERMINAL_ACTION_TYPES})
+_TYPING = frozenset({"type", "type_text_at"})
+# Agent metadata the Harbor agent function reads: a trial carrying it scores 0 whatever its verifier said.
+REWARD_GATE = "reward_gate"
 
 # Each passage is removed from Harbor's computer-1-json.txt, and a missing one fails the build.
 _PROMPT_CUTS = (
@@ -114,7 +121,22 @@ class DesktopSession(Computer1Session):
         dirs = " ".join(shlex.quote(d) for d in (_RUNTIME_DIR, _SCREENSHOT_DIR, str(self._agent_dir)))
         await self._exec(_bash_inline(f"mkdir -p {dirs}"), timeout_sec=60, label="mkdir runtime dirs", retries=2)
         await self._wait_for_x11()
+        await self._follow_display_size()
         self._started = True
+
+    async def _follow_display_size(self) -> None:
+        """Grid clicks scale onto the display the image runs, whatever size the agent was configured with."""
+        out = await self._exec(
+            f"DISPLAY={_DEFAULT_DISPLAY} xdotool getdisplaygeometry", timeout_sec=30, label="display size", retries=2
+        )
+        width, height = (int(v) for v in out.split())
+        configured = (self.geometry.desktop_width, self.geometry.desktop_height)
+        if configured != (width, height):
+            logger.warning(
+                "desktop configured as %dx%d, display is %dx%d: clicks follow the display", *configured, width, height
+            )
+        self.geometry.desktop_width = self.geometry.window_width = width
+        self.geometry.desktop_height = self.geometry.window_height = height
 
     async def is_session_alive(self) -> bool:
         try:
@@ -166,6 +188,8 @@ class DesktopQwen3VLComputer1(Qwen3VLComputer1):
     ``keep_turns`` keeps that many replies in full and collapses older turns into one line per action; ``loop_limit``
     ends the episode once a block of up to five actions repeats that many times; ``compaction=False`` and
     ``final_answer_fallback=False`` keep Harbor's summarizer and final-answer calls off the policy's session.
+    ``block_terminal`` names the desktop user whose shells are taken away before the first screenshot, and
+    ``gate_typed_code`` marks an episode that typed shell or code text so the agent function scores it 0.
     """
 
     session_class: type[DesktopSession] = DesktopSession
@@ -181,6 +205,8 @@ class DesktopQwen3VLComputer1(Qwen3VLComputer1):
         loop_limit: int | None = None,
         compaction: bool = True,
         final_answer_fallback: bool = True,
+        block_terminal: str | None = None,
+        gate_typed_code: bool = False,
         **kwargs: Any,
     ) -> None:
         if (screenshot_width is None) != (screenshot_height is None):
@@ -198,6 +224,9 @@ class DesktopQwen3VLComputer1(Qwen3VLComputer1):
         self._keep_turns = keep_turns
         self._loop_limit = loop_limit
         self._final_answer_fallback = final_answer_fallback
+        self._block_terminal = block_terminal
+        self._gate_typed_code = gate_typed_code
+        self._typed_code = False
         self._fingerprints: list[str] = []
         self._summary: dict[str, Any] | None = None
         self._summary_lines: list[str] = []
@@ -255,6 +284,8 @@ class DesktopQwen3VLComputer1(Qwen3VLComputer1):
         messages[:] = [head, self._summary, *(m for t in turns[cut:] for m in t)]
 
     async def _execute_action(self, action: Any, episode: int) -> Any:
+        if self._gate_typed_code and action is not None and isinstance(action.text, str) and action.type in _TYPING:
+            self._typed_code = self._typed_code or typed_code(action.text)
         if action is not None and action.type not in TERMINAL_ACTION_TYPES:
             self._fingerprints.append(json.dumps(asdict(action), sort_keys=True, default=str))
             # As CUA-Lite's LoopDetectWrapper does, the action that would close the loop is never executed.
@@ -270,11 +301,28 @@ class DesktopQwen3VLComputer1(Qwen3VLComputer1):
         return await super()._query_litellm(chat, prompt, *args, **kwargs)
 
     async def run(self, instruction: str, environment: BaseEnvironment, context: Any) -> None:
+        if self._block_terminal is not None:
+            await self._take_terminals(environment)
         try:
             await super().run(instruction, environment, context)
         except LoopDetected:
             # Harbor has recorded the trial by now; the verifier scores the state the loop left.
             pass
+        finally:
+            if self._typed_code:
+                context.metadata = {**(context.metadata or {}), REWARD_GATE: "typed shell or code text"}
+
+    async def _take_terminals(self, environment: BaseEnvironment) -> None:
+        # After the task's setup, which may need a shell; a failed block is a lost sandbox, discarded rather than scored.
+        result = await environment.exec(
+            f"bash -c {shlex.quote(BLOCK_SCRIPT)} block {shlex.quote(self._block_terminal)}",
+            user="root",
+            timeout_sec=60,
+        )
+        output = (result.stdout or "") + (result.stderr or "")
+        (self.logs_dir / "terminal_block.txt").write_text(output)
+        if result.return_code != 0 or "STILL-RUNNABLE" in output:
+            raise RuntimeRequestError("terminal block", result.return_code or 1, output[-2000:])
 
     async def _maybe_write_final_answer_fallback(self, instruction: str) -> None:
         if self._final_answer_fallback:

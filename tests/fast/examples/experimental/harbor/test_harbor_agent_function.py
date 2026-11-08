@@ -344,7 +344,9 @@ def test_a_samples_turn_cap_wins_over_the_launch_default(tasks_dir, monkeypatch)
 
 def test_a_turn_cap_for_a_binding_without_one_is_refused(tasks_dir):
     with pytest.raises(ValueError, match="takes no max_turns"):
-        haf.build_trial_config({"instance_id": "task-1", "agent_name": "mini-swe-agent", "max_turns": 9}, "http://s/v1", {})
+        haf.build_trial_config(
+            {"instance_id": "task-1", "agent_name": "mini-swe-agent", "max_turns": 9}, "http://s/v1", {}
+        )
 
 
 def test_a_samples_environment_kwargs_win_per_key(tasks_dir, monkeypatch):
@@ -488,6 +490,27 @@ def test_verdict_maps_reward_metrics_and_timings():
     assert m["turns"] == 7 and m["tool_calls"] == 5 and m["n_input_tokens"] == 1000
     assert m["total_time"] == 90.0 and m["env_setup_time"] == 10.0 and m["eval_time"] == 10.0
     assert "agent_setup_time" not in m
+
+
+def test_an_agent_reward_gate_scores_the_trial_zero():
+    gated = _verdict(reward=1.0)
+    gated.agent_result.metadata = {"reward_gate": "typed shell or code text"}
+    out = haf.trial_result_to_metadata(gated)
+
+    assert out["reward"] == 0.0
+    assert out["eval_report"] == {"reward": 1.0}
+    assert out["agent_metrics"]["reward_gate"] == "typed shell or code text"
+
+
+def test_a_reward_gate_on_any_step_of_a_multi_step_trial_scores_it_zero():
+    trial = _verdict(reward=1.0)
+    trial.agent_result = None
+    trial.step_results = [
+        SimpleNamespace(agent_result=SimpleNamespace(metadata={})),
+        SimpleNamespace(agent_result=SimpleNamespace(metadata={"reward_gate": "typed shell or code text"})),
+    ]
+
+    assert haf.trial_result_to_metadata(trial)["reward"] == 0.0
 
 
 @pytest.mark.parametrize(

@@ -1,11 +1,12 @@
 """Harbor's ``computer-1``, reading Qwen3-VL's clicks on the 0..999 grid it emits whatever the prompt asks for."""
 
-from dataclasses import asdict
+import json
+from dataclasses import asdict, replace
 from typing import Any
 
 from harbor.agents.computer_1.computer_1 import Computer1
 from harbor.agents.computer_1.providers.base import ModelStep
-from harbor.agents.computer_1.providers.generic import GenericJsonProvider
+from harbor.agents.computer_1.providers.generic import GenericJsonProvider, _extract_json_object
 from harbor.agents.computer_1.runtime import CoordinateSpace
 from harbor.llms.base import LLMResponse
 
@@ -13,6 +14,60 @@ from miles.utils.eval_record import EpisodeWriter, decode_data_url
 
 # The screen upstream OSWorld's Qwen3-VL agent names (osworld_qwen/qwen3vl.py); the runtime scales it to the desktop.
 QWEN3_VL_SCREEN = 1000
+# Harbor reads a point it cannot parse as none, and executes such an action at (0, 0).
+_NEEDS_POINT = frozenset(
+    {
+        "click",
+        "double_click",
+        "right_click",
+        "triple_click",
+        "mouse_move",
+        "mouse_down",
+        "mouse_up",
+        "drag",
+        "type_text_at",
+    }
+)
+
+
+def _scalar_pair(action: dict, x_key: str, y_key: str) -> dict:
+    x, y = action.get(x_key), action.get(y_key)
+    if isinstance(x, list) and len(x) == 2 and (y is None or y == x):
+        return {**action, x_key: x[0], y_key: x[1]}
+    if isinstance(x, list) and len(x) == 1 and isinstance(y, list) and len(y) == 1:
+        return {**action, x_key: x[0], y_key: y[0]}
+    return action
+
+
+def _scalar_point(action: dict) -> dict:
+    """The action with scalar points where the reply wrote a pair (``"x": [x, y]``, ``"end_x": [x, y]``), as Qwen3.8 often does."""
+    coordinate = action.get("coordinate")
+    if action.get("x") is None and isinstance(coordinate, list) and len(coordinate) == 2:
+        action = {**action, "x": coordinate[0], "y": coordinate[1]}
+    return _scalar_pair(_scalar_pair(action, "x", "y"), "end_x", "end_y")
+
+
+def _missing_point(action: Any) -> str:
+    if action.type in _NEEDS_POINT and None in (action.x, action.y):
+        return '"x" and "y"'
+    # Harbor drags to the start point when the end is unreadable, which moves nothing.
+    if action.type == "drag" and None in (action.end_x, action.end_y):
+        return '"end_x" and "end_y"'
+    return ""
+
+
+def _with_scalar_point(response: LLMResponse) -> LLMResponse:
+    json_str, _ = _extract_json_object(response.content)
+    try:
+        data = json.loads(json_str) if json_str else None
+    except json.JSONDecodeError:
+        return response
+    if not isinstance(data, dict) or not isinstance(data.get("action"), dict):
+        return response
+    action = _scalar_point(data["action"])
+    if action == data["action"]:
+        return response
+    return replace(response, content=response.content.replace(json_str, json.dumps({**data, "action": action})))
 
 
 class Qwen3VLJsonProvider(GenericJsonProvider):
@@ -40,7 +95,15 @@ class Qwen3VLJsonProvider(GenericJsonProvider):
         return super().follow_up_messages(step, observation, screenshot_ref)
 
     def parse(self, llm_response: LLMResponse) -> ModelStep:
-        step = super().parse(llm_response)
+        parsed = super().parse(_with_scalar_point(llm_response))
+        # The history keeps the reply the engine generated; the session server matches its tokens against it.
+        step = replace(parsed, llm_response=llm_response, message=llm_response.content if parsed.message else "")
+        if step.action is not None and (missing := _missing_point(step.action)):
+            step = ModelStep(
+                needs_retry=True,
+                feedback=f'ERROR: a {step.action.type!r} action needs integer {missing}, e.g. "x": 500, "y": 300',
+                llm_response=llm_response,
+            )
         if step.action is not None:
             step.action.source = CoordinateSpace.NORMALIZED_0_999.value
         if self.record is not None:
