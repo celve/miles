@@ -2,6 +2,8 @@ import asyncio
 import dataclasses
 from typing import Any
 
+import torch
+
 from miles.backends.sglang_utils.sglang_api_client import SGLangApiClient
 from miles.diffusion.clip import save_clip
 from miles.diffusion.rollout.response import parse_rollout_response
@@ -105,9 +107,25 @@ class DiffusionApiClient(SGLangApiClient):
         response.raise_for_status()
         (rollout,) = await asyncio.to_thread(parse_rollout_response, response.content)
         video = rollout.generated_output
+        if image_path and video.shape[1] == num_frames:
+            # Wan2.2 TI2V picks its own size from the image (SGLang's input_validation, 704x1280 area), whatever we ask.
+            video = _fit(video, height=height, width=width)
         if tuple(video.shape[1:]) != (num_frames, height, width):
             raise ValueError(
                 f"asked for {num_frames} frames of {width}x{height}, the engine generated {video.shape[1]} frames of "
                 f"{video.shape[3]}x{video.shape[2]}; pick a frame count and size the model takes as they are"
             )
         return await asyncio.to_thread(save_clip, video, fps=fps, output_dir=output_dir)
+
+
+def _fit(video: torch.Tensor, *, height: int, width: int) -> torch.Tensor:
+    """Center-crop a uint8 ``[C, F, H, W]`` clip to ``width/height``'s aspect, then resize it to that size."""
+    _, _, source_height, source_width = video.shape
+    if (source_height, source_width) == (height, width):
+        return video
+    crop_height = min(source_height, round(source_width * height / width))
+    crop_width = min(source_width, round(source_height * width / height))
+    top, left = (source_height - crop_height) // 2, (source_width - crop_width) // 2
+    frames = video[:, :, top : top + crop_height, left : left + crop_width].permute(1, 0, 2, 3).float()
+    resized = torch.nn.functional.interpolate(frames, size=(height, width), mode="bilinear", antialias=True)
+    return resized.round().clamp(0, 255).to(torch.uint8).permute(1, 0, 2, 3).contiguous()

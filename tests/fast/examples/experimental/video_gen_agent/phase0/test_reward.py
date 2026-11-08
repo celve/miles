@@ -52,7 +52,9 @@ def _fake_multimodal_gen(seen: list) -> FastAPI:
         if "outage" in body["prompt"]:
             return Response(status_code=503)
         generator = torch.Generator().manual_seed(body["seed"] + len(body["prompt"]))
-        video = torch.randint(0, 256, (3, _FRAMES, _HEIGHT, _WIDTH), dtype=torch.uint8, generator=generator)
+        # Wan2.2 TI2V renders an image-to-video request at a size of its own choosing.
+        height, width = (_HEIGHT * 3 // 2, _WIDTH * 5 // 3) if body.get("image_path") else (_HEIGHT, _WIDTH)
+        video = torch.randint(0, 256, (3, _FRAMES, height, width), dtype=torch.uint8, generator=generator)
         output = {"__tensor__": True, "data": save({"t": video})}
         return Response(content=msgpack.packb([{"seed": body["seed"], "generated_output": output}]))
 
