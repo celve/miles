@@ -179,6 +179,22 @@ async def test_bad_calls_are_answered_without_spending_a_generation(options):
 
 
 @pytest.mark.asyncio
+async def test_a_nan_duration_is_refused_and_a_huge_one_is_cut(options):
+    sent = _script(
+        options,
+        [_call("generate", '{"prompt": "x", "seconds": NaN}'), _call("generate", {"prompt": "x", "seconds": 10**310})],
+        [_call("submit", {"clip_id": "clip_1"})],
+    )
+
+    await _run()
+
+    nan_reply, huge_reply = _tool_replies(sent[1])
+    assert nan_reply.startswith("Error: seconds must be a positive number.")
+    assert huge_reply.startswith("Generated clip_1: 5 s (cut to the 5 s limit)")
+    assert [r.seconds for r in _CountingGenerator.requests[-1:]] == [5.0]
+
+
+@pytest.mark.asyncio
 async def test_generator_outage_discards_the_sample(options):
     options.setenv("AGENT_VIDEO_GEN_GENERATOR", "examples.experimental.video_gen_agent.generator.FakeClipGenerator")
     options.setenv("AGENT_VIDEO_GEN_FAKE_UNAVAILABLE", "1")

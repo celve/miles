@@ -3,6 +3,7 @@
 import os
 from dataclasses import replace
 
+import av
 import pytest
 from examples.experimental.video_gen_agent.generator import ClipRequest, GeneratorUnavailable
 from examples.experimental.video_gen_agent.multiturn import generator
@@ -49,10 +50,14 @@ async def test_a_request_becomes_one_clip_with_the_envs_shape_and_the_launchers_
 async def test_an_extension_sends_the_frame_it_continues_from(clip_generator):
     clip_generator, seen, _ = clip_generator
 
-    await clip_generator.generate(replace(_request("it sinks", seconds=2), image_path="/clips/a.mp4.last.png"))
+    clip = await clip_generator.generate(replace(_request("it sinks", seconds=2), image_path="/clips/a.mp4.last.png"))
 
     (body,) = seen
     assert body["image_path"] == ["/clips/a.mp4.last.png"] and body["prompt"] == "it sinks"
+    # The engine rendered it larger and wider; the clip still has the env's shape, so its shots join.
+    with av.open(clip.path) as container:
+        stream = container.streams.video[0]
+        assert (stream.width, stream.height, stream.frames) == (_WIDTH, _HEIGHT, 9)
 
 
 async def test_a_failing_generator_is_an_outage_not_a_policy_failure(clip_generator):

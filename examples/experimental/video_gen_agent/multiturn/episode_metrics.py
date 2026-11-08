@@ -1,10 +1,10 @@
 """Rollout log hooks that count each episode once, however many session v2 branches folding split it into.
 
 ``--custom-rollout-log-function-path examples.experimental.video_gen_agent.multiturn.episode_metrics.log_episodes``
-adds per-episode context, timing and reward to the rollout's metrics, and prunes the feature cache when the run
-shares one. Every branch's sample carries the episode's ``video_gen`` record and reward.
+adds per-episode context and timing to the rollout's metrics, and prunes the feature cache when the run
+shares one. Every branch's sample carries the episode's ``video_gen`` record. The per-episode training reward is
+Miles' own ``rollout/episode_raw_reward``.
 
-  episode/reward                  the episode's reward, one value per episode (rollout/ rewards count branches)
   episode/prompt_tokens_per_turn  the policy's prompt per turn, as the engine counted it (clips expanded)
   episode/peak_prompt_tokens      the episode's largest prompt
   episode/turn_seconds            wall time of a policy call
@@ -51,7 +51,6 @@ def _first_of_each_episode(samples) -> list[bool]:
 def episode_metrics(samples) -> dict[str, float]:
     episodes: dict[str, dict] = {}
     branches: dict[str, int] = {}
-    rewards: dict[str, float | None] = {}
     for sample in samples:
         record = sample.metadata.get("video_gen")
         if record is None:
@@ -59,7 +58,6 @@ def episode_metrics(samples) -> dict[str, float]:
         session_id = sample.metadata["session_id"]
         episodes[session_id] = record
         branches[session_id] = branches.get(session_id, 0) + 1
-        rewards.setdefault(session_id, sample.reward)
     if not episodes:
         return {}
     tokens = [
@@ -73,8 +71,6 @@ def episode_metrics(samples) -> dict[str, float]:
         "episode/recalls": np.mean([e["recalls"] for e in episodes.values()]).item(),
         "episode/samples": np.mean(list(branches.values())).item(),
     }
-    if scored := [reward for reward in rewards.values() if reward is not None]:
-        metrics["episode/reward"] = np.mean(scored).item()
     if tokens:
         metrics["episode/prompt_tokens_per_turn"] = np.mean([np.mean(episode) for episode in tokens]).item()
         metrics["episode/peak_prompt_tokens"] = np.mean([max(episode) for episode in tokens]).item()

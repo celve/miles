@@ -17,6 +17,7 @@ Args:
     --num-rollout, --rollout-batch-size, --n-samples-per-prompt: GRPO steps, requests per step, episodes per request.
     --feature-cache / --no-feature-cache: share the engines' disk item feature cache with the trainer.
     --max-extends, --max-turns: multi-shot episodes, each extend continuing a clip as a new shot (0: single-shot).
+    --min-shots: shots a submitted video needs (0: any), so episodes are multi-shot rather than merely allowed to be.
     --keep-clips, --fold: keep the last K clips in view and fold older ones to a note or a keyframe (0: no folding).
     --model-dir, --data-dir: where models and the requests live; checkpoints and clips go under --output-dir.
 
@@ -72,6 +73,7 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     n_samples_per_prompt: int = 8
     max_generations: int = 3
     max_extends: int = 0
+    min_shots: int = 0
     max_turns: int = 8
     keep_clips: int = 0
     fold: str = "text"
@@ -136,6 +138,7 @@ def _agent_env(args: ScriptArgs) -> dict[str, str]:
         "AGENT_VIDEO_GEN_SUBMITTED_DIR": f"{args.run_dir}/submitted",
         "AGENT_VIDEO_GEN_MAX_GENERATIONS": str(args.max_generations),
         "AGENT_VIDEO_GEN_MAX_EXTENDS": str(args.max_extends),
+        "AGENT_VIDEO_GEN_MIN_SHOTS": str(args.min_shots),
         "AGENT_VIDEO_GEN_MAX_TURNS": str(args.max_turns),
         "AGENT_VIDEO_GEN_CLIP_OBSERVATIONS": "1",
         "AGENT_VIDEO_GEN_KEEP_CLIPS": str(args.keep_clips),

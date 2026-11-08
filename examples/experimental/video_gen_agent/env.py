@@ -12,6 +12,8 @@ each branch becomes a sample with the episode's reward.
 
 It does not score. It returns the submitted clip under ``metadata["video_gen"]``, which v2 copies into every
 kept sample, and ``examples.experimental.video_gen_agent.reward.reward_func`` scores it in the rollout's reward step.
+A turn cut at the token limit ends the episode unsubmitted. Any other failure raises ``InfraAbort``, so the group is
+dropped rather than trained at reward 0, and ``--max-consecutive-aborted-groups`` stops a run whose env keeps failing.
 
 Run-wide options come from ``AGENT_VIDEO_GEN_*`` env vars, which worker and sandbox modes forward by default:
 
@@ -20,6 +22,7 @@ Run-wide options come from ``AGENT_VIDEO_GEN_*`` env vars, which worker and sand
                                    is deleted at run end (required)
   AGENT_VIDEO_GEN_MAX_GENERATIONS  generations per episode, at most 3 (default 3)
   AGENT_VIDEO_GEN_MAX_EXTENDS      extends per episode, beside the generations; 0 offers no extend tool (default 0)
+  AGENT_VIDEO_GEN_MIN_SHOTS        shots a submitted video needs; a shorter chain is refused (default 0: any)
   AGENT_VIDEO_GEN_MAX_TURNS        policy turns per episode (default 8)
   AGENT_VIDEO_GEN_MAX_SECONDS      longest clip in seconds; longer requests are cut to it (default 5)
   AGENT_VIDEO_GEN_WIDTH / _HEIGHT / _FPS  every clip's shape (default 832x480 at 16 fps)
@@ -105,6 +108,7 @@ class VideoGenEnvOptions:
     generator: str = ""
     max_generations: int = 3
     max_extends: int = 0
+    min_shots: int = 0
     max_turns: int = 8
     max_seconds: float = 5.0
     width: int = 832
@@ -130,11 +134,16 @@ class VideoGenEnvOptions:
                 raise ValueError(
                     f"{_ENV_PREFIX}{name.upper()} must be positive, got {getattr(self, name)}"
                 )  # config-access-exempt: iterates the options dataclass's own fields
-        for name in ("max_extends", "keep_clips"):
+        for name in ("max_extends", "min_shots", "keep_clips"):
             if getattr(self, name) < 0:  # config-access-exempt: iterates the options dataclass's own fields
                 raise ValueError(
                     f"{_ENV_PREFIX}{name.upper()} must not be negative, got {getattr(self, name)}"
                 )  # config-access-exempt: iterates the options dataclass's own fields
+        if self.min_shots > 1 + self.max_extends:
+            raise ValueError(
+                f"{_ENV_PREFIX}MIN_SHOTS {self.min_shots} needs MAX_EXTENDS of at least {self.min_shots - 1}, "
+                f"got {self.max_extends}"
+            )
         if self.fold not in _FOLDS:
             raise ValueError(f"{_ENV_PREFIX}FOLD is one of {', '.join(_FOLDS)}, got {self.fold!r}")
         if self.keep_clips and not self.clip_observations:
@@ -203,30 +212,13 @@ async def run_agent(base_url: str, prompt: list[dict], request_kwargs: dict, met
     options = VideoGenEnvOptions.from_env()
     episode = _Episode(options=options, generator=load_function(options.generator)())
     messages = [{"role": "system", "content": _system_prompt(options)}, *prompt]
-    while episode.submitted is None and episode.turns < options.max_turns:
-        payload = {**request_kwargs, "model": "default", "messages": await _view(episode, messages)}
-        payload["tools"] = options.tools
-        started = time.monotonic()
-        response = await post(f"{base_url}/v1/chat/completions", payload)
-        episode.turn_stats.append(
-            {
-                "prompt_tokens": (response.get("usage") or {}).get("prompt_tokens"),
-                "seconds": time.monotonic() - started,
-            }
-        )
-        reply = response["choices"][0]["message"]
-        episode.turns += 1
-        messages.append(reply)
-        tool_calls = reply.get("tool_calls") or []
-        if not tool_calls:
-            messages.append({"role": "user", "content": f"Call generate or submit. {episode.budget()}"})
-        for call in tool_calls:
-            if episode.submitted is not None:
-                break
-            content, shown = await _call_tool(episode, call["function"]["name"], call["function"].get("arguments"))
-            messages.append({"role": "tool", "tool_call_id": call.get("id"), "content": content})
-            if shown is not None:
-                episode.observations.append((len(messages) - 1, shown))
+    try:
+        await _play(episode, messages, base_url, request_kwargs)
+    except InfraAbort:
+        raise
+    except Exception as e:
+        # agentic_tool_call trains a failed agent's turns at reward 0, but an env fault is not the policy's doing.
+        raise InfraAbort("EnvError", f"the video-generation env failed: {e!r}") from e
     return {
         "video_gen": {
             "request": _user_request(prompt),
@@ -244,6 +236,37 @@ async def run_agent(base_url: str, prompt: list[dict], request_kwargs: dict, met
     }
 
 
+async def _play(episode: _Episode, messages: list[dict], base_url: str, request_kwargs: dict) -> None:
+    while episode.submitted is None and episode.turns < episode.options.max_turns:
+        payload = {**request_kwargs, "model": "default", "messages": await _view(episode, messages)}
+        payload["tools"] = episode.options.tools
+        started = time.monotonic()
+        response = await post(f"{base_url}/v1/chat/completions", payload)
+        episode.turn_stats.append(
+            {
+                "prompt_tokens": (response.get("usage") or {}).get("prompt_tokens"),
+                "seconds": time.monotonic() - started,
+            }
+        )
+        choice = response["choices"][0]
+        reply = choice["message"]
+        episode.turns += 1
+        messages.append(reply)
+        if choice.get("finish_reason") == "length":
+            # Session v2 refuses to extend a length-truncated turn (409), so the episode ends here unsubmitted.
+            return
+        tool_calls = reply.get("tool_calls") or []
+        if not tool_calls:
+            messages.append({"role": "user", "content": f"Call generate or submit. {episode.budget()}"})
+        for call in tool_calls:
+            if episode.submitted is not None:
+                break
+            content, shown = await _call_tool(episode, call["function"]["name"], call["function"].get("arguments"))
+            messages.append({"role": "tool", "tool_call_id": call.get("id"), "content": content})
+            if shown is not None:
+                episode.observations.append((len(messages) - 1, shown))
+
+
 def _system_prompt(options: VideoGenEnvOptions) -> str:
     text = (
         "You turn a user's video request into a video clip, using a text-to-video generator through tools. "
@@ -259,6 +282,8 @@ def _system_prompt(options: VideoGenEnvOptions) -> str:
             "last frame, and submitting the last shot submits all its shots joined in order, as one video. "
             f"You have {options.max_extends} extends."
         )
+    if options.min_shots > 1:
+        text += f" The video must have at least {options.min_shots} shots: extend until it does, then submit its last shot."
     if options.keep_clips:
         folded_to = "a note" if options.fold == "text" else "their last frame"
         text += (
@@ -397,13 +422,14 @@ def _clip_request(
         return None, "negative_prompt must be a string"
     if not isinstance(seed, int) or isinstance(seed, bool):
         return None, "seed must be an integer"
-    if not isinstance(seconds, (int, float)) or isinstance(seconds, bool) or seconds <= 0:
+    # `not >` also rejects NaN, which the qwen3_coder parser passes through as a JSON number.
+    if not isinstance(seconds, (int, float)) or isinstance(seconds, bool) or not seconds > 0:
         return None, "seconds must be a positive number"
     request = ClipRequest(
         prompt=prompt,
         negative_prompt=negative_prompt,
         seed=seed,
-        seconds=min(float(seconds), options.max_seconds),
+        seconds=float(min(seconds, options.max_seconds)),
         width=options.width,
         height=options.height,
         fps=options.fps,
@@ -416,6 +442,11 @@ async def _submit(episode: _Episode, arguments: dict) -> str:
     if error:
         return error
     shots = _shots(episode, clip)
+    if len(shots) < episode.options.min_shots:
+        return (
+            f"Error: the video needs at least {episode.options.min_shots} shots, and {clip.clip_id} has "
+            f"{len(shots)}; extend it first. {episode.budget()}"
+        )
     submitted_dir = episode.options.submitted_dir
     if len(shots) == 1:
         path = _keep(clip.path, submitted_dir)
