@@ -6,8 +6,10 @@ from tests.fast.fixtures.args_fixtures import parse_megatron_test_config
 from transformers import Qwen3_5Config
 
 from miles.ray.rollout import metrics
+from miles.ray.specs.inference import _compute_spec_inference_engine
 from miles.utils.args.custom_view import compute_custom_function_config
 from miles.utils.types import Sample
+from miles.utils.workers.addr_allocator import PortAllocator
 
 
 @pytest.fixture
@@ -107,3 +109,38 @@ def test_heldout_reward_counts_each_episode_once_however_many_branches_folding_l
 
     (log_dict,) = logged
     assert log_dict["eval/heldout"] == 0.5
+
+
+async def test_no_engine_is_given_the_port_the_generators_broker_binds(recipe_config):
+    specs = {
+        model.name: _compute_spec_inference_engine(
+            recipe_config,
+            model_idx=model_idx,
+            group_index=0,
+            model_cfg=model,
+            server_group_config=model.server_groups[0],
+            group_scaling=recipe_config.sglang_scaling.group(model_name=model.name, group_index=0),
+        )
+        for model_idx, model in enumerate(recipe_config.sglang.models)
+    }
+    allocator, ports = PortAllocator(), {}
+
+    # The generator first, as in the failing run: the next engine's primary used to land on its HTTP port + 1.
+    for name in ("generator", "policy", "eval"):
+        for info in specs[name].port_infos:
+            port = await allocator.alloc(_ScanningNode(), node_ip="node", consecutive=info.num_consecutive)
+            ports[name, info.name] = port
+
+    broker = ports["generator", "primary"] + 1
+    assert broker not in ports.values()
+
+
+class _ScanningNode:
+    """A node with every port free, scanning from the allocator's cursor as ``NodeProbeMixin`` does."""
+
+    class _Probe:
+        @staticmethod
+        async def remote(*, start_port, count):
+            return start_port or 8000
+
+    _get_free_port_block = _Probe()
