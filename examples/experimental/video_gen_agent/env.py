@@ -12,6 +12,8 @@ each branch becomes a sample with the episode's reward.
 
 It does not score. It returns the submitted clip under ``metadata["video_gen"]``, which v2 copies into every
 kept sample, and ``examples.experimental.video_gen_agent.reward.reward_func`` scores it in the rollout's reward step.
+A turn cut at the token limit ends the episode unsubmitted. Any other failure raises ``InfraAbort``, so the group is
+dropped rather than trained at reward 0, and ``--max-consecutive-aborted-groups`` stops a run whose env keeps failing.
 
 Run-wide options come from ``AGENT_VIDEO_GEN_*`` env vars, which worker and sandbox modes forward by default:
 
@@ -203,30 +205,13 @@ async def run_agent(base_url: str, prompt: list[dict], request_kwargs: dict, met
     options = VideoGenEnvOptions.from_env()
     episode = _Episode(options=options, generator=load_function(options.generator)())
     messages = [{"role": "system", "content": _system_prompt(options)}, *prompt]
-    while episode.submitted is None and episode.turns < options.max_turns:
-        payload = {**request_kwargs, "model": "default", "messages": await _view(episode, messages)}
-        payload["tools"] = options.tools
-        started = time.monotonic()
-        response = await post(f"{base_url}/v1/chat/completions", payload)
-        episode.turn_stats.append(
-            {
-                "prompt_tokens": (response.get("usage") or {}).get("prompt_tokens"),
-                "seconds": time.monotonic() - started,
-            }
-        )
-        reply = response["choices"][0]["message"]
-        episode.turns += 1
-        messages.append(reply)
-        tool_calls = reply.get("tool_calls") or []
-        if not tool_calls:
-            messages.append({"role": "user", "content": f"Call generate or submit. {episode.budget()}"})
-        for call in tool_calls:
-            if episode.submitted is not None:
-                break
-            content, shown = await _call_tool(episode, call["function"]["name"], call["function"].get("arguments"))
-            messages.append({"role": "tool", "tool_call_id": call.get("id"), "content": content})
-            if shown is not None:
-                episode.observations.append((len(messages) - 1, shown))
+    try:
+        await _play(episode, messages, base_url, request_kwargs)
+    except InfraAbort:
+        raise
+    except Exception as e:
+        # agentic_tool_call trains a failed agent's turns at reward 0, but an env fault is not the policy's doing.
+        raise InfraAbort("EnvError", f"the video-generation env failed: {e!r}") from e
     return {
         "video_gen": {
             "request": _user_request(prompt),
@@ -242,6 +227,37 @@ async def run_agent(base_url: str, prompt: list[dict], request_kwargs: dict, met
         },
         "agent_metrics": {"total_tool_time": episode.generation_time},
     }
+
+
+async def _play(episode: _Episode, messages: list[dict], base_url: str, request_kwargs: dict) -> None:
+    while episode.submitted is None and episode.turns < episode.options.max_turns:
+        payload = {**request_kwargs, "model": "default", "messages": await _view(episode, messages)}
+        payload["tools"] = episode.options.tools
+        started = time.monotonic()
+        response = await post(f"{base_url}/v1/chat/completions", payload)
+        episode.turn_stats.append(
+            {
+                "prompt_tokens": (response.get("usage") or {}).get("prompt_tokens"),
+                "seconds": time.monotonic() - started,
+            }
+        )
+        choice = response["choices"][0]
+        reply = choice["message"]
+        episode.turns += 1
+        messages.append(reply)
+        if choice.get("finish_reason") == "length":
+            # Session v2 refuses to extend a length-truncated turn (409), so the episode ends here unsubmitted.
+            return
+        tool_calls = reply.get("tool_calls") or []
+        if not tool_calls:
+            messages.append({"role": "user", "content": f"Call generate or submit. {episode.budget()}"})
+        for call in tool_calls:
+            if episode.submitted is not None:
+                break
+            content, shown = await _call_tool(episode, call["function"]["name"], call["function"].get("arguments"))
+            messages.append({"role": "tool", "tool_call_id": call.get("id"), "content": content})
+            if shown is not None:
+                episode.observations.append((len(messages) - 1, shown))
 
 
 def _system_prompt(options: VideoGenEnvOptions) -> str:
