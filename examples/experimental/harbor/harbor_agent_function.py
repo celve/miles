@@ -576,10 +576,16 @@ def trial_result_to_metadata(result) -> dict[str, Any]:
         if timing is not None and (duration := _timing_duration_sec(timing)) is not None:
             metrics[key] = duration
 
-    # An agent that saw its episode earn reward by a forbidden route (DesktopQwen3VLComputer1's gate_typed_code) vetoes it.
-    if metrics.get("reward_gate"):
+    if _reward_gated(result):
         reward = 0.0
     return {"reward": reward, "exit_status": exit_status, "eval_report": rewards, "agent_metrics": metrics}
+
+
+def _reward_gated(result) -> bool:
+    """An agent that saw its episode earn reward by a forbidden route (DesktopQwen3VLComputer1's gate_typed_code) vetoes it."""
+    steps = getattr(result, "step_results", None) or []
+    contexts = [getattr(result, "agent_result", None), *(getattr(step, "agent_result", None) for step in steps)]
+    return any(isinstance(meta := getattr(c, "metadata", None), dict) and meta.get("reward_gate") for c in contexts)
 
 
 def _failed(exit_status: str) -> dict[str, Any]:

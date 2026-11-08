@@ -30,17 +30,30 @@ _NEEDS_POINT = frozenset(
 )
 
 
-def _scalar_point(action: dict) -> dict:
-    """The action with its point as scalar ``x`` and ``y`` when the reply wrote it as a pair, as Qwen3.8 often does."""
-    x, y = action.get("x"), action.get("y")
+def _scalar_pair(action: dict, x_key: str, y_key: str) -> dict:
+    x, y = action.get(x_key), action.get(y_key)
     if isinstance(x, list) and len(x) == 2 and (y is None or y == x):
-        return {**action, "x": x[0], "y": x[1]}
+        return {**action, x_key: x[0], y_key: x[1]}
     if isinstance(x, list) and len(x) == 1 and isinstance(y, list) and len(y) == 1:
-        return {**action, "x": x[0], "y": y[0]}
-    coordinate = action.get("coordinate")
-    if x is None and isinstance(coordinate, list) and len(coordinate) == 2:
-        return {**action, "x": coordinate[0], "y": coordinate[1]}
+        return {**action, x_key: x[0], y_key: y[0]}
     return action
+
+
+def _scalar_point(action: dict) -> dict:
+    """The action with scalar points where the reply wrote a pair (``"x": [x, y]``, ``"end_x": [x, y]``), as Qwen3.8 often does."""
+    coordinate = action.get("coordinate")
+    if action.get("x") is None and isinstance(coordinate, list) and len(coordinate) == 2:
+        action = {**action, "x": coordinate[0], "y": coordinate[1]}
+    return _scalar_pair(_scalar_pair(action, "x", "y"), "end_x", "end_y")
+
+
+def _missing_point(action: Any) -> str:
+    if action.type in _NEEDS_POINT and None in (action.x, action.y):
+        return '"x" and "y"'
+    # Harbor drags to the start point when the end is unreadable, which moves nothing.
+    if action.type == "drag" and None in (action.end_x, action.end_y):
+        return '"end_x" and "end_y"'
+    return ""
 
 
 def _with_scalar_point(response: LLMResponse) -> LLMResponse:
@@ -52,7 +65,7 @@ def _with_scalar_point(response: LLMResponse) -> LLMResponse:
     if not isinstance(data, dict) or not isinstance(data.get("action"), dict):
         return response
     action = _scalar_point(data["action"])
-    if action is data["action"]:
+    if action == data["action"]:
         return response
     return replace(response, content=response.content.replace(json_str, json.dumps({**data, "action": action})))
 
@@ -85,10 +98,10 @@ class Qwen3VLJsonProvider(GenericJsonProvider):
         parsed = super().parse(_with_scalar_point(llm_response))
         # The history keeps the reply the engine generated; the session server matches its tokens against it.
         step = replace(parsed, llm_response=llm_response, message=llm_response.content if parsed.message else "")
-        if step.action is not None and step.action.type in _NEEDS_POINT and None in (step.action.x, step.action.y):
+        if step.action is not None and (missing := _missing_point(step.action)):
             step = ModelStep(
                 needs_retry=True,
-                feedback=f'ERROR: a {step.action.type!r} action needs integer "x" and "y", e.g. "x": 500, "y": 300',
+                feedback=f'ERROR: a {step.action.type!r} action needs integer {missing}, e.g. "x": 500, "y": 300',
                 llm_response=llm_response,
             )
         if step.action is not None:

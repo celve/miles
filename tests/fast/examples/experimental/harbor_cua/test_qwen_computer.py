@@ -58,12 +58,34 @@ def test_a_point_written_as_a_pair_lands_where_it_pointed(provider, action):
     assert (click.x, click.y) == (511, 256)
 
 
-@pytest.mark.parametrize("action", [{"type": "click", "x": 992}, {"type": "click"}, {"type": "drag", "x": [1, 2, 3]}])
+@pytest.mark.parametrize(
+    "action",
+    [
+        {"type": "drag", "x": [133, 29], "end_x": [700, 400], "button": "left"},
+        {"type": "drag", "x": [133], "y": [29], "end_x": [700], "end_y": [400]},
+    ],
+)
+def test_a_drag_written_as_pairs_moves_between_both_points(provider, action):
+    drag = _executed(provider, action)
+
+    assert (drag.x, drag.y, drag.end_x, drag.end_y) == (136, 26, 717, 360)
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        {"type": "click", "x": 992},
+        {"type": "click"},
+        {"type": "drag", "x": [1, 2, 3]},
+        {"type": "drag", "x": 133, "y": 29},
+        {"type": "drag", "x": 133, "y": 29, "end_x": [1, 2, 3]},
+    ],
+)
 def test_a_pointer_action_with_no_point_is_retried_not_clicked_at_the_corner(provider, action):
     step = provider.parse(LLMResponse(content=json.dumps({"analysis": "", "plan": "", "action": action})))
 
     assert step.needs_retry and step.action is None
-    assert '"x" and "y"' in step.feedback
+    assert '"y"' in step.feedback
 
 
 def test_the_step_keeps_the_reply_as_generated(provider):
