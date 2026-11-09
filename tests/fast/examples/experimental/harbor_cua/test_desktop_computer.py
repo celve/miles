@@ -410,6 +410,12 @@ _COURSE_FORM = (
     "Create a new course\nCourse name: Introduction to Cell Biology\nShort name: BIO101\n"
     "Summary: This course covers cellular structures and their functions in living organisms.\nVisibility: Show"
 )
+_BEGIN_REPORT = (
+    "Begin Analysis\nStudy: Myoglobin solvent-accessible surface area\nMethod: Values were measured in the application.\n"
+    "Result: The selected region has an accessible surface area of 120 square angstroms.\n"
+    "Conclusion: The measured area agrees with the displayed structure."
+)
+_BEGIN_BLOCKS = "Begin Tank\n   Name: PropTank\n   InitialMass: 400.0\n   Isp: 285.0\nEnd Tank\n" * 3
 _JSON = (
     '{\n  "sma_angle_degrees": 28.4,\n  "aortomesenteric_distance_mm": 11.2,\n  "notes": "measured in the axial view"\n}\n'
     * 2
@@ -425,6 +431,7 @@ _JSON = (
         ("  echo indented", True),
         ("\n  ls -l /home/ga", True),
         (_GMAT, True),
+        (_BEGIN_BLOCKS, True),
         (".shell python3 /tmp/fk.py", True),
         ("!mkdir -p /home/ga/exports", True),
         ("Sub Run()\n  Shell \"bash -c 'ls'\"\nEnd Sub", True),
@@ -437,6 +444,7 @@ _JSON = (
         (_REPORT, False),
         (_JSON, False),
         (_COURSE_FORM, False),
+        (_BEGIN_REPORT, False),
     ],
 )
 def test_typed_shell_or_code_gates_the_reward(tmp_path, monkeypatch, typed, gated):

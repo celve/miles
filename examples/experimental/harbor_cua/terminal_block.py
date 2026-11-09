@@ -48,7 +48,7 @@ _CODE = re.compile(r"(^import |\bimport \w|print\(|slicer\.|bpy\.|\bdef |\w+ = \
 # An app's own file typed out whole (draw.io/SUMO/VLC XML, Webots VRML, a GMAT script) skips its GUI like `cat > file`.
 _APP_FILE = re.compile(
     r"#VRML|#!WRML|<\?xml|^\s*<\w+[\s>/]|^\s*\w+\s*\{\s*$|\bGMATScript\b|\bBEGINScript\b|\bBeginMissionSequence\b"
-    r"|\bPropagate\s+\w+\(|\.(?:SMA|ECC|Epoch|DateFormat)\s*=|^\s*Begin\s+[A-Z]\w*\s*$"
+    r"|\bPropagate\s+\w+\(|\.(?:SMA|ECC|Epoch|DateFormat)\s*=|^\s*Begin\s+([A-Z]\w*)\s*$[\s\S]*?^\s*End\s+\1\s*$"
     r"|^\s*Create\s+(?:Spacecraft|Propagator|ForceModel|ImpulsiveBurn|FiniteBurn|ReportFile|XYPlot|OrbitView|GroundTrackPlot"
     r"|Variable|Array|String|CoordinateSystem|GroundStation|DifferentialCorrector|Formation|Thruster|ChemicalTank|FuelTank"
     r"|EphemerisFile|Barycenter|LibrationPoint|Optimizer)\b",
