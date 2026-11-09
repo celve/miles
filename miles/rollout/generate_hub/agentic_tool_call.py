@@ -69,6 +69,7 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
         "Pass --use-session-server to start the session server."
     )
     worker_options = _worker_options(input.args)
+    abort_scope = rollout_abort_scope(input.args)
     use_v2 = input.args.use_session_server == "v2"
     collect_spec_metrics = use_v2 and input.args.sglang.common_value("speculative_algorithm") is not None
     tracer = await OpenAIEndpointTracer.create(
@@ -109,6 +110,7 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
             custom_agent_function,
             mode=input.args.custom_agent_function_mode,
             on_child_reports=push_sandbox_reports,
+            abort_scope=abort_scope,
             **worker_options,
             base_url=tracer.agent_base_url,
             prompt=input.sample.prompt,
@@ -227,7 +229,6 @@ def _worker_options(args) -> dict[str, Any]:
     return {
         "worker": resolve_worker(args.custom_agent_function_worker),
         "extra_env": forwarded_env(_worker_env_patterns(args)),
-        "abort_scope": rollout_abort_scope(args),
     }
 
 

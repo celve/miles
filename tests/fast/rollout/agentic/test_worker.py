@@ -262,34 +262,6 @@ def test_cancelling_the_caller_of_an_aborted_call_stays_a_cancel(serve, tmp_path
     asyncio.run(cancel_during_the_abort())
 
 
-@pytest.mark.parametrize("mode", ["subproc", "inline"])
-def test_a_rollout_abort_leaves_calls_in_other_modes_running(tmp_path, mode):
-    pid_file, cleaned_up = tmp_path / "pid", tmp_path / "cleaned_up"
-
-    async def abort_while_running():
-        task = asyncio.create_task(
-            call_agent_function(
-                stubs.wait_until_cancelled,
-                mode=mode,
-                abort_scope="127.0.0.1:30000",
-                pid_file=str(pid_file),
-                cleaned_up=str(cleaned_up),
-            )
-        )
-        await _until_exists(pid_file)
-        assert not has_calls()
-        await call_agent_abort_hook(_rollout_args())
-        assert await cancel_calls() == 0
-        await asyncio.sleep(0.5)
-        still_running = not task.done()
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        return still_running
-
-    assert asyncio.run(abort_while_running())
-
-
 def test_a_cancel_no_rollout_abort_asked_for_stays_worker_cancelled(serve):
     async def accept(request):
         return web.json_response({"call_id": "x"})

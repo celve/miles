@@ -66,22 +66,21 @@ def load_agent_sibling(agent_function_path, name: str) -> Any | None:
 
 
 async def call_agent_abort_hook(args) -> None:
-    """Invoke the agent plugin's optional abort hook, if it defines one.
+    """Cancel this rollout's agent calls, then invoke the agent plugin's optional abort hook.
 
     When oversampling collects enough samples, the rollout aborts SGLang, but an
-    external agent loop (driven by ``--custom-agent-function-path``) keeps running
-    and keeps issuing fresh completion requests until it hits its own limit. The
-    agent integration knows how to tell its backend to stop, so we look for a
-    sibling ``abort`` callable in the same module as the configured agent function
-    and call it. Backends that don't expose one are left to drain as before.
-
-    This rollout's calls running on an agent worker are cancelled first.
+    agent loop (driven by ``--custom-agent-function-path``) keeps running and keeps
+    issuing fresh completion requests until it hits its own limit. Cancelling its
+    call stops it, in every ``--custom-agent-function-mode``. An integration whose
+    work outlives that call, such as a run on an external server, tells its backend
+    to stop through a sibling ``abort`` callable in the same module as the configured
+    agent function.
     """
     from miles.utils.args.custom_view import compute_custom_function_config
 
     if has_calls():
         cancelled = await cancel_calls(rollout_abort_scope(args))
-        logger.info(f"Cancelled {cancelled} agent call(s) running on agent workers")
+        logger.info(f"Cancelled {cancelled} agent call(s)")
     abort_hook = load_agent_sibling(args.custom_agent_function_path, "abort")
     if abort_hook is None:
         return

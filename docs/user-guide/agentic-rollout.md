@@ -140,11 +140,17 @@ as before; use it for debugging and for agents that keep state across calls.
 `--custom-agent-function-mode worker` runs the same child process on an agent
 worker (`python -m miles.rollout.agentic.worker`) on another host, named by
 `--custom-agent-function-worker`, so the agents' CPU work leaves the rollout host.
-A rollout abort cancels these calls and discards their samples
-(`exit_status` `Cancelled`). Each call carries each sandbox provider's key-file and
-address variables, the env var patterns in a `WORKER_ENV` tuple the agent function's
+Each call carries each sandbox provider's key-file and address variables, the env var patterns in a `WORKER_ENV` tuple the agent function's
 module may expose beside it, and any `--custom-agent-function-worker-env` adds.
 Credentials are never sent by value.
+
+A rollout abort, such as the one that ends an oversampled round, cancels this
+rollout's calls in every mode and discards their samples (`exit_status`
+`Cancelled`), however the agent then ends. The abort does not wait for a cancelled
+agent process's cleanup: it runs beside the next round, to the deadlines above. An
+`inline` agent's cleanup runs on the rollout's loop, so the abort waits for it. The
+calls of an evaluation on its own engines (`--eval-num-gpus`) are not cancelled by
+training's abort.
 
 ### Optional teardown hook
 
@@ -157,11 +163,12 @@ async def abort(args) -> None:
 ```
 
 Miles calls this hook in the rollout process during oversampling abort after it
-stops in-flight SGLang generation, so under `subproc` it cannot reach the agent
-calls' module state; tell the external backend to stop, as below. Use it when the
-agent drives an external sandbox or agent server that would otherwise keep issuing
-completion requests until its own length limit or timeout. The hook is optional;
-modules without it continue to work.
+stops in-flight SGLang generation and cancels the agent calls, so under `subproc`
+it cannot reach their module state; tell the external backend to stop, as below.
+Use it when the agent drives an external sandbox or agent server whose work outlives
+the cancelled call and would otherwise keep issuing completion requests until its
+own length limit or timeout. The hook is optional; modules without it continue to
+work.
 
 See [`swe_agent_function.abort`](https://github.com/radixark/miles/blob/main/examples/swe-agent-harbor-docker/swe_agent_function.py)
 for an implementation that flushes the Harbor agent server.

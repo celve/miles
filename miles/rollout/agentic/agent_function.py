@@ -112,33 +112,44 @@ async def call_agent_function(
     an agent worker (``worker``, see ``resolve_worker``), whose ``subproc`` runs it.
 
     Under ``subproc`` and ``worker``, ``on_child_reports`` receives each item the agent sends with
-    ``report_to_caller``, and ``extra_env`` is added to the agent process's environment. Under ``worker``, a
-    ``cancel_calls`` that reaches ``abort_scope`` cancels the call, which then raises ``InfraAbort("Cancelled")``."""
-    placement = _place(fn, mode, worker, on_child_reports, extra_env, kwargs)
-    if mode != "worker":
-        return await placement
-    task = asyncio.ensure_future(placement)
+    ``report_to_caller``, and ``extra_env`` is added to the agent process's environment. In every mode, a
+    ``cancel_calls`` that reaches ``abort_scope`` cancels the call, which then raises ``InfraAbort("Cancelled")``
+    however the agent ended."""
+    task = asyncio.ensure_future(_place(fn, mode, worker, on_child_reports, extra_env, kwargs))
     call = _calls[task] = {"scope": abort_scope, "aborted": False}
     try:
-        return await task
+        result = await task
     except asyncio.CancelledError:
-        if call["aborted"] and not asyncio.current_task().cancelling():
-            raise InfraAbort("Cancelled", "a rollout abort cancelled this agent call") from None
-        raise
+        if not call["aborted"] or asyncio.current_task().cancelling():
+            raise
+    except Exception:
+        if not call["aborted"]:
+            raise
     finally:
         del _calls[task]
+    if call["aborted"]:
+        raise InfraAbort("Cancelled", "a rollout abort cancelled this agent call")
+    return result
 
 
 def has_calls() -> bool:
-    return bool(_calls)
+    return bool(_calls_on_this_loop())
+
+
+def _calls_on_this_loop() -> dict[asyncio.Task, dict[str, Any]]:
+    loop = asyncio.get_running_loop()
+    return {task: call for task, call in list(_calls.items()) if task.get_loop() is loop}
 
 
 async def cancel_calls(scope: str | None = None) -> int:
-    """Cancel this process's calls in ``scope`` (every call when None) and wait, within a bound, until they have
-    finished cancelling; return how many. Run it on the loop that made the calls."""
-    tasks = [task for task, call in _calls.items() if scope is None or call["scope"] in (None, scope)]
-    for task in tasks:
-        _calls[task]["aborted"] = True
+    """Cancel this loop's calls in ``scope`` (every call when None) and wait, within a bound, until their tasks have
+    ended; return how many. A cancelled ``subproc`` task ends once its child has SIGTERM, not once the child exits."""
+    calls = {
+        task: call for task, call in _calls_on_this_loop().items() if scope is None or call["scope"] in (None, scope)
+    }
+    tasks = list(calls)
+    for task, call in calls.items():
+        call["aborted"] = True
         task.cancel()
     if tasks:
         await asyncio.wait(tasks, timeout=_ABORT_WAIT_S)
