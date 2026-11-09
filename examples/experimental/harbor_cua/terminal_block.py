@@ -51,7 +51,7 @@ _NAMES = r"\w+(?:[ \t]+as[ \t]+\w+)?(?:[ \t]*,[ \t]*\w+(?:[ \t]+as[ \t]+\w+)?)*"
 _CODE = re.compile(
     rf"(?:^|[;\x22'])[ \t]*(?:python[ \t]+)?"
     rf"(?:import[ \t]+{_MODULE}(?:[ \t]+as[ \t]+\w+)?(?:[ \t]*,[ \t]*{_MODULE}(?:[ \t]+as[ \t]+\w+)?)*"
-    rf"|from[ \t]+{_MODULE}[ \t]+import[ \t]+(?:\*|\(.*|{_NAMES}))[ \t]*(?:$|[;\x22'\\])"
+    rf"|from[ \t]+(?:\.+(?:{_MODULE})?|{_MODULE})[ \t]+import[ \t]+(?:\*|\(.*|{_NAMES}))[ \t]*(?:$|[;#,\x22'\\])"
     r"|print\(|slicer\.|bpy\.|\bdef |\w+ = \w+\.\w+\(",
     re.M,
 )
