@@ -37,13 +37,19 @@ su $U -s /bin/sh -c "test -x /usr/bin/gnome-terminal" && echo "STILL-RUNNABLE gn
 echo "blocked:$blocked"
 """
 
-# LIN-2752's detectors for a shell command or a line of code in typed text.
+# LIN-2752's detectors for a shell command or a line of code in typed text. Command words count only in command
+# position, since "Introduction to Cells - ..." is prose; DBeaver's ".shell"/"!cmd" and Basic macros are shells too.
 _SHELL = re.compile(
-    r"(cat > |cat <<|python3 |ls -|mkdir |blender -b|ogr2ogr|echo |find / |cd /home|<< .EOF"
-    r"|^find |^ls |^cd |^sed |^grep |^cp |^mv |^chmod |sudo |^head |^pip |^cat )"
+    r"(cat > |cat <<|blender -b|ogr2ogr|find / |cd /home|<< .EOF|\.shell |bash -c|\bShell\s*\(?\x22|^\s*Sub \w+\s*\("
+    r"|^!\w|(?:^|\s)(?:python3|mkdir|sudo) |(?:^|[;&|(]\s*)(?:ls -|echo |find |ls |cd |sed |grep |cp |mv |chmod |head |pip |cat ))",
+    re.M,
 )
 _CODE = re.compile(r"(^import |\bimport \w|print\(|slicer\.|bpy\.|\bdef |\w+ = \w+\.\w+\()")
+# An app's own file typed out whole (draw.io/SUMO/VLC XML, Webots VRML, a GMAT script) skips its GUI like `cat > file`.
+_APP_FILE = re.compile(r"#VRML|#!WRML|<\?xml|^\s*<\w+[\s>/]|^\s*\w+\s*\{\s*$|\bGMATScript\b|^\s*Create\s+\w+", re.M)
 
 
 def typed_code(text: str) -> bool:
-    return bool(_SHELL.search(text) or _CODE.search(text))
+    if _SHELL.search(text) or _CODE.search(text):
+        return True
+    return len(text) > 150 and text.count("\n") >= 4 and bool(_APP_FILE.search(text))

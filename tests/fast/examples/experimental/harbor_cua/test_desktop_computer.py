@@ -396,9 +396,39 @@ def test_a_block_that_leaves_a_terminal_loses_the_sandbox(tmp_path):
         asyncio.run(_agent(tmp_path, block_terminal="ga").run("task", env, SimpleNamespace(metadata=None)))
 
 
+_VRML = (
+    '#VRML_SIM R2023b utf8\nWorldInfo {\n  gravity 0 0 0\n}\nViewpoint {\n  position 0 0 5\n}\nRobot {\n  name "cubesat"\n}\n'
+    * 2
+)
+_SUMO = '<additional>\n  <parkingArea id="pa_1" lane="E_0_0" startPos="10" endPos="40"/>\n' * 4 + "</additional>\n"
+_REPORT = (
+    "Freeform Fin Integration Report\n=====\nFin Type: Freeform (3 fins)\nThickness: 3.0 mm\nApogee: 233 m\nStability: 3.97 cal\n"
+    * 2
+)
+_JSON = (
+    '{\n  "sma_angle_degrees": 28.4,\n  "aortomesenteric_distance_mm": 11.2,\n  "notes": "measured in the axial view"\n}\n'
+    * 2
+)
+
+
 @pytest.mark.parametrize(
     ("typed", "gated"),
-    [("cat > /tmp/out.csv << EOF", True), ("import bpy", True), ("Quarterly report", False), ("=SUM(A1:A9)", False)],
+    [
+        ("cat > /tmp/out.csv << EOF", True),
+        ("import bpy", True),
+        ("cd /home/ga && ls -l", True),
+        (".shell python3 /tmp/fk.py", True),
+        ("!mkdir -p /home/ga/exports", True),
+        ("Sub Run()\n  Shell \"bash -c 'ls'\"\nEnd Sub", True),
+        (_VRML, True),
+        (_SUMO, True),
+        ("Quarterly report", False),
+        ("=SUM(A1:A9)", False),
+        ("Introduction to Cells - an overview of cell biology", False),
+        ("An echo of the old design", False),
+        (_REPORT, False),
+        (_JSON, False),
+    ],
 )
 def test_typed_shell_or_code_gates_the_reward(tmp_path, monkeypatch, typed, gated):
     _record_executions(monkeypatch)
