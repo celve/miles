@@ -1,5 +1,6 @@
 import shlex
 
+import examples.experimental.video_gen_agent.keyframe.run_qwen35_9b_keyframe as launcher
 import pytest
 from examples.experimental.video_gen_agent.keyframe.run_qwen35_9b_keyframe import (
     LIGHTX2V,
@@ -8,6 +9,7 @@ from examples.experimental.video_gen_agent.keyframe.run_qwen35_9b_keyframe impor
     _train_args,
 )
 from tests.fast.fixtures.args_fixtures import parse_megatron_test_config
+from tests.fast.launch_scripts.py_harness import call_entrypoint, freeze_environment, install_command_recorder
 from transformers import Qwen3_5Config
 
 
@@ -126,11 +128,32 @@ def test_the_env_gets_the_recipes_clip_and_both_generators():
     assert env["AGENT_VIDEO_GEN_IMAGE_DIR"] == "/root/shared_data/test/images"
 
 
-def test_prepare_downloads_only_the_modes_lightx2v_loras():
-    args = ScriptArgs(run_id="test")
+def _recorded(monkeypatch, tmp_path, entrypoint, **script_args) -> list[str]:
+    freeze_environment(monkeypatch)
+    recording = install_command_recorder(monkeypatch)
+    overrides = dict(run_id="test", model_dir=str(tmp_path / "models"), data_dir=str(tmp_path / "data")) | script_args
+    call_entrypoint(launcher, entrypoint, overrides, tmp_path)
+    return recording.commands
 
-    assert LIGHTX2V == "lightx2v/Wan2.2-Distill-Loras"
-    assert "t2v" in args.video.high_noise_lora and "low_noise" in args.video.low_noise_lora
+
+def test_prepare_downloads_the_defaults_models_and_only_the_modes_lightx2v_loras(monkeypatch, tmp_path):
+    commands = _recorded(monkeypatch, tmp_path, "prepare")
+
+    downloads = [command for command in commands if "hf download" in command]
+    for repo in ("Qwen/Qwen3.5-9B", "Qwen/Qwen3-VL-8B-Instruct", "Tongyi-MAI/Z-Image-Turbo"):
+        assert any(f"hf download {repo} " in command for command in downloads)
+    assert any("Wan-AI/Wan2.2-T2V-A14B-Diffusers" in command for command in downloads)
+    (loras,) = [command for command in downloads if LIGHTX2V in command]
+    assert loras.count("t2v_A14b") == 2 and "i2v" not in loras
+    assert any("make_requests" in command for command in commands)
+
+
+def test_execute_submits_the_run_with_the_keyframe_env(monkeypatch, tmp_path):
+    commands = _recorded(monkeypatch, tmp_path, "execute", num_gpus_per_node=4)
+
+    (submit,) = [command for command in commands if "ray job submit" in command]
+    assert "keyframe.env.run_agent" in submit and "AGENT_VIDEO_GEN_VIDEO_MODE" in submit
+    assert "--eval-num-gpus" not in submit and "--num-gpus-per-node 4" in submit
 
 
 @pytest.mark.parametrize(

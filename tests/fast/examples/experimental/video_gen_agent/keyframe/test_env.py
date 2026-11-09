@@ -129,11 +129,31 @@ async def test_preview_mode_is_the_default_and_makes_the_video_from_text(options
     assert (record["video_mode"], record["video_model"]) == ("preview", "Wan-AI/Wan2.2-T2V-A14B-Diffusers")
 
 
-async def test_the_video_ends_the_episode_and_later_calls_in_its_turn_are_not_run(options):
+async def test_a_video_from_an_image_made_in_the_same_turn_waits_until_the_planner_has_seen_it(options):
     sent = _script(
         options,
         [
             _call("generate_image", {"prompt": "fox"}),
+            _call("generate_video", {"image_id": "image_1", "prompt": "runs"}),
+        ],
+        [_call("generate_video", {"image_id": "image_1", "prompt": "runs"})],
+    )
+
+    result = await _run()
+
+    image_reply, video_reply = _tool_replies(sent[1])
+    assert image_reply[1]["type"] == "image_url"
+    assert video_reply == (
+        "Error: you have not seen image_1 yet; look at it, then call generate_video. Images left: 2. Turns left: 5."
+    )
+    assert len(sent) == 2 and result["video_gen"]["submitted"]["image_id"] == "image_1"
+
+
+async def test_the_video_ends_the_episode_and_later_calls_in_its_turn_are_not_run(options):
+    sent = _script(
+        options,
+        [_call("generate_image", {"prompt": "fox"})],
+        [
             _call("generate_video", {"image_id": "image_1", "prompt": "runs"}),
             _call("generate_image", {"prompt": "never made"}),
         ],
@@ -141,7 +161,7 @@ async def test_the_video_ends_the_episode_and_later_calls_in_its_turn_are_not_ru
 
     result = await _run()
 
-    assert len(sent) == 1 and result["video_gen"]["turns"] == 1
+    assert len(sent) == 2 and result["video_gen"]["turns"] == 2
     assert [i["prompt"] for i in result["video_gen"]["images"]] == ["fox"]
     assert result["video_gen"]["submitted"]["image_id"] == "image_1"
 

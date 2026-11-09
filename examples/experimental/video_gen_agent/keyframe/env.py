@@ -132,6 +132,8 @@ class _GeneratedImage:
     image_id: str
     request: ImageRequest
     path: str
+    # True once a planner request has carried the image, so a video only ever comes from a watched image.
+    shown: bool = False
 
 
 @dataclass
@@ -189,6 +191,8 @@ async def run_agent(base_url: str, prompt: list[dict], request_kwargs: dict, met
 async def _play(episode: _Episode, messages: list[dict], base_url: str, request_kwargs: dict) -> None:
     while episode.submitted is None and episode.turns < episode.options.max_turns:
         payload = {**request_kwargs, "model": "default", "messages": messages, "tools": TOOLS}
+        for image in episode.images.values():
+            image.shown = True
         started = time.monotonic()
         response = await post(f"{base_url}/v1/chat/completions", payload)
         episode.turn_stats.append(
@@ -268,6 +272,10 @@ async def _generate_video(episode: _Episode, arguments: dict) -> str:
     if image is None:
         known = ", ".join(episode.images) or "none yet; call generate_image first"
         return f"Error: unknown image_id {image_id!r}; generated images: {known}. {episode.budget()}"
+    if not image.shown:
+        return (
+            f"Error: you have not seen {image.image_id} yet; look at it, then call generate_video. {episode.budget()}"
+        )
     prompted, error = _prompted(arguments, tool="generate_video", default_seed=0)
     if error:
         return f"Error: {error}. {episode.budget()}"
