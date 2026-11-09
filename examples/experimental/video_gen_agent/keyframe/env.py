@@ -3,8 +3,8 @@
 An agent function for ``agentic_tool_call.generate`` under session v2, with two tools:
 ``generate_image(prompt, negative_prompt, seed)`` returns the image as an ``image_url`` part beside a receipt, and
 ``generate_video(image_id, prompt, negative_prompt, seed)`` makes one clip and ends the episode with it as the
-submission. In ``i2v`` mode the clip is image-to-video from the chosen image, the prompt saying what moves and how
-the camera moves; in ``preview`` mode it is text-to-video from the chosen image's prompt followed by that prompt.
+submission. In ``preview`` mode the clip is text-to-video from the chosen image's prompt followed by that prompt,
+which says what moves and how the camera moves; in ``i2v`` mode it is image-to-video from the chosen image.
 The planner never watches the clip.
 
 Like ``examples.experimental.video_gen_agent.env``, it does not score: the clip is copied out by content hash and
@@ -22,7 +22,8 @@ Run-wide options come from ``AGENT_VIDEO_GEN_*`` env vars, which worker and sand
   AGENT_VIDEO_GEN_SECONDS          the video's length (default 2)
   AGENT_VIDEO_GEN_WIDTH / _HEIGHT / _FPS  every image's and the video's shape (default 832x480 at 16 fps)
   AGENT_VIDEO_GEN_TIMEOUT_S        a generation slower than this is an outage (default 600)
-  AGENT_VIDEO_GEN_VIDEO_MODE       ``i2v`` or ``preview`` (default i2v)
+  AGENT_VIDEO_GEN_VIDEO_MODE       ``preview`` or ``i2v`` (default preview)
+  AGENT_VIDEO_GEN_IMAGE_MODEL / _VIDEO_MODEL  the generators' names, recorded on each episode (default: unrecorded)
 """
 
 import asyncio
@@ -50,7 +51,7 @@ from miles.rollout.agentic.agent_function import InfraAbort
 from miles.utils.function_registry import load_function
 
 _IMAGES_LIMIT = 3
-_VIDEO_MODES = ("i2v", "preview")
+_VIDEO_MODES = ("preview", "i2v")
 _VIDEO_ID = "video_1"
 
 _SHARED_PARAMETERS = {
@@ -103,7 +104,9 @@ class KeyframeEnvOptions:
     height: int = 480
     fps: int = 16
     timeout_s: float = 600.0
-    video_mode: str = "i2v"
+    video_mode: str = "preview"
+    image_model: str = ""
+    video_model: str = ""
 
     def __post_init__(self) -> None:
         for name in ("generator", "image_generator", "submitted_dir"):
@@ -169,6 +172,10 @@ async def run_agent(base_url: str, prompt: list[dict], request_kwargs: dict, met
     return {
         "video_gen": {
             "request": _user_request(prompt),
+            # So a comparison never mixes episodes of different generators.
+            "video_mode": episode.options.video_mode,
+            "image_model": episode.options.image_model,
+            "video_model": episode.options.video_model,
             "images": [{"image_id": i.image_id, "path": i.path, **asdict(i.request)} for i in episode.images.values()],
             "video": episode.video,
             "submitted": episode.submitted,

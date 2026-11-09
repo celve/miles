@@ -73,6 +73,8 @@ def _clip_request(path: str) -> dict:
 
 
 async def test_images_are_shown_then_the_video_from_the_chosen_image_is_submitted(options, tmp_path):
+    options.setenv("AGENT_VIDEO_GEN_VIDEO_MODE", "i2v")
+    options.setenv("AGENT_VIDEO_GEN_IMAGE_MODEL", "Qwen/Qwen-Image-2.1-Turbo")
     sent = _script(
         options,
         [_call("generate_image", {"prompt": "fox, wide shot", "seed": 4})],
@@ -106,10 +108,11 @@ async def test_images_are_shown_then_the_video_from_the_chosen_image_is_submitte
         "image_prompt": "fox, wide shot",
     }
     assert record["request"] == REQUEST and record["turns"] == 3 and len(record["turn_stats"]) == 3
+    assert (record["video_mode"], record["image_model"]) == ("i2v", "Qwen/Qwen-Image-2.1-Turbo")
 
 
-async def test_preview_mode_makes_the_video_from_text(options):
-    options.setenv("AGENT_VIDEO_GEN_VIDEO_MODE", "preview")
+async def test_preview_mode_is_the_default_and_makes_the_video_from_text(options):
+    options.setenv("AGENT_VIDEO_GEN_VIDEO_MODEL", "Wan-AI/Wan2.2-T2V-A14B-Diffusers")
     sent = _script(
         options,
         [_call("generate_image", {"prompt": "a fox in snow"})],
@@ -122,6 +125,8 @@ async def test_preview_mode_makes_the_video_from_text(options):
     assert clip["image_path"] is None and clip["prompt"] == "a fox in snow it runs"
     assert result["video_gen"]["submitted"]["prompt"] == "a fox in snow it runs"
     assert "without starting from it" in sent[0][0]["content"]
+    record = result["video_gen"]
+    assert (record["video_mode"], record["video_model"]) == ("preview", "Wan-AI/Wan2.2-T2V-A14B-Diffusers")
 
 
 async def test_the_video_ends_the_episode_and_later_calls_in_its_turn_are_not_run(options):

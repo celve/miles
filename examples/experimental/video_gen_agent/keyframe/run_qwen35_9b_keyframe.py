@@ -1,5 +1,5 @@
-"""Keyframe planner RL: a Qwen3.5-9B planner makes up to three keyframe images with a frozen Qwen-Image-2.1-Turbo,
-sees each, then makes one video from the image it picks with a frozen Wan2.2-A14B and the lightx2v 4-step LoRAs.
+"""Keyframe planner RL: a Qwen3.5-9B planner makes up to three keyframe images with a frozen Z-Image-Turbo, sees
+each, then makes one video from the image it picks with a frozen Wan2.2-A14B and the lightx2v 4-step LoRAs.
 A Qwen3-VL judge scores that video against the request.
 
 One node, not colocated (frozen generators cannot share GPUs with training): the trainer (Qwen3.5 plugin model
@@ -12,10 +12,11 @@ the planner as an ``image_url`` part in token space.
 Args:
     --num-gpus-per-node: 4 or 8 picks the recipe's layout (4: 1/1/1/1/0, 8: 1/1/2/3/1 for trainer, planner, image,
         video and eval); --train-gpus, --policy-gpus, --image-gpus, --video-gpus, --eval-gpus override it.
-    --video-mode: ``i2v`` makes the video from the chosen image with Wan2.2-I2V-A14B; ``preview`` makes it from
-        text, the image's prompt plus the motion prompt, with Wan2.2-T2V-A14B. Each takes its own lightx2v LoRAs.
-    --image-model, --image-steps, --video-model: the generators (default: the recipe's; the video model follows
-        --video-mode).
+    --video-mode: ``preview`` (default) makes the video from text, the chosen image's prompt plus the motion prompt,
+        with Wan2.2-T2V-A14B; ``i2v`` makes it from the image with Wan2.2-I2V-A14B, whose clips LIN-2809 measured
+        moving far less. Each takes its own lightx2v LoRAs.
+    --image-model, --image-steps, --image-guidance-scale, --video-model: the generators (default: Z-Image-Turbo at
+        9 steps without CFG; Qwen/Qwen-Image-2.1-Turbo gets 8 steps at CFG 1; the video model follows --video-mode).
     --num-rollout, --rollout-batch-size, --n-samples-per-prompt: GRPO steps, requests per step, episodes per request.
     --max-images, --max-turns, --seconds: the episode's budgets and the video's length.
     --model-dir, --data-dir: where models and the requests live; checkpoints, images and clips go under --output-dir.
@@ -23,7 +24,7 @@ Args:
 Example:
     python examples/experimental/video_gen_agent/keyframe/run_qwen35_9b_keyframe.py --num-gpus-per-node 4
     python examples/experimental/video_gen_agent/keyframe/run_qwen35_9b_keyframe.py --num-rollout 2 --rollout-batch-size 4
-    python examples/experimental/video_gen_agent/keyframe/run_qwen35_9b_keyframe.py --video-mode preview
+    python examples/experimental/video_gen_agent/keyframe/run_qwen35_9b_keyframe.py --image-model Qwen/Qwen-Image-2.1-Turbo
 """
 
 from dataclasses import dataclass
@@ -45,6 +46,10 @@ LIGHTX2V = "lightx2v/Wan2.2-Distill-Loras"
 
 # Trainer, planner, image, video and eval GPUs of the recipe's layouts, by GPUs per node.
 _LAYOUTS = {4: (1, 1, 1, 1, 0), 8: (1, 1, 2, 3, 1)}
+
+
+# Denoising steps and CFG scale of each known image model at 832x480 (LIN-2809).
+_IMAGE_RECIPES = {"Tongyi-MAI/Z-Image-Turbo": (9, 0.0), "Qwen/Qwen-Image-2.1-Turbo": (8, 1.0)}
 
 
 @dataclass(frozen=True)
@@ -77,9 +82,10 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     image_gpus: int | None = None
     video_gpus: int | None = None
     eval_gpus: int | None = None
-    video_mode: str = "i2v"
-    image_model: str = "Qwen/Qwen-Image-2.1-Turbo"
-    image_steps: int = 8
+    video_mode: str = "preview"
+    image_model: str = "Tongyi-MAI/Z-Image-Turbo"
+    image_steps: int | None = None
+    image_guidance_scale: float | None = None
     video_model: str | None = None
     num_rollout: int = 200
     rollout_batch_size: int = 16
@@ -98,6 +104,13 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     def __post_init__(self):
         assert self.num_nodes == 1, "the recipe places its trainer, engines and judge on one node"
         assert self.video_mode in _VIDEO_RECIPES, f"--video-mode is one of {sorted(_VIDEO_RECIPES)}"
+        if self.image_steps is None or self.image_guidance_scale is None:
+            recipe = _IMAGE_RECIPES.get(self.image_model)
+            assert (
+                recipe is not None
+            ), f"{self.image_model} has no recipe, so set --image-steps and --image-guidance-scale"
+            self.image_steps = recipe[0] if self.image_steps is None else self.image_steps
+            self.image_guidance_scale = recipe[1] if self.image_guidance_scale is None else self.image_guidance_scale
         split = (self.train_gpus, self.policy_gpus, self.image_gpus, self.video_gpus, self.eval_gpus)
         if None in split:
             layout = _LAYOUTS.get(self.num_gpus_per_node)
@@ -181,7 +194,10 @@ def _agent_env(args: ScriptArgs) -> dict[str, str]:
         "AGENT_VIDEO_GEN_HEIGHT": "480",
         "AGENT_VIDEO_GEN_FPS": "16",
         "AGENT_VIDEO_GEN_VIDEO_MODE": args.video_mode,
+        "AGENT_VIDEO_GEN_IMAGE_MODEL": args.image_model,
+        "AGENT_VIDEO_GEN_VIDEO_MODEL": args.video.model,
         "AGENT_VIDEO_GEN_IMAGE_NUM_INFERENCE_STEPS": str(args.image_steps),
+        "AGENT_VIDEO_GEN_IMAGE_GUIDANCE_SCALE": str(args.image_guidance_scale),
         # lightx2v's 4-step distill runs without CFG on both experts.
         "AGENT_VIDEO_GEN_NUM_INFERENCE_STEPS": "4",
         "AGENT_VIDEO_GEN_GUIDANCE_SCALE": "1.0",

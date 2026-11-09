@@ -43,11 +43,11 @@ def test_each_layout_parses_with_two_frozen_generators_on_gpus_of_their_own(
         assert not models[name].update_weights
         assert [(g.engine_kind, g.num_gpus_per_engine) for g in models[name].server_groups] == [("diffusion", 1)]
     assert models["policy"].update_weights
-    assert models["image"].model_path == f"{tmp_path}/Qwen-Image-2.1-Turbo"
-    assert models["video"].model_path == f"{tmp_path}/Wan2.2-I2V-A14B-Diffusers"
+    assert models["image"].model_path == f"{tmp_path}/Z-Image-Turbo"
+    assert models["video"].model_path == f"{tmp_path}/Wan2.2-T2V-A14B-Diffusers"
     assert _loras(models["video"]) == [
-        ("wan2.2_i2v_A14b_high_noise_lora_rank64_lightx2v_4step_1022.safetensors", "transformer"),
-        ("wan2.2_i2v_A14b_low_noise_lora_rank64_lightx2v_4step_1022.safetensors", "transformer_2"),
+        ("wan2.2_t2v_A14b_high_noise_lora_rank64_lightx2v_4step_1217.safetensors", "transformer"),
+        ("wan2.2_t2v_A14b_low_noise_lora_rank64_lightx2v_4step_1217.safetensors", "transformer_2"),
     ]
     assert not models["image"].server_groups[0].loras
     assert config.eval_num_gpus == eval_gpus and config.eval_uses_snapshots == bool(eval_gpus)
@@ -62,22 +62,47 @@ def test_each_layout_parses_with_two_frozen_generators_on_gpus_of_their_own(
     assert judge.colocated and config.reward_scaling.pools["judge"].gpu_offset == 0
 
 
-def test_preview_mode_serves_text_to_video_with_its_own_loras(monkeypatch, tmp_path):
-    config = _config(monkeypatch, tmp_path, num_gpus_per_node=4, video_mode="preview")
+def test_i2v_mode_serves_image_to_video_with_its_own_loras(monkeypatch, tmp_path):
+    config = _config(monkeypatch, tmp_path, num_gpus_per_node=4, video_mode="i2v")
 
     video = next(model for model in config.sglang.models if model.name == "video")
-    assert video.model_path == f"{tmp_path}/Wan2.2-T2V-A14B-Diffusers"
-    assert [name.split("_")[1] for name, _ in _loras(video)] == ["t2v", "t2v"]
-    assert _agent_env(ScriptArgs(run_id="test", video_mode="preview"))["AGENT_VIDEO_GEN_VIDEO_MODE"] == "preview"
+    assert video.model_path == f"{tmp_path}/Wan2.2-I2V-A14B-Diffusers"
+    assert [name.split("_")[1] for name, _ in _loras(video)] == ["i2v", "i2v"]
+    env = _agent_env(ScriptArgs(run_id="test", video_mode="i2v"))
+    assert (env["AGENT_VIDEO_GEN_VIDEO_MODE"], env["AGENT_VIDEO_GEN_VIDEO_MODEL"]) == (
+        "i2v",
+        "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
+    )
+
+
+@pytest.mark.parametrize(
+    "image_model, steps, guidance",
+    [("Tongyi-MAI/Z-Image-Turbo", "9", "0.0"), ("Qwen/Qwen-Image-2.1-Turbo", "8", "1.0")],
+)
+def test_each_image_model_gets_its_schedule_and_is_recorded(image_model, steps, guidance):
+    env = _agent_env(ScriptArgs(run_id="test", image_model=image_model))
+
+    assert (env["AGENT_VIDEO_GEN_IMAGE_NUM_INFERENCE_STEPS"], env["AGENT_VIDEO_GEN_IMAGE_GUIDANCE_SCALE"]) == (
+        steps,
+        guidance,
+    )
+    assert env["AGENT_VIDEO_GEN_IMAGE_MODEL"] == image_model
 
 
 def test_the_split_and_models_are_flags():
     args = ScriptArgs(
-        run_id="test", image_gpus=1, video_gpus=4, image_model="Tongyi-MAI/Z-Image-Turbo", video_model="org/Wan-I2V"
+        run_id="test",
+        image_gpus=1,
+        video_gpus=4,
+        image_model="org/Image",
+        image_steps=4,
+        image_guidance_scale=2.0,
+        video_model="org/Wan-T2V",
     )
 
     assert (args.train_gpus, args.policy_gpus, args.image_gpus, args.video_gpus, args.eval_gpus) == (1, 1, 1, 4, 1)
-    assert args.video.model == "org/Wan-I2V" and "i2v" in args.video.high_noise_lora
+    assert args.video.model == "org/Wan-T2V" and "t2v" in args.video.high_noise_lora
+    assert (args.image_steps, args.image_guidance_scale) == (4, 2.0)
     assert "--rollout-num-gpus 6 " in _train_args(args)
 
 
@@ -97,12 +122,12 @@ def test_the_env_gets_the_recipes_clip_and_both_generators():
         "6",
     )
     assert env["AGENT_VIDEO_GEN_NUM_INFERENCE_STEPS"] == "4" and env["AGENT_VIDEO_GEN_GUIDANCE_SCALE_2"] == "1.0"
-    assert env["AGENT_VIDEO_GEN_IMAGE_NUM_INFERENCE_STEPS"] == "8"
+    assert env["AGENT_VIDEO_GEN_VIDEO_MODE"] == "preview"
     assert env["AGENT_VIDEO_GEN_IMAGE_DIR"] == "/root/shared_data/test/images"
 
 
 def test_prepare_downloads_only_the_modes_lightx2v_loras():
-    args = ScriptArgs(run_id="test", video_mode="preview")
+    args = ScriptArgs(run_id="test")
 
     assert LIGHTX2V == "lightx2v/Wan2.2-Distill-Loras"
     assert "t2v" in args.video.high_noise_lora and "low_noise" in args.video.low_noise_lora
@@ -114,6 +139,7 @@ def test_prepare_downloads_only_the_modes_lightx2v_loras():
         (dict(eval_gpus=0), "adds up to 7, not 8"),
         (dict(num_gpus_per_node=2), "no layout for 2 GPUs"),
         (dict(video_mode="t2v"), "--video-mode is one of"),
+        (dict(image_model="org/Image"), "has no recipe"),
     ],
 )
 def test_a_bad_layout_or_mode_is_refused(script_args, message):
