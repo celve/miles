@@ -421,6 +421,8 @@ async def run_for_training(
 
     Shared by every agent-function module: each passes its own run_episode.
     """
+    from miles.rollout.agentic.agent_function import InfraAbort
+
     request_kwargs = request_kwargs or {}
     metadata = metadata or {}
 
@@ -451,7 +453,7 @@ async def run_for_training(
         }
     except Exception as e:
         logger.error(f"OpenEnv tbench2 episode failed: {e}", exc_info=True)
-        return None
+        raise InfraAbort("EpisodeFailed", f"OpenEnv tbench2 episode failed: {e!r}") from e
     finally:
         await policy.close()
 
@@ -460,8 +462,7 @@ async def run_for_training(
     # sample: returning it as reward 0.0 would inject a false negative into
     # training.
     if reward is None:
-        logger.warning("OpenEnv tbench2 episode produced no canonical reward; dropping sample")
-        return None
+        raise InfraAbort("NoVerdict", "OpenEnv tbench2 episode produced no canonical reward")
 
     # eval_report is intentionally empty: the server's evaluate reports only
     # the scalar reward (plus the harness marker). The detailed pytest CTRF
