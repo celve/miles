@@ -59,7 +59,6 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
         "Pass --use-session-server to start the session server."
     )
     use_v2 = input.args.use_session_server == "v2"
-    collect_spec_metrics = use_v2 and input.args.sglang.common_value("speculative_algorithm") is not None
     tracer = await OpenAIEndpointTracer.create(
         input.args,
         evaluation=input.evaluation,
@@ -131,7 +130,7 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
     if collect_failed:
         sample = deepcopy(input.sample)
         sample.status = Sample.Status.ABORTED
-        if collect_spec_metrics:
+        if use_v2:
             sample.metadata.pop(SESSION_ROLLOUT_METRICS_KEY, None)
         return GenerateFnOutput(samples=[sample] if use_v2 else sample)
 
@@ -142,12 +141,12 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
             logger.warning("No model calls recorded for sample")
         sample = deepcopy(input.sample)
         sample.status = Sample.Status.ABORTED
-        if collect_spec_metrics:
+        if use_v2:
             sample.metadata.pop(SESSION_ROLLOUT_METRICS_KEY, None)
         return GenerateFnOutput(samples=[sample] if use_v2 else sample)
 
     session_rollout_metrics = None
-    if collect_spec_metrics:
+    if use_v2:
         session_rollout_metrics = result.session_metadata[SESSION_ROLLOUT_METRICS_KEY]
         if session_rollout_metrics["session_id"] != tracer.session_id:
             raise ValueError(
@@ -158,7 +157,7 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
             raise ValueError("a successful session collect must carry metrics")
 
     samples = result.samples
-    if collect_spec_metrics:
+    if use_v2:
         for sample in samples:
             sample.metadata.pop(SESSION_ROLLOUT_METRICS_KEY, None)
             sample.metadata[SESSION_ROLLOUT_METRICS_KEY] = session_rollout_metrics
