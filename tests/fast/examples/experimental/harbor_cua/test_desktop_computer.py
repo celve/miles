@@ -449,6 +449,11 @@ _JSON = (
         (_BEGIN_REPORT, False),
         ("Results {see below}", False),
         ("Total {count} items", False),
+        ("Results {see [appendix]}", False),
+        ("Results {see 2nd paragraph}", False),
+        ("Report {status TRUE positive}", False),
+        ('{"notes": "Current Results {count 2} were measured"}', False),
+        ("SELECT 'Current Results {count 2}' AS notes;", False),
     ],
 )
 def test_typed_shell_or_code_gates_the_reward(tmp_path, monkeypatch, typed, gated):

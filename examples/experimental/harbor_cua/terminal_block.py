@@ -55,10 +55,24 @@ _APP_FILE = re.compile(
     re.M,
 )
 
-# One Webots node typed whole ("Fog { fogType ... }") is under the length bar below, so a valued node counts alone.
+# One Webots node typed whole ("Fog { fogType ... }") is under the length bar below, so it counts alone when it
+# names a Webots node type and its body is nothing but field-value pairs.
+_VRML_NODES = (
+    "Accelerometer|Altimeter|Appearance|Background|BallJoint|BallJointParameters|Billboard|Box|Brake|Camera|Capsule"
+    "|Charger|Color|Compass|Cone|Connector|ContactProperties|Coordinate|Cylinder|Damping|DirectionalLight|Display"
+    "|DistanceSensor|ElevationGrid|Emitter|Focus|Fog|GPS|Group|Gyro|HingeJoint|HingeJointParameters|ImageTexture"
+    "|IndexedFaceSet|IndexedLineSet|InertialUnit|JointParameters|LED|Lens|LensFlare|Lidar|LightSensor|LinearMotor"
+    "|Material|Mesh|Muscle|Normal|PBRAppearance|Pen|Physics|Plane|PointLight|PointSet|Pose|PositionSensor|Propeller"
+    "|Radar|RangeFinder|Receiver|Recognition|Robot|RotationalMotor|Shape|SliderJoint|Slot|Solid|Speaker|Sphere"
+    "|SpotLight|TextureCoordinate|TextureTransform|TouchSensor|Track|TrackWheel|Transform|Viewpoint|WorldInfo|Zoom"
+)
+_VRML_NUM = r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?"
+_VRML_VALUE = (
+    rf"(?:{_VRML_NUM}(?:[ \t]+{_VRML_NUM})*|\x22[^\x22\n]*\x22|TRUE|FALSE|NULL|\[[\s\d.eE+,-]*\])(?=[\s}}])"
+)
 _VRML_NODE = re.compile(
-    r"(?:^|[\s\[])(?:DEF\s+\w+\s+)?[A-Z][A-Za-z0-9]*\s*\{\s*[a-z][A-Za-z0-9]*\s+"
-    r"(?:-?\.?\d|\x22|\[|TRUE\b|FALSE\b|[A-Z]\w*\s*\{)[^{}]*\}"
+    rf"(?<![\w.])(?:DEF\s+\w+\s+)?(?:{_VRML_NODES})\s*\{{"
+    rf"(?:\s*[a-z][A-Za-z0-9]*\s+{_VRML_VALUE})+\s*\}}"
 )
 
 
