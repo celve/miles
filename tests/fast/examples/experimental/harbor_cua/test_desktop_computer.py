@@ -405,6 +405,11 @@ _REPORT = (
     "Freeform Fin Integration Report\n=====\nFin Type: Freeform (3 fins)\nThickness: 3.0 mm\nApogee: 233 m\nStability: 3.97 cal\n"
     * 2
 )
+_GMAT = "%General Mission Analysis Tool(GMAT) Script\nCreate Spacecraft Sat;\nSat.SMA = 7000;\nCreate Propagator Prop;\nBeginMissionSequence;\nPropagate Prop(Sat) {Sat.ElapsedDays = 1};\n"
+_COURSE_FORM = (
+    "Create a new course\nCourse name: Introduction to Cell Biology\nShort name: BIO101\n"
+    "Summary: This course covers cellular structures and their functions in living organisms.\nVisibility: Show"
+)
 _JSON = (
     '{\n  "sma_angle_degrees": 28.4,\n  "aortomesenteric_distance_mm": 11.2,\n  "notes": "measured in the axial view"\n}\n'
     * 2
@@ -417,6 +422,9 @@ _JSON = (
         ("cat > /tmp/out.csv << EOF", True),
         ("import bpy", True),
         ("cd /home/ga && ls -l", True),
+        ("  echo indented", True),
+        ("\n  ls -l /home/ga", True),
+        (_GMAT, True),
         (".shell python3 /tmp/fk.py", True),
         ("!mkdir -p /home/ga/exports", True),
         ("Sub Run()\n  Shell \"bash -c 'ls'\"\nEnd Sub", True),
@@ -428,6 +436,7 @@ _JSON = (
         ("An echo of the old design", False),
         (_REPORT, False),
         (_JSON, False),
+        (_COURSE_FORM, False),
     ],
 )
 def test_typed_shell_or_code_gates_the_reward(tmp_path, monkeypatch, typed, gated):
