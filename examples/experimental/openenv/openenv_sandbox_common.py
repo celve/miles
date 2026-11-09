@@ -44,6 +44,8 @@ from miles.rollout.agentic.rollout_limits import rollout_semaphore
 # A provider's "start one sandbox" hook: (task_id, tasks_dir) -> (close_fn, base_url).
 StartFn = Callable[[str, str], tuple[Callable[[], None], str]]
 
+WORKER_ENV = ("OPENENV_*", "TB2_*", "AGENT_*", "SWE_AGENT_MODEL_NAME")
+
 # The canonical per-episode backend registry — the launcher and the sibling
 # tools (scan_golden, eval_tbench2_via_api) all resolve through here, so the
 # accepted names and the "agentenv is the e2b backend" aliasing cannot drift.
