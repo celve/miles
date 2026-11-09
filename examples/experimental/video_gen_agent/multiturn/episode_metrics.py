@@ -9,6 +9,7 @@ Miles' own ``rollout/episode_raw_reward``.
   episode/peak_prompt_tokens      the episode's largest prompt
   episode/turn_seconds            wall time of a policy call
   episode/folded_clips, episode/recalls, episode/shots_submitted, episode/samples
+  episode/images                  images per episode, in the keyframe env
 
 ``--custom-eval-rollout-log-function-path examples.experimental.video_gen_agent.multiturn.episode_metrics.log_eval_episodes``
 keeps one row per episode in each eval dataset before Miles' own eval metrics run, so ``eval/<dataset>`` is the
@@ -67,10 +68,14 @@ def episode_metrics(samples) -> dict[str, float]:
     submitted = [e["submitted"] for e in episodes.values() if e["submitted"]]
     metrics = {
         "episode/turn_seconds": np.mean([t["seconds"] for e in episodes.values() for t in e["turn_stats"]]).item(),
-        "episode/folded_clips": np.mean([e["folded_clips"] for e in episodes.values()]).item(),
-        "episode/recalls": np.mean([e["recalls"] for e in episodes.values()]).item(),
         "episode/samples": np.mean(list(branches.values())).item(),
     }
+    # The clip env records folds and recalls; the keyframe env records its images instead.
+    for key in ("folded_clips", "recalls"):
+        if counts := [e[key] for e in episodes.values() if key in e]:
+            metrics[f"episode/{key}"] = np.mean(counts).item()
+    if images := [len(e["images"]) for e in episodes.values() if "images" in e]:
+        metrics["episode/images"] = np.mean(images).item()
     if tokens:
         metrics["episode/prompt_tokens_per_turn"] = np.mean([np.mean(episode) for episode in tokens]).item()
         metrics["episode/peak_prompt_tokens"] = np.mean([max(episode) for episode in tokens]).item()

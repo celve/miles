@@ -47,6 +47,16 @@ async def test_a_request_becomes_one_clip_with_the_envs_shape_and_the_launchers_
     assert "image_path" not in body
 
 
+async def test_wan22_a14bs_low_noise_guidance_reaches_the_engine_only_when_set(clip_generator, monkeypatch):
+    clip_generator, seen, _ = clip_generator
+    await clip_generator.generate(_request("a boat", seconds=2))
+    monkeypatch.setenv(generator.GUIDANCE_2_ENV, "1.0")
+
+    await RouterClipGenerator().generate(_request("a boat", seconds=2))
+
+    assert "extra_sampling_params" not in seen[0] and seen[1]["extra_sampling_params"] == {"guidance_scale_2": 1.0}
+
+
 async def test_an_extension_sends_the_frame_it_continues_from(clip_generator):
     clip_generator, seen, _ = clip_generator
 

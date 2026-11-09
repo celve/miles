@@ -281,6 +281,9 @@ def validate_diffusion_sglang_config(sglang) -> None:
                 f"--model-kind diffusion serves regular single-GPU engine groups, got {group.worker_type.value} "
                 f"with {group.num_gpus_per_engine} GPUs per engine"
             )
+        if group.loras:
+            # The trainer's base weights would no longer match the engine's.
+            raise ValueError("--model-kind diffusion trains its model, so its engine groups take no fixed loras")
 
 
 def validate_frozen_diffusion_models(config) -> None:

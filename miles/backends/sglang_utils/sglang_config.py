@@ -29,6 +29,18 @@ logger = logging.getLogger(__name__)
 # ---------------------------- raw config -----------------------------
 
 
+class DiffusionLora(FrozenStrictBaseModel):
+    """An adapter a frozen diffusion engine merges before it serves, through sglang.multimodal_gen's ``/v1/set_lora``.
+
+    ``target`` picks the transformer: Wan2.2-A14B's high-noise expert is ``transformer``, its low-noise one
+    ``transformer_2``, and each takes its own distill LoRA.
+    """
+
+    path: str
+    target: Literal["all", "transformer", "transformer_2"] = "all"
+    strength: float = 1.0
+
+
 class _RawServerGroupConfig(FrozenStrictBaseModel):
     """Configuration for a single server group.
 
@@ -43,6 +55,7 @@ class _RawServerGroupConfig(FrozenStrictBaseModel):
                    arguments in ``_compute_server_args``.
         engine_kind: ``text`` (sglang) or ``diffusion`` (sglang.multimodal_gen).
                      Defaults to the run's ``--model-kind``.
+        loras: Adapters each engine of a frozen diffusion group merges before it serves.
     """
 
     worker_type: WorkerType
@@ -50,6 +63,7 @@ class _RawServerGroupConfig(FrozenStrictBaseModel):
     num_gpus_per_engine: int | None = None
     overrides: dict = {}
     engine_kind: Literal["text", "diffusion"] | None = None
+    loras: tuple[DiffusionLora, ...] = ()
 
 
 class _RawModelConfig(FrozenStrictBaseModel):
@@ -161,6 +175,7 @@ class ServerGroupConfig(FrozenStrictBaseModel):
     overrides: dict = pydantic.Field(default_factory=dict)
     needs_offload: bool
     engine_kind: Literal["text", "diffusion"] = "text"
+    loras: tuple[DiffusionLora, ...] = ()
 
     @property
     def model_path(self) -> str:
@@ -202,7 +217,10 @@ class ServerGroupConfig(FrozenStrictBaseModel):
             overrides=overrides,
             needs_offload=needs_offload,
             engine_kind=x if (x := raw.engine_kind) is not None else args.model_kind,
+            loras=raw.loras,
         )
+        if config.loras and config.engine_kind != "diffusion":
+            raise ValueError(f"loras are merged by diffusion engines only, not engine_kind {config.engine_kind}")
         scaling = ServerGroupScalingConfig(
             num_gpus=raw.num_gpus, gpu_offset=gpu_offset, engine_offset=offset_cursor.engine
         )

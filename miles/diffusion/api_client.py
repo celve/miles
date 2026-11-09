@@ -5,7 +5,7 @@ from typing import Any
 import torch
 
 from miles.backends.sglang_utils.sglang_api_client import SGLangApiClient
-from miles.diffusion.clip import save_clip
+from miles.diffusion.clip import save_clip, save_image
 from miles.diffusion.rollout.response import parse_rollout_response
 from miles.utils.http_utils import GeneralHttpClientProvider
 
@@ -61,6 +61,19 @@ class DiffusionApiClient(SGLangApiClient):
             },
         )
 
+    async def set_lora(self, loras) -> None:
+        """Merge ``DiffusionLora`` adapters into the engine's weights, each into its own target transformer."""
+        await self._make_request(
+            "v1/set_lora",
+            {
+                "lora_nickname": [f"fixed_{index}" for index in range(len(loras))],
+                "lora_path": [lora.path for lora in loras],
+                "target": [lora.target for lora in loras],
+                "strength": [lora.strength for lora in loras],
+                "merge_mode": "merge",
+            },
+        )
+
     async def generate_clip(
         self,
         *,
@@ -94,6 +107,54 @@ class DiffusionApiClient(SGLangApiClient):
             "negative_prompt": negative_prompt,
             "image_path": [image_path] if image_path else None,
             "extra_sampling_params": extra_sampling_params,
+        }
+        video = await self._generate_output(payload)
+        if image_path and video.shape[1] == num_frames:
+            # Wan2.2 TI2V picks its own size from the image (SGLang's input_validation, 704x1280 area), whatever we ask.
+            video = _fit(video, height=height, width=width)
+        if tuple(video.shape[1:]) != (num_frames, height, width):
+            raise ValueError(
+                f"asked for {num_frames} frames of {width}x{height}, the engine generated {video.shape[1]} frames of "
+                f"{video.shape[3]}x{video.shape[2]}; pick a frame count and size the model takes as they are"
+            )
+        return await asyncio.to_thread(save_clip, video, fps=fps, output_dir=output_dir)
+
+    async def generate_image(
+        self,
+        *,
+        prompt: str,
+        seed: int,
+        width: int,
+        height: int,
+        output_dir: str,
+        num_inference_steps: int | None = None,
+        guidance_scale: float | None = None,
+        negative_prompt: str | None = None,
+        extra_sampling_params: dict[str, Any] | None = None,
+    ) -> str:
+        """Generate one image and return the path of its PNG, ``<output_dir>/<sha256>.png``; a router may serve it."""
+        payload = {
+            "prompt": prompt,
+            "seed": seed,
+            "width": width,
+            "height": height,
+            "num_inference_steps": num_inference_steps,
+            "guidance_scale": guidance_scale,
+            "negative_prompt": negative_prompt,
+            "extra_sampling_params": extra_sampling_params,
+        }
+        image = await self._generate_output(payload)
+        if tuple(image.shape[1:]) != (1, height, width):
+            raise ValueError(
+                f"asked for one {width}x{height} image, the engine generated {image.shape[1]} frames of "
+                f"{image.shape[3]}x{image.shape[2]}; pick a size the model takes as it is"
+            )
+        # Qwen-Image 2.1 generates RGBA; the planner and image-to-video take RGB.
+        return await asyncio.to_thread(save_image, image[:3, 0], output_dir=output_dir)
+
+    async def _generate_output(self, payload: dict[str, Any]) -> torch.Tensor:
+        """One uint8 ``[C, F, H, W]`` output of an evaluation-mode ``POST /rollout/generate``."""
+        payload = payload | {
             "num_outputs_per_prompt": 1,
             "rollout": False,
             "rollout_video_dtype": "uint8",
@@ -106,16 +167,7 @@ class DiffusionApiClient(SGLangApiClient):
         )
         response.raise_for_status()
         (rollout,) = await asyncio.to_thread(parse_rollout_response, response.content)
-        video = rollout.generated_output
-        if image_path and video.shape[1] == num_frames:
-            # Wan2.2 TI2V picks its own size from the image (SGLang's input_validation, 704x1280 area), whatever we ask.
-            video = _fit(video, height=height, width=width)
-        if tuple(video.shape[1:]) != (num_frames, height, width):
-            raise ValueError(
-                f"asked for {num_frames} frames of {width}x{height}, the engine generated {video.shape[1]} frames of "
-                f"{video.shape[3]}x{video.shape[2]}; pick a frame count and size the model takes as they are"
-            )
-        return await asyncio.to_thread(save_clip, video, fps=fps, output_dir=output_dir)
+        return rollout.generated_output
 
 
 def _fit(video: torch.Tensor, *, height: int, width: int) -> torch.Tensor:

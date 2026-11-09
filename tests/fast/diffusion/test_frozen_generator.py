@@ -265,3 +265,146 @@ def test_pausing_or_aborting_a_multimodal_gen_engine_sends_it_nothing(generator_
         await client.abort_all_requests()
 
     asyncio.run(lifecycle())
+
+
+_LORAS = [
+    {"path": "/loras/high.safetensors", "target": "transformer"},
+    {"path": "/loras/low.safetensors", "target": "transformer_2", "strength": 0.5},
+]
+
+
+def test_a_frozen_diffusion_group_takes_fixed_loras(tmp_path):
+    config = _parse(tmp_path, "--use-miles-router", generator_groups=({**_GENERATOR, "loras": _LORAS},))
+
+    _, generator = config.sglang.models
+    (group,) = generator.server_groups
+    assert [(lora.path, lora.target, lora.strength) for lora in group.loras] == [
+        ("/loras/high.safetensors", "transformer", 1.0),
+        ("/loras/low.safetensors", "transformer_2", 0.5),
+    ]
+    # Miles merges them after launch; sglang.multimodal_gen's own lora_path would put one adapter on both experts.
+    server_args = compute_diffusion_engine_launch_cmd(
+        config,
+        interpreter_prefix=["python"],
+        base_gpu_id=0,
+        num_gpus_per_engine=1,
+        sglang_overrides=group.overrides,
+        update_weights=False,
+        nccl_port=1,
+        host="127.0.0.1",
+        port=2,
+    )
+    assert "lora" not in server_args
+
+
+@pytest.mark.parametrize(
+    "loras, message",
+    [
+        ([{"path": "/l.safetensors", "target": "critic"}], "target"),
+        ([{"path": "/l.safetensors", "scale": 2}], "scale"),
+    ],
+)
+def test_a_lora_sglang_cannot_merge_is_refused_at_parse(tmp_path, loras, message):
+    with pytest.raises(ValueError, match=message):
+        _parse(tmp_path, "--use-miles-router", generator_groups=({**_GENERATOR, "loras": loras},))
+
+
+def test_loras_on_a_text_group_are_refused(tmp_path):
+    with pytest.raises(ValueError, match="merged by diffusion engines only"):
+        _parse(
+            tmp_path,
+            "--use-miles-router",
+            generator_groups=({**_GENERATOR, "engine_kind": "text", "loras": _LORAS[:1]},),
+        )
+
+
+def _fake_lora_engine(seen: list, *, status: int = 200) -> FastAPI:
+    app = FastAPI()
+
+    @app.post("/v1/set_lora")
+    async def set_lora(request: Request):
+        seen.append(await request.json())
+        return Response(status_code=status, content=b'{"message": "ok"}')
+
+    return app
+
+
+def test_set_lora_merges_each_adapter_into_its_own_transformer():
+    from miles.backends.sglang_utils.sglang_config import DiffusionLora
+
+    seen = []
+    server = UvicornThreadServer(_fake_lora_engine(seen), host="127.0.0.1", port=find_available_port(32000))
+    server.start()
+    try:
+        loras = tuple(DiffusionLora(**lora) for lora in _LORAS)
+        asyncio.run(DiffusionApiClient(server_url=server.url).set_lora(loras))
+    finally:
+        server.stop()
+
+    assert seen == [
+        {
+            "lora_nickname": ["fixed_0", "fixed_1"],
+            "lora_path": ["/loras/high.safetensors", "/loras/low.safetensors"],
+            "target": ["transformer", "transformer_2"],
+            "strength": [1.0, 0.5],
+            "merge_mode": "merge",
+        }
+    ]
+
+
+def _fake_image_engine(*, channels: int, height: int, width: int, seen: list) -> FastAPI:
+    """An image model's ``/rollout/generate``: one ``[C, H, W]`` output, as Qwen-Image 2.1's RGBA."""
+    app = FastAPI()
+
+    @app.post("/rollout/generate")
+    async def generate(request: Request):
+        body = await request.json()
+        seen.append(body)
+        generator = torch.Generator().manual_seed(body["seed"])
+        image = torch.randint(0, 256, (channels, height, width), dtype=torch.uint8, generator=generator)
+        output = {"__tensor__": True, "data": save({"t": image})}
+        return Response(content=msgpack.packb([{"seed": body["seed"], "generated_output": output}]))
+
+    return app
+
+
+@pytest.fixture
+def image_engine():
+    seen = []
+    server = UvicornThreadServer(
+        _fake_image_engine(channels=4, height=32, width=48, seen=seen),
+        host="127.0.0.1",
+        port=find_available_port(33000),
+    )
+    server.start()
+    yield DiffusionApiClient(server_url=server.url), seen
+    server.stop()
+
+
+def _generate_image(client, tmp_path, **overrides):
+    request = dict(prompt="a red kite", seed=7, width=48, height=32, output_dir=str(tmp_path))
+    return asyncio.run(client.generate_image(**(request | overrides)))
+
+
+def test_an_image_is_generated_and_stored_as_an_rgb_png_by_its_sha256(image_engine, tmp_path):
+    from PIL import Image
+
+    client, seen = image_engine
+
+    path = _generate_image(client, tmp_path, num_inference_steps=8, guidance_scale=1.0)
+
+    with open(path, "rb") as f:
+        assert os.path.basename(path) == f"{hashlib.sha256(f.read()).hexdigest()}.png"
+    with Image.open(path) as image:
+        assert (image.mode, image.size) == ("RGB", (48, 32))
+    assert os.listdir(tmp_path) == [os.path.basename(path)]
+    (body,) = seen
+    assert body["rollout"] is False and body["rollout_video_dtype"] == "uint8" and "num_frames" not in body
+    assert (body["num_inference_steps"], body["guidance_scale"], body["width"], body["height"]) == (8, 1.0, 48, 32)
+
+
+def test_an_image_the_engine_resized_is_refused(image_engine, tmp_path):
+    client, _ = image_engine
+
+    with pytest.raises(ValueError, match="asked for one 64x32 image"):
+        _generate_image(client, tmp_path, width=64)
