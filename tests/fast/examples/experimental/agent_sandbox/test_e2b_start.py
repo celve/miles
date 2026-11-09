@@ -99,8 +99,11 @@ def service(monkeypatch):
     close()
 
 
+START_PATH = "examples.experimental.agent_sandbox.e2b_start.start"
+
+
 def _in_sandbox(fn, **kwargs):
-    return asyncio.run(call_agent_function(fn, mode="sandbox", sandbox_start=e2b_start.start, **kwargs))
+    return asyncio.run(call_agent_function(fn, mode="worker", worker=START_PATH, **kwargs))
 
 
 def test_the_call_runs_on_the_worker_in_its_own_sandbox_which_is_then_killed(service):
@@ -183,8 +186,8 @@ def test_a_cancelled_agents_cleanup_finishes_before_the_kill(service, tmp_path, 
         task = asyncio.create_task(
             call_agent_function(
                 stubs.clean_up_slowly_when_cancelled,
-                mode="sandbox",
-                sandbox_start=e2b_start.start,
+                mode="worker",
+                worker=START_PATH,
                 pid_file=str(pid_file),
                 cleaned_up=str(cleaned_up),
                 cleanup_s=1.0,

@@ -72,7 +72,8 @@ def _open_lock_file(file_name: str) -> int:
     if where := os.environ.get(UNSHARED_ENV_VAR):
         raise RuntimeError(
             f"rollout-wide limit {file_name!r} cannot be shared from a {where} agent: its lock files would limit "
-            "this agent alone. Run agents that need rollout_semaphore/rollout_lock in subproc, inline or worker mode."
+            "this agent alone. Run agents that need rollout_semaphore/rollout_lock in subproc or inline mode, or on a "
+            "fixed agent worker."
         )
     return os.open(_lock_dir() / re.sub(r"[^A-Za-z0-9._-]", "_", file_name), os.O_CREAT | os.O_RDWR, 0o600)
 

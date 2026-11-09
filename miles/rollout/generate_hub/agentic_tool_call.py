@@ -223,19 +223,11 @@ def _aborted_output(
 
 
 def _worker_options(args) -> dict[str, Any]:
-    mode = args.custom_agent_function_mode
-    if mode == "worker":
-        placement = {"worker": resolve_worker(args.custom_agent_function_worker)}
-    elif mode == "sandbox":
-        if not args.custom_agent_function_sandbox_start_path:
-            raise NonRetryableError(
-                "--custom-agent-function-mode sandbox needs --custom-agent-function-sandbox-start-path"
-            )
-        placement = {"sandbox_start": load_function(args.custom_agent_function_sandbox_start_path)}
-    else:
+    if args.custom_agent_function_mode != "worker":
         return {}
+    resolve_worker(args.custom_agent_function_worker)
     return {
-        **placement,
+        "worker": args.custom_agent_function_worker,
         "extra_env": forwarded_env(_worker_env_patterns(args)),
         "abort_scope": rollout_abort_scope(args),
     }
@@ -249,30 +241,31 @@ def _worker_env_patterns(args) -> tuple[str, ...]:
     )
 
 
+def _checked_worker(value: str) -> str:
+    try:
+        resolve_worker(value)
+    except NonRetryableError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+    return value
+
+
 def _add_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--custom-agent-function-mode",
         choices=AGENT_FUNCTION_MODES,
         default="subproc",
         help="Where each agent call runs: subproc, a child process of its own so one episode's "
-        "blocking step or crash cannot stall the others; inline, on the rollout's event loop; worker, "
+        "blocking step or crash cannot stall the others; inline, on the rollout's event loop; or worker, "
         "a subproc child on an agent worker (python -m miles.rollout.agentic.worker) named by "
-        "--custom-agent-function-worker, so the agents' CPU work leaves this host; or sandbox, the same "
-        "on an agent worker in a sandbox started for each call by --custom-agent-function-sandbox-start-path.",
+        "--custom-agent-function-worker, so the agents' CPU work leaves this host.",
     )
     parser.add_argument(
         "--custom-agent-function-worker",
-        type=str,
+        type=_checked_worker,
         default=None,
-        help="The agent worker for --custom-agent-function-mode worker: its URL.",
-    )
-    parser.add_argument(
-        "--custom-agent-function-sandbox-start-path",
-        type=str,
-        default=None,
-        help="For --custom-agent-function-mode sandbox: the start function (module.fn) that starts one sandbox "
-        "with an agent worker in it, as fn(label, '') -> (close_fn, worker_url), the shape of "
-        "miles.rollout.agentic.sandbox_start.StartFn. close_fn runs when the call ends, however it ends. "
+        help="The agent worker for --custom-agent-function-mode worker: a fixed worker's http(s) URL, or a start "
+        "function (module.fn) that starts one for each call, as fn(label, '') -> (close_fn, worker_url), the shape "
+        "of miles.rollout.agentic.sandbox_start.StartFn. close_fn runs when the call ends, however it ends. "
         "Examples: examples/experimental/agent_sandbox.",
     )
     parser.add_argument(

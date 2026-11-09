@@ -1,7 +1,7 @@
 """A sandbox start function on E2B, or any service speaking its API (the ``e2b`` SDK reads ``E2B_API_URL``).
 
-    --custom-agent-function-mode sandbox
-    --custom-agent-function-sandbox-start-path examples.experimental.agent_sandbox.e2b_start.start
+    --custom-agent-function-mode worker
+    --custom-agent-function-worker examples.experimental.agent_sandbox.e2b_start.start
 
 The template's start command waits for ``BOOT_CONFIG`` (``{"env": {...}}``), adds that env, and serves
 ``python -m miles.rollout.agentic.worker`` on ``WORKER_PORT``. The boot env holds the E2B key, for the sandboxes the

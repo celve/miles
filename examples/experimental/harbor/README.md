@@ -128,6 +128,11 @@ reports and verdict come back to the rollout, and cancelling the rollout's call 
   torch, sglang or ray.
 - **Network.** It must reach the session servers at `--session-server-external-host`.
 
+To give each trial a worker of its own, pass a start function instead of a URL:
+`--agent-worker examples.experimental.agent_sandbox.e2b_start.start`. It starts a sandbox per trial and closes it when
+the trial ends, however it ends. The start function runs on the rollout host, so the launcher still checks the provider
+key and SDK there. `e2b_start.py`'s header lists what its template must do and the env vars it reads.
+
 ## Validation
 
 This README's command has been run end to end: 8×H200, real training mode with

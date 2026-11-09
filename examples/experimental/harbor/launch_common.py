@@ -57,7 +57,7 @@ def agentic_train_args(
     )
 
 
-def harbor_env_vars(args, *, agent_worker: bool = False) -> dict[str, str]:
+def harbor_env_vars(args, *, agent_worker: str = "") -> dict[str, str]:
     """The Harbor-side environment for rollout workers, preflighted on the launcher.
 
     HARBOR_ENV_TYPE is passed through untouched (Harbor validates it). The
@@ -93,7 +93,10 @@ def harbor_env_vars(args, *, agent_worker: bool = False) -> dict[str, str]:
         env["HARBOR_ENV_KWARGS"] = args.harbor_env_kwargs
     if spec := PROVIDER_CREDENTIALS.get(env_type):
         provision_provider(
-            env, spec, arg_path=getattr(args, spec["arg_attr"], "") or "", remote=agent_worker
+            env,
+            spec,
+            arg_path=getattr(args, spec["arg_attr"], "") or "",
+            remote=agent_worker.startswith(("http://", "https://")),
         )  # config-access-exempt: provider registry selects credential fields; launchers may instead use environment credentials
     else:
         # Any other Harbor backend still passes straight through; there is just

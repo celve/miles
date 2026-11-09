@@ -1,9 +1,9 @@
 """A sandbox start function that runs each call's agent worker as a process on this host.
 
-It runs ``--custom-agent-function-mode sandbox`` without a sandbox service:
+It runs a worker per call without a sandbox service:
 
-    --custom-agent-function-mode sandbox
-    --custom-agent-function-sandbox-start-path examples.experimental.agent_sandbox.local_start.start
+    --custom-agent-function-mode worker
+    --custom-agent-function-worker examples.experimental.agent_sandbox.local_start.start
 """
 
 import os

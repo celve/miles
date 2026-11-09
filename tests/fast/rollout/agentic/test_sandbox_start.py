@@ -1,22 +1,42 @@
 import argparse
 import asyncio
+import concurrent.futures
+import sys
 import threading
 import time
 from types import SimpleNamespace
 
 import pytest
 from aiohttp import web
+from examples.experimental.agent_sandbox import local_start
+from tests.fast.fixtures.hook_consumer_fixtures import _hook
 
+from miles.backends.megatron_utils.megatron_config import MegatronConfig
 from miles.rollout.agentic import sandbox_start
-from miles.rollout.agentic.agent_function import InfraAbort, call_agent_function, cancel_calls, rollout_abort_scope
+from miles.rollout.agentic.agent_function import (
+    InfraAbort,
+    call_agent_function,
+    cancel_calls,
+    resolve_worker,
+    rollout_abort_scope,
+)
 from miles.rollout.agentic.rollout_limits import UNSHARED_ENV_VAR
 from miles.rollout.agentic.worker import create_app
+from miles.rollout.base_types import GenerateFnInput
 from miles.rollout.generate_hub import agentic_tool_call
+from miles.rollout.inference_rollout import inference_rollout_train
+from miles.rollout.session.samples.codec import SamplesReply
+from miles.rollout.session.types import SessionServerInstance
+from miles.utils.arguments import get_miles_extra_args_provider
+from miles.utils.function_registry import function_registry
 from miles.utils.misc import call_agent_abort_hook
 from miles.utils.retry_utils import NonRetryableError
 from miles.utils.test_utils import agent_function_stubs as stubs
+from miles.utils.types import Sample
 
 from .test_worker import _rollout_args, _serve_in_thread, _wait_for
+
+START_PATH = "test_sandbox_start.start"
 
 
 def _until(condition, timeout_s: float = 30.0) -> bool:
@@ -55,20 +75,19 @@ def sandboxes():
         state.started.append((task_id, tasks_dir))
         return (lambda: state.closed.append(task_id)), url
 
-    state.start = start
-    yield state
+    with function_registry.temporary(START_PATH, start):
+        yield state
     for close in state.servers:
         close()
 
 
-def _in_sandbox(fn, start, **kwargs):
-    return asyncio.run(call_agent_function(fn, mode="sandbox", sandbox_start=start, **kwargs))
+def _on_started_worker(fn, worker=START_PATH, **kwargs):
+    return asyncio.run(call_agent_function(fn, mode="worker", worker=worker, **kwargs))
 
 
 def test_the_call_runs_on_the_worker_its_start_function_started_which_is_then_closed(sandboxes):
-    seen = _in_sandbox(
+    seen = _on_started_worker(
         stubs.read_env,
-        sandboxes.start,
         extra_env={"SANDBOX_TEST_FORWARDED": "the caller's"},
         names=["SANDBOX_TEST_FORWARDED"],
         metadata={"instance_id": "task-7"},
@@ -82,7 +101,7 @@ def test_the_call_runs_on_the_worker_its_start_function_started_which_is_then_cl
 
 def test_an_infra_abort_keeps_its_cause_and_the_sandbox_still_closes(sandboxes):
     with pytest.raises(InfraAbort) as raised:
-        _in_sandbox(stubs.abort_for_infra, sandboxes.start)
+        _on_started_worker(stubs.abort_for_infra)
 
     assert raised.value.exit_status == "SandboxUnavailable"
     assert sandboxes.closed == ["abort_for_infra"]
@@ -92,8 +111,8 @@ def test_a_sandbox_that_cannot_be_started_discards_the_sample():
     def start(task_id, tasks_dir):
         raise RuntimeError("500: snapshot not ready")
 
-    with pytest.raises(InfraAbort) as raised:
-        _in_sandbox(stubs.report_pid, start)
+    with function_registry.temporary("test_sandbox_start.failing", start), pytest.raises(InfraAbort) as raised:
+        _on_started_worker(stubs.report_pid, worker="test_sandbox_start.failing")
 
     assert raised.value.exit_status == "SandboxWorkerUnavailable"
 
@@ -103,7 +122,7 @@ def test_a_worker_that_never_turns_healthy_discards_the_sample_and_closes_its_sa
     monkeypatch.setattr(sandbox_start, "_HEALTH_DEADLINE_S", 0.5)
 
     with pytest.raises(InfraAbort) as raised:
-        _in_sandbox(stubs.report_pid, sandboxes.start)
+        _on_started_worker(stubs.report_pid)
 
     assert raised.value.exit_status == "SandboxWorkerUnavailable"
     assert sandboxes.closed == ["report_pid"]
@@ -117,8 +136,8 @@ def test_cancelling_the_caller_runs_the_agent_cleanup_and_closes_the_sandbox(san
         task = asyncio.create_task(
             call_agent_function(
                 stubs.wait_until_cancelled,
-                mode="sandbox",
-                sandbox_start=sandboxes.start,
+                mode="worker",
+                worker=START_PATH,
                 pid_file=str(pid_file),
                 cleaned_up=str(cleaned_up),
             )
@@ -145,8 +164,8 @@ def test_a_rollout_abort_while_the_sandbox_boots_stops_the_call_before_it_starts
         task = asyncio.create_task(
             call_agent_function(
                 stubs.report_pid,
-                mode="sandbox",
-                sandbox_start=sandboxes.start,
+                mode="worker",
+                worker=START_PATH,
                 abort_scope=rollout_abort_scope(args),
             )
         )
@@ -171,8 +190,8 @@ def test_a_rollout_abort_leaves_another_rollouts_booting_call_to_run(sandboxes):
         task = asyncio.create_task(
             call_agent_function(
                 stubs.report_pid,
-                mode="sandbox",
-                sandbox_start=sandboxes.start,
+                mode="worker",
+                worker=START_PATH,
                 abort_scope=rollout_abort_scope(_rollout_args(router_port=30001)),
             )
         )
@@ -188,7 +207,7 @@ def test_a_rollout_abort_leaves_another_rollouts_booting_call_to_run(sandboxes):
 def test_a_call_that_starts_after_an_abort_runs(sandboxes):
     asyncio.run(cancel_calls())
 
-    assert _in_sandbox(stubs.report_pid, sandboxes.start)["pid"]
+    assert _on_started_worker(stubs.report_pid)["pid"]
 
 
 @pytest.mark.parametrize(
@@ -199,17 +218,83 @@ def test_a_call_that_starts_after_an_abort_runs(sandboxes):
     ],
 )
 def test_rollout_wide_limits_refuse_rather_than_limit_one_sandbox(sandboxes, stub, kwargs):
-    with pytest.raises(RuntimeError, match="cannot be shared from a sandbox agent"):
-        _in_sandbox(getattr(stubs, stub), sandboxes.start, **kwargs)
+    with pytest.raises(RuntimeError, match="cannot be shared from a per-call worker agent"):
+        _on_started_worker(getattr(stubs, stub), **kwargs)
 
 
 def test_the_agent_sees_that_its_limits_are_unshared(sandboxes):
-    assert _in_sandbox(stubs.read_env, sandboxes.start, names=[UNSHARED_ENV_VAR]) == {UNSHARED_ENV_VAR: "sandbox"}
+    assert _on_started_worker(stubs.read_env, names=[UNSHARED_ENV_VAR]) == {UNSHARED_ENV_VAR: "per-call worker"}
 
 
-def test_sandbox_mode_needs_its_start_function():
-    with pytest.raises(NonRetryableError, match="sandbox-start-path"):
-        asyncio.run(call_agent_function(stubs.report_pid, mode="sandbox"))
+def test_a_fixed_workers_agent_keeps_its_shared_limits(sandboxes):
+    url, close = _serve_in_thread(create_app())
+    try:
+        assert _on_started_worker(stubs.read_env, worker=url, names=[UNSHARED_ENV_VAR]) == {UNSHARED_ENV_VAR: None}
+    finally:
+        close()
+    assert sandboxes.started == []
+
+
+async def _not_a_start_function(task_id, tasks_dir):
+    return None
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "no_such_module.start",
+        "miles.utils.test_utils.agent_function_stubs.no_such_start",
+        "no_dots",
+        "worker.example.com:11100",
+        "tests.fast.rollout.agentic.test_sandbox_start.START_PATH",
+        "tests.fast.rollout.agentic.test_sandbox_start._not_a_start_function",
+    ],
+)
+def test_a_value_that_is_neither_a_url_nor_a_start_function_is_refused(path):
+    with pytest.raises(NonRetryableError, match="--custom-agent-function-worker"):
+        resolve_worker(path)
+
+
+def test_a_url_is_a_fixed_worker_and_a_path_a_start_function():
+    assert resolve_worker("https://worker:11100") == "https://worker:11100"
+    assert resolve_worker("examples.experimental.agent_sandbox.local_start.start") is local_start.start
+
+
+def _train_args(monkeypatch, *flags: str) -> argparse.Namespace:
+    argv = [
+        "--custom-generate-function-path=miles.rollout.generate_hub.agentic_tool_call.generate",
+        "--custom-agent-function-mode=worker",
+        *flags,
+    ]
+    monkeypatch.setattr(sys, "argv", ["train.py", *argv])
+    parser = argparse.ArgumentParser(allow_abbrev=False)
+    MegatronConfig.add_arguments(parser)
+    get_miles_extra_args_provider()(parser)
+    return parser.parse_args([*argv, "--num-rollout", "1", "--rollout-batch-size", "64"])
+
+
+def test_a_bad_start_path_stops_the_trainers_argument_parse(monkeypatch):
+    with pytest.raises(SystemExit):
+        _train_args(monkeypatch, "--custom-agent-function-worker=no_such_module.start")
+
+
+@pytest.mark.parametrize("worker", ["http://worker:11100", "examples.experimental.agent_sandbox.local_start.start"])
+def test_the_trainers_argument_parse_keeps_a_good_worker_as_given(monkeypatch, worker):
+    args = _train_args(monkeypatch, f"--custom-agent-function-worker={worker}")
+
+    assert args.custom_agent_function_worker == worker
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ["--custom-agent-function-sandbox-start-path=examples.experimental.agent_sandbox.local_start.start"],
+        ["--custom-agent-function-mode=sandbox"],
+    ],
+)
+def test_there_is_no_sandbox_mode_or_start_path_flag(monkeypatch, flags):
+    with pytest.raises(SystemExit):
+        _train_args(monkeypatch, *flags)
 
 
 def _parsed(*argv: str) -> argparse.Namespace:
@@ -217,24 +302,136 @@ def _parsed(*argv: str) -> argparse.Namespace:
     agentic_tool_call.generate.add_arguments(parser)
     args = parser.parse_args(list(argv))
     args.sglang_router_ip, args.sglang_router_port = "127.0.0.1", 30000
-    args.custom_agent_function_path = None
+    args.custom_agent_function_path = _hook("test_sandbox_harness.agent.run")
     return args
 
 
-def test_the_start_path_reaches_the_call(monkeypatch):
+def test_a_started_workers_agent_gets_the_providers_the_harness_and_the_recipes_env(sandboxes, monkeypatch):
     monkeypatch.setenv("E2B_API_URL", "https://sandbox-service.example")
+    monkeypatch.setenv("TEST_HARNESS_DIR", "/scratch/tasks")
+    monkeypatch.setenv("TEST_RECIPE_KNOB", "1")
+    monkeypatch.setenv("TEST_OTHER", "not forwarded")
     args = _parsed(
-        "--custom-agent-function-mode=sandbox",
-        "--custom-agent-function-sandbox-start-path=miles.utils.test_utils.agent_function_stubs.report_pid",
+        "--custom-agent-function-mode=worker",
+        f"--custom-agent-function-worker={START_PATH}",
+        "--custom-agent-function-worker-env",
+        "TEST_RECIPE_*",
     )
 
-    options = agentic_tool_call._worker_options(args)
+    with function_registry.temporary("test_sandbox_harness.agent.WORKER_ENV", ("TEST_HARNESS_*",)):
+        options = agentic_tool_call._worker_options(args)
 
-    assert options["sandbox_start"] is stubs.report_pid
+    assert options["worker"] == START_PATH
     assert options["abort_scope"] == "127.0.0.1:30000"
-    assert options["extra_env"]["E2B_API_URL"] == "https://sandbox-service.example"
+    names = ["E2B_API_URL", "TEST_HARNESS_DIR", "TEST_RECIPE_KNOB", "TEST_OTHER"]
+    for name in names:
+        monkeypatch.delenv(name)
+    seen = asyncio.run(call_agent_function(stubs.read_env, mode="worker", **options, names=names))
+    assert seen == {
+        "E2B_API_URL": "https://sandbox-service.example",
+        "TEST_HARNESS_DIR": "/scratch/tasks",
+        "TEST_RECIPE_KNOB": "1",
+        "TEST_OTHER": None,
+    }
 
 
-def test_sandbox_mode_without_a_start_path_is_refused():
-    with pytest.raises(NonRetryableError, match="sandbox-start-path"):
-        agentic_tool_call._worker_options(_parsed("--custom-agent-function-mode=sandbox"))
+def test_worker_mode_without_a_worker_is_still_refused():
+    with pytest.raises(NonRetryableError, match="--custom-agent-function-worker"):
+        agentic_tool_call._worker_options(_parsed("--custom-agent-function-mode=worker"))
+
+
+class _Tracer:
+    session_id = "sid-1"
+    session_server_id = "127.0.0.1:12345"
+    session_server_instance_id = None
+    agent_base_url = "http://127.0.0.1:12345/sessions/sid-1"
+
+    async def collect_samples(self, input_sample, *, max_seq_len, agent_metadata=None):
+        return SamplesReply(samples=[], session_metadata={}, empty_reason=None)
+
+
+@pytest.mark.parametrize("phase", ["create", "health"])
+def test_a_rollout_abort_during_boot_closes_the_sandbox_and_discards_the_sample(sandboxes, monkeypatch, phase):
+    async def no_engines(args):
+        return []
+
+    async def tracer(*args, **kwargs):
+        return _Tracer()
+
+    monkeypatch.setattr(inference_rollout_train, "get_worker_urls", no_engines)
+    monkeypatch.setattr(inference_rollout_train.SampleOwnershipRecorder, "log_dropped_samples", lambda **kw: None)
+    monkeypatch.setattr(inference_rollout_train, "record_dropped_samples", lambda group: None)
+    monkeypatch.setattr(agentic_tool_call.OpenAIEndpointTracer, "create", tracer)
+    monkeypatch.setattr(agentic_tool_call, "load_function", lambda path: stubs.report_pid)
+    args = _rollout_args(
+        partial_rollout=False,
+        session_server_instances=[SessionServerInstance(addr="127.0.0.1:12345")],
+        custom_agent_function_mode="worker",
+        custom_agent_function_worker=START_PATH,
+        custom_agent_function_worker_env=[],
+        max_seq_len=None,
+        use_session_server="v1",
+    )
+    sample = Sample(group_index=0, index=0, prompt="hello", label="label", metadata={"instance_id": "task-3"})
+    held = sandboxes.creating if phase == "create" else sandboxes.healthy
+    held.clear()
+
+    async def abort_while_booting():
+        generate = asyncio.create_task(
+            agentic_tool_call.generate(
+                GenerateFnInput(state=SimpleNamespace(args=args), sample=sample, sampling_params={}, evaluation=False)
+            )
+        )
+
+        async def group():
+            return [(await generate).samples]
+
+        pending = {asyncio.create_task(group())}
+        await asyncio.sleep(0.5)
+        state = SimpleNamespace(args=args, aborted=False)
+        await asyncio.wait_for(inference_rollout_train.abort(state, pending, rollout_id=0), timeout=20)
+        held.set()
+        return generate.result()
+
+    output = asyncio.run(abort_while_booting())
+
+    assert output.samples.status == Sample.Status.ABORTED
+    assert output.samples.metadata["exit_status"] == "Cancelled"
+    assert ("POST", "/calls") not in sandboxes.requests
+    assert _until(lambda: sandboxes.closed == ["task-3"])
+
+
+def test_an_abort_while_the_close_waits_for_a_thread_still_closes_the_sandbox(sandboxes):
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    occupied, release = [], threading.Event()
+    sandboxes.healthy.clear()
+
+    def occupy():
+        occupied.append(threading.current_thread())
+        release.wait()
+
+    async def abort_during_close():
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(pool)
+        task = asyncio.create_task(
+            call_agent_function(stubs.report_pid, mode="worker", worker=START_PATH, abort_scope="scope")
+        )
+        while not sandboxes.started:
+            await asyncio.sleep(0.01)
+        blockers = [loop.run_in_executor(None, occupy) for _ in range(2)]
+        while len(occupied) < 2:
+            await asyncio.sleep(0.01)
+        sandboxes.healthy.set()
+        while pool._work_queue.qsize() == 0:
+            await asyncio.sleep(0.05)
+        await asyncio.wait_for(cancel_calls("scope"), timeout=60)
+        with pytest.raises(InfraAbort):
+            await asyncio.wait_for(task, timeout=20)
+        release.set()
+        await asyncio.gather(*blockers)
+
+    try:
+        asyncio.run(abort_during_close())
+        assert _until(lambda: sandboxes.closed == ["report_pid"], timeout_s=5)
+    finally:
+        release.set()

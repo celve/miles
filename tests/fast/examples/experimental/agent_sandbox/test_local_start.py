@@ -7,7 +7,10 @@ from examples.experimental.agent_sandbox import local_start
 from tests.fast.rollout.agentic.test_worker import _wait_for
 
 from miles.rollout.agentic.agent_function import call_agent_function
+from miles.utils.function_registry import function_registry
 from miles.utils.test_utils import agent_function_stubs as stubs
+
+START_PATH = "test_local_start.start"
 
 
 @pytest.fixture
@@ -19,7 +22,8 @@ def started_urls():
         urls.append(url)
         return close, url
 
-    return start, urls
+    with function_registry.temporary(START_PATH, start):
+        yield urls
 
 
 def _is_down(url: str) -> bool:
@@ -31,11 +35,11 @@ def _is_down(url: str) -> bool:
 
 
 def test_each_call_runs_on_a_worker_process_of_its_own_that_stops_after(started_urls):
-    start, urls = started_urls
+    urls = started_urls
 
     async def two_calls():
         return await asyncio.gather(
-            *(call_agent_function(stubs.report_pid, mode="sandbox", sandbox_start=start) for _ in range(2))
+            *(call_agent_function(stubs.report_pid, mode="worker", worker=START_PATH) for _ in range(2))
         )
 
     reported = asyncio.run(two_calls())
@@ -46,15 +50,15 @@ def test_each_call_runs_on_a_worker_process_of_its_own_that_stops_after(started_
 
 
 def test_cancelling_the_call_runs_the_agent_cleanup_and_stops_the_worker(started_urls, tmp_path):
-    start, urls = started_urls
+    urls = started_urls
     pid_file, cleaned_up = tmp_path / "pid", tmp_path / "cleaned_up"
 
     async def cancel_once_running():
         task = asyncio.create_task(
             call_agent_function(
                 stubs.wait_until_cancelled,
-                mode="sandbox",
-                sandbox_start=start,
+                mode="worker",
+                worker=START_PATH,
                 pid_file=str(pid_file),
                 cleaned_up=str(cleaned_up),
             )

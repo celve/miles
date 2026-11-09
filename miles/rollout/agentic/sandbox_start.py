@@ -1,9 +1,9 @@
-"""Sandbox start functions, and ``--custom-agent-function-mode sandbox``, which runs each call on a sandbox of its own.
+"""Sandbox start functions, and running a call on an agent worker one of them starts for it.
 
-A start function (``StartFn``) starts one sandbox and returns ``(close_fn, base_url)``. In sandbox mode
-(``--custom-agent-function-sandbox-start-path``) it is called as ``start(label, "")``, and ``base_url`` is an agent
-worker (``miles.rollout.agentic.worker``) serving there. The call runs on it as ``worker`` mode runs it, and
-``close_fn``, which copies out what the call left in the sandbox and frees it, runs however the call ends.
+A start function (``StartFn``) starts one sandbox and returns ``(close_fn, base_url)``. Named by
+``--custom-agent-function-worker``, it is called for each call as ``start(label, "")``, and ``base_url`` is an agent
+worker (``miles.rollout.agentic.worker``) serving there. The call runs on it as on a fixed worker, and ``close_fn``,
+which copies out what the call left in the sandbox and frees it, runs however the call ends.
 """
 
 import asyncio
@@ -58,7 +58,7 @@ async def create_once(start_fn: StartFn, task_id: str, tasks_dir: str, *, logger
         raise
 
 
-async def call_in_sandbox(
+async def call_on_started_worker(
     start_fn: StartFn,
     fn: Callable,
     kwargs: dict[str, Any],
@@ -66,15 +66,14 @@ async def call_in_sandbox(
     env: dict[str, str],
     on_child_reports: Callable[[list[Any]], None] | None = None,
 ) -> Any:
-    """Run ``fn(**kwargs)`` on the agent worker in a sandbox ``start_fn`` starts for this call, as ``worker`` mode
-    would, and close the sandbox after."""
+    """Run ``fn(**kwargs)`` on the agent worker ``start_fn`` starts for this call, and close its sandbox after."""
     label = str((kwargs.get("metadata") or {}).get("instance_id") or fn.__name__)
     close_fn = None
     try:
         close_fn, worker_url = await _start(start_fn, label)
         await _wait_healthy(worker_url, label)
         return await call_on_worker(
-            worker_url, fn, kwargs, env={**env, UNSHARED_ENV_VAR: "sandbox"}, on_child_reports=on_child_reports
+            worker_url, fn, kwargs, env={**env, UNSHARED_ENV_VAR: "per-call worker"}, on_child_reports=on_child_reports
         )
     finally:
         if close_fn is not None:
@@ -110,7 +109,10 @@ async def _is_healthy(client: httpx.AsyncClient) -> bool:
 
 
 async def _close(close_fn: Callable[[], None], label: str) -> None:
-    try:
-        await asyncio.to_thread(close_fn)
-    except Exception as exc:
-        logger.warning(f"closing the sandbox worker for {label} failed: {exc!r}")
+    def close() -> None:
+        try:
+            close_fn()
+        except Exception as exc:
+            logger.warning(f"closing the sandbox worker for {label} failed: {exc!r}")
+
+    await asyncio.shield(asyncio.to_thread(close))

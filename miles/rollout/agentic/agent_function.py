@@ -25,7 +25,8 @@ from typing import Any, BinaryIO, NoReturn
 from miles.rollout.agentic import rollout_limits
 from miles.rollout.agentic.errors import InfraAbort, RemoteTraceback
 from miles.rollout.agentic.remote import call_on_worker
-from miles.rollout.agentic.sandbox_start import StartFn, call_in_sandbox
+from miles.rollout.agentic.sandbox_start import StartFn, call_on_started_worker
+from miles.utils.function_registry import load_function
 from miles.utils.logging_utils import configure_logger_raw
 from miles.utils.retry_utils import NonRetryableError
 
@@ -42,7 +43,7 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-AGENT_FUNCTION_MODES = ("subproc", "inline", "worker", "sandbox")
+AGENT_FUNCTION_MODES = ("subproc", "inline", "worker")
 
 # A cancelled agent gets this long to run its own cleanup (closing its sandbox) before its process exits.
 _CANCEL_GRACE_S = 120.0
@@ -105,21 +106,18 @@ async def call_agent_function(
     mode: str,
     on_child_reports: Callable[[list[Any]], None] | None = None,
     worker: str | None = None,
-    sandbox_start: StartFn | None = None,
     extra_env: dict[str, str] | None = None,
     abort_scope: str | None = None,
     **kwargs: Any,
 ) -> Any:
     """Await ``fn(**kwargs)`` on this loop (``inline``), in a child process of its own (``subproc``), or in one on
-    an agent worker (``worker``, see ``resolve_worker``), or on the one in a sandbox ``sandbox_start`` starts for this
-    call (``sandbox``), whose ``subproc`` runs it.
+    an agent worker (``worker``, see ``resolve_worker``), whose ``subproc`` runs it.
 
-    Under ``subproc``, ``worker`` and ``sandbox``, ``on_child_reports`` receives each item the agent sends with
-    ``report_to_caller``, and ``extra_env`` is added to the agent process's environment. Under ``worker`` and
-    ``sandbox``, a ``cancel_calls`` that reaches ``abort_scope`` cancels the call, which then raises
-    ``InfraAbort("Cancelled")``."""
-    placement = _place(fn, mode, worker, sandbox_start, on_child_reports, extra_env, kwargs)
-    if mode not in ("worker", "sandbox"):
+    Under ``subproc`` and ``worker``, ``on_child_reports`` receives each item the agent sends with
+    ``report_to_caller``, and ``extra_env`` is added to the agent process's environment. Under ``worker``, a
+    ``cancel_calls`` that reaches ``abort_scope`` cancels the call, which then raises ``InfraAbort("Cancelled")``."""
+    placement = _place(fn, mode, worker, on_child_reports, extra_env, kwargs)
+    if mode != "worker":
         return await placement
     task = asyncio.ensure_future(placement)
     call = _calls[task] = {"scope": abort_scope, "aborted": False}
@@ -153,20 +151,26 @@ def rollout_abort_scope(args) -> str:
     return f"{args.sglang_router_ip}:{args.sglang_router_port}"
 
 
-def resolve_worker(worker: str | None) -> str:
-    """The URL of the agent worker ``--custom-agent-function-worker`` names."""
+def resolve_worker(worker: str | None) -> str | StartFn:
+    """What ``--custom-agent-function-worker`` names: the URL of a fixed agent worker, or a start function that starts
+    one for each call."""
     if not worker:
         raise NonRetryableError("--custom-agent-function-mode worker needs --custom-agent-function-worker")
-    if not worker.startswith(("http://", "https://")):
-        raise NonRetryableError(f"--custom-agent-function-worker must be an http(s) URL, got {worker!r}")
-    return worker
+    if worker.startswith(("http://", "https://")):
+        return worker
+    try:
+        return load_function(worker, sync_required=True)
+    except Exception as exc:
+        raise NonRetryableError(
+            f"--custom-agent-function-worker must be an http(s) URL or a start function's module.fn, got {worker!r}: "
+            f"{exc!r}"
+        ) from exc
 
 
 async def _place(
     fn: Callable[..., Awaitable[Any]],
     mode: str,
     worker: str | None,
-    sandbox_start: StartFn | None,
     on_child_reports: Callable[[list[Any]], None] | None,
     extra_env: dict[str, str] | None,
     kwargs: dict[str, Any],
@@ -174,15 +178,9 @@ async def _place(
     if mode == "inline":
         return await fn(**kwargs)
     if mode == "worker":
-        return await call_on_worker(
-            resolve_worker(worker), fn, kwargs, env=extra_env or {}, on_child_reports=on_child_reports
-        )
-    if mode == "sandbox":
-        if sandbox_start is None:
-            raise NonRetryableError(
-                "--custom-agent-function-mode sandbox needs --custom-agent-function-sandbox-start-path"
-            )
-        return await call_in_sandbox(sandbox_start, fn, kwargs, env=extra_env or {}, on_child_reports=on_child_reports)
+        target = resolve_worker(worker)
+        call = call_on_worker if isinstance(target, str) else call_on_started_worker
+        return await call(target, fn, kwargs, env=extra_env or {}, on_child_reports=on_child_reports)
     # pickled before the process starts, so an unpicklable argument fails here
     call = pickle.dumps(sys.path) + pickle.dumps((fn, kwargs, _CANCEL_GRACE_S, _LEFTOVER_CLEANUP_S))
     proc = await asyncio.create_subprocess_exec(
