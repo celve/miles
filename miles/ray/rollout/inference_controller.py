@@ -519,4 +519,5 @@ def _compute_server_cell_meta_from_info(info: CellInfo) -> ServerCellMetadata:
         update_weights=info.meta["update_weights"],
         workers_hash=info.workers_hash,
         engine_kind=info.meta["engine_kind"],
+        loras=info.meta.get("loras", ()),
     )

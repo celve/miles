@@ -133,8 +133,10 @@ def test_a_foreign_hook_is_rejected():
         validate_diffusion_args(_supported(rollout_function_path="miles.rollout.other.Fn"))
 
 
-def _group(worker_type=WorkerType.REGULAR, num_gpus_per_engine=1, engine_kind="diffusion"):
-    return SimpleNamespace(worker_type=worker_type, num_gpus_per_engine=num_gpus_per_engine, engine_kind=engine_kind)
+def _group(worker_type=WorkerType.REGULAR, num_gpus_per_engine=1, engine_kind="diffusion", loras=()):
+    return SimpleNamespace(
+        worker_type=worker_type, num_gpus_per_engine=num_gpus_per_engine, engine_kind=engine_kind, loras=loras
+    )
 
 
 def _model(name, groups, update_weights=True):
@@ -178,6 +180,11 @@ def test_a_model_path_that_differs_from_the_checkpoint_freezes_the_model_and_is_
 def test_a_text_engine_group_is_rejected_in_a_diffusion_run():
     with pytest.raises(ValueError, match="engine_kind text"):
         validate_diffusion_sglang_config(SimpleNamespace(models=[_model("m", [_group(), _group(engine_kind="text")])]))
+
+
+def test_a_trained_diffusion_model_takes_no_fixed_loras():
+    with pytest.raises(ValueError, match="no fixed loras"):
+        validate_diffusion_sglang_config(SimpleNamespace(models=[_model("m", [_group(loras=("lightx2v",))])]))
 
 
 def _parse_diffusion_run(*argv):

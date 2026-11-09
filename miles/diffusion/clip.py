@@ -1,4 +1,4 @@
-"""Store a generated clip as an mp4 named by the sha256 of its bytes."""
+"""Store a generated clip as an mp4, or an image as a PNG, named by the sha256 of its bytes."""
 
 import hashlib
 import os
@@ -6,18 +6,33 @@ import tempfile
 
 import av
 import torch
+from PIL import Image
 
 
 def save_clip(video: torch.Tensor, *, fps: int, output_dir: str) -> str:
     """Encode a uint8 ``[C, F, H, W]`` RGB clip to ``<output_dir>/<sha256>.mp4`` and return that path."""
+    return _save_by_hash(lambda path: _encode_mp4(video, fps=fps, path=path), suffix=".mp4", output_dir=output_dir)
+
+
+def save_image(image: torch.Tensor, *, output_dir: str) -> str:
+    """Encode a uint8 ``[C, H, W]`` RGB image to ``<output_dir>/<sha256>.png`` and return that path."""
+    if image.dtype != torch.uint8 or image.ndim != 3 or image.shape[0] != 3:
+        raise ValueError(f"expected a uint8 RGB image [3, H, W], got {image.dtype} {tuple(image.shape)}")
+    pixels = image.permute(1, 2, 0).contiguous().numpy()
+    return _save_by_hash(
+        lambda path: Image.fromarray(pixels).save(path, format="PNG"), suffix=".png", output_dir=output_dir
+    )
+
+
+def _save_by_hash(write, *, suffix: str, output_dir: str) -> str:
     os.makedirs(output_dir, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(dir=output_dir, suffix=".mp4.part")
+    fd, tmp_path = tempfile.mkstemp(dir=output_dir, suffix=f"{suffix}.part")
     os.close(fd)
     try:
-        _encode_mp4(video, fps=fps, path=tmp_path)
+        write(tmp_path)
         with open(tmp_path, "rb") as f:
             digest = hashlib.sha256(f.read()).hexdigest()
-        path = os.path.join(output_dir, f"{digest}.mp4")
+        path = os.path.join(output_dir, f"{digest}{suffix}")
         # The planner's engines cache features by file path forever, so a name only ever holds these bytes.
         os.replace(tmp_path, path)
     except BaseException:

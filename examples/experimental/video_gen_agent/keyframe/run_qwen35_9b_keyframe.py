@@ -1,0 +1,375 @@
+"""Keyframe planner RL: a Qwen3.5-9B planner makes up to three keyframe images with a frozen Qwen-Image-2.1-Turbo,
+sees each, then makes one video from the image it picks with a frozen Wan2.2-A14B and the lightx2v 4-step LoRAs.
+A Qwen3-VL judge scores that video against the request.
+
+One node, not colocated (frozen generators cannot share GPUs with training): the trainer (Qwen3.5 plugin model
+under raw Megatron, vision tower frozen), the planner's engine with the judge's reward pool beside it, the image
+engines, the video engines, and on 8 GPUs an eval engine that scores exported snapshots off the training path; on
+4 GPUs eval runs on the planner's engine. Every engine has one GPU.
+The env is ``examples.experimental.video_gen_agent.keyframe.env`` under session server v2; each image comes back to
+the planner as an ``image_url`` part in token space.
+
+Args:
+    --num-gpus-per-node: 4 or 8 picks the recipe's layout (4: 1/1/1/1/0, 8: 1/1/2/3/1 for trainer, planner, image,
+        video and eval); --train-gpus, --policy-gpus, --image-gpus, --video-gpus, --eval-gpus override it.
+    --video-mode: ``i2v`` makes the video from the chosen image with Wan2.2-I2V-A14B; ``preview`` makes it from
+        text, the image's prompt plus the motion prompt, with Wan2.2-T2V-A14B. Each takes its own lightx2v LoRAs.
+    --image-model, --image-steps, --video-model: the generators (default: the recipe's; the video model follows
+        --video-mode).
+    --num-rollout, --rollout-batch-size, --n-samples-per-prompt: GRPO steps, requests per step, episodes per request.
+    --max-images, --max-turns, --seconds: the episode's budgets and the video's length.
+    --model-dir, --data-dir: where models and the requests live; checkpoints, images and clips go under --output-dir.
+
+Example:
+    python examples/experimental/video_gen_agent/keyframe/run_qwen35_9b_keyframe.py --num-gpus-per-node 4
+    python examples/experimental/video_gen_agent/keyframe/run_qwen35_9b_keyframe.py --num-rollout 2 --rollout-batch-size 4
+    python examples/experimental/video_gen_agent/keyframe/run_qwen35_9b_keyframe.py --video-mode preview
+"""
+
+from dataclasses import dataclass
+
+import typer
+import yaml
+
+from examples.experimental.video_gen_agent.multiturn.run_qwen35_9b_fastwan import (
+    _REASONING_PARSER,
+    _TOOL_CALL_PARSER,
+    AGENT,
+    JUDGE,
+    PLANNER,
+    VBENCH,
+)
+from miles.utils.external_utils import command_utils
+
+LIGHTX2V = "lightx2v/Wan2.2-Distill-Loras"
+
+# Trainer, planner, image, video and eval GPUs of the recipe's layouts, by GPUs per node.
+_LAYOUTS = {4: (1, 1, 1, 1, 0), 8: (1, 1, 2, 3, 1)}
+
+
+@dataclass(frozen=True)
+class _VideoRecipe:
+    model: str
+    high_noise_lora: str
+    low_noise_lora: str
+
+
+_VIDEO_RECIPES = {
+    "i2v": _VideoRecipe(
+        model="Wan-AI/Wan2.2-I2V-A14B-Diffusers",
+        high_noise_lora="wan2.2_i2v_A14b_high_noise_lora_rank64_lightx2v_4step_1022.safetensors",
+        low_noise_lora="wan2.2_i2v_A14b_low_noise_lora_rank64_lightx2v_4step_1022.safetensors",
+    ),
+    "preview": _VideoRecipe(
+        model="Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+        high_noise_lora="wan2.2_t2v_A14b_high_noise_lora_rank64_lightx2v_4step_1217.safetensors",
+        low_noise_lora="wan2.2_t2v_A14b_low_noise_lora_rank64_lightx2v_4step_1217.safetensors",
+    ),
+}
+
+
+@dataclass
+class ScriptArgs(command_utils.ExecuteTrainConfig):
+    run_id: str = command_utils.create_run_id()
+    num_gpus_per_node: int = 8
+    train_gpus: int | None = None
+    policy_gpus: int | None = None
+    image_gpus: int | None = None
+    video_gpus: int | None = None
+    eval_gpus: int | None = None
+    video_mode: str = "i2v"
+    image_model: str = "Qwen/Qwen-Image-2.1-Turbo"
+    image_steps: int = 8
+    video_model: str | None = None
+    num_rollout: int = 200
+    rollout_batch_size: int = 16
+    n_samples_per_prompt: int = 8
+    max_images: int = 3
+    max_turns: int = 6
+    seconds: float = 2.0
+    eval_interval: int = 10
+    heldout_percent: int = 10
+    feature_cache: bool = True
+    model_dir: str = "/root/models"
+    data_dir: str = "/root/datasets"
+    megatron_path: str = "/root/Megatron-LM"
+    extra_args: str = ""
+
+    def __post_init__(self):
+        assert self.num_nodes == 1, "the recipe places its trainer, engines and judge on one node"
+        assert self.video_mode in _VIDEO_RECIPES, f"--video-mode is one of {sorted(_VIDEO_RECIPES)}"
+        split = (self.train_gpus, self.policy_gpus, self.image_gpus, self.video_gpus, self.eval_gpus)
+        if None in split:
+            layout = _LAYOUTS.get(self.num_gpus_per_node)
+            assert layout is not None, f"no layout for {self.num_gpus_per_node} GPUs, so set all five GPU counts"
+            split = tuple(
+                layout_gpus if gpus is None else gpus for gpus, layout_gpus in zip(split, layout, strict=True)
+            )
+            self.train_gpus, self.policy_gpus, self.image_gpus, self.video_gpus, self.eval_gpus = split
+        assert (
+            sum(split) == self.num_gpus_per_node
+        ), f"the GPU split adds up to {sum(split)}, not {self.num_gpus_per_node}"
+
+    @property
+    def video(self) -> _VideoRecipe:
+        recipe = _VIDEO_RECIPES[self.video_mode]
+        return (
+            _VideoRecipe(self.video_model, recipe.high_noise_lora, recipe.low_noise_lora)
+            if self.video_model
+            else recipe
+        )
+
+    @property
+    def requests_dir(self) -> str:
+        return f"{self.data_dir}/video_gen_requests"
+
+    @property
+    def run_dir(self) -> str:
+        return f"{self.output_dir}/{self.run_id}"
+
+    def local(self, repo: str) -> str:
+        return f"{self.model_dir}/{repo.split('/')[1]}"
+
+
+def prepare(args: ScriptArgs):
+    U = args.create_backend()
+    U.exec_command_cpu(f"mkdir -p {args.model_dir} {args.data_dir}")
+    for repo in (PLANNER, JUDGE, args.image_model, args.video.model):
+        U.exec_command_cpu(f"hf download {repo} --local-dir {args.local(repo)}")
+    U.exec_command_cpu(
+        f"hf download {LIGHTX2V} {args.video.high_noise_lora} {args.video.low_noise_lora} "
+        f"--local-dir {args.local(LIGHTX2V)}"
+    )
+    U.convert_checkpoint(
+        model_name=PLANNER.split("/")[1],
+        megatron_model_type="qwen3.5-9B",
+        num_gpus_per_node=args.num_gpus_per_node,
+        dir_dst=args.model_dir,
+        hf_checkpoint=args.local(PLANNER),
+        megatron_path=args.megatron_path,
+    )
+    U.exec_command_cpu(f"[ -d {args.data_dir}/VBench ] || git clone --depth 1 {VBENCH} {args.data_dir}/VBench")
+    U.exec_command_cpu(
+        f"cd {command_utils.repo_base_dir} && python -m {AGENT}.make_requests "
+        f"{args.data_dir}/VBench/prompts/all_dimension.txt {args.requests_dir} "
+        f"--heldout-percent {args.heldout_percent}"
+    )
+
+
+def execute(args: ScriptArgs):
+    U = args.create_backend()
+    U.execute_train(
+        train_args=_train_args(args),
+        num_gpus_per_node=args.num_gpus_per_node,
+        megatron_model_type="qwen3.5-9B",
+        megatron_path=args.megatron_path,
+        extra_env_vars={"PYTHONPATH": args.megatron_path, **_agent_env(args)},
+    )
+
+
+def _agent_env(args: ScriptArgs) -> dict[str, str]:
+    return {
+        "AGENT_VIDEO_GEN_GENERATOR": f"{AGENT}.multiturn.generator.RouterClipGenerator",
+        "AGENT_VIDEO_GEN_IMAGE_GENERATOR": f"{AGENT}.keyframe.generator.RouterImageGenerator",
+        "AGENT_VIDEO_GEN_CLIP_DIR": f"{args.run_dir}/clips",
+        "AGENT_VIDEO_GEN_IMAGE_DIR": f"{args.run_dir}/images",
+        "AGENT_VIDEO_GEN_SUBMITTED_DIR": f"{args.run_dir}/submitted",
+        "AGENT_VIDEO_GEN_MAX_IMAGES": str(args.max_images),
+        "AGENT_VIDEO_GEN_MAX_TURNS": str(args.max_turns),
+        "AGENT_VIDEO_GEN_SECONDS": str(args.seconds),
+        "AGENT_VIDEO_GEN_WIDTH": "832",
+        "AGENT_VIDEO_GEN_HEIGHT": "480",
+        "AGENT_VIDEO_GEN_FPS": "16",
+        "AGENT_VIDEO_GEN_VIDEO_MODE": args.video_mode,
+        "AGENT_VIDEO_GEN_IMAGE_NUM_INFERENCE_STEPS": str(args.image_steps),
+        # lightx2v's 4-step distill runs without CFG on both experts.
+        "AGENT_VIDEO_GEN_NUM_INFERENCE_STEPS": "4",
+        "AGENT_VIDEO_GEN_GUIDANCE_SCALE": "1.0",
+        "AGENT_VIDEO_GEN_GUIDANCE_SCALE_2": "1.0",
+    }
+
+
+def _train_args(args: ScriptArgs) -> str:
+    planner_path = args.local(PLANNER)
+
+    # A fresh --load directory starts the run from the --ref-load weights at rollout 0.
+    ckpt_args = (
+        f"--hf-checkpoint {planner_path} "
+        f"--ref-load {planner_path}_torch_dist "
+        f"--load {args.run_dir}/checkpoints --save {args.run_dir}/checkpoints --save-interval 50 "
+        "--megatron-to-hf-mode raw "
+        "--custom-model-provider-path miles_plugins.models.qwen3_5.qwen3_5_mm_model_provider "
+    )
+
+    # 2,048 tokens a turn: the multi-turn recipe lost held-out episodes to thinking turns cut at 1,024.
+    rollout_args = (
+        f"--prompt-data {args.requests_dir}/train.jsonl "
+        "--input-key messages "
+        "--rollout-shuffle "
+        f"--num-rollout {args.num_rollout} "
+        f"--rollout-batch-size {args.rollout_batch_size} "
+        f"--n-samples-per-prompt {args.n_samples_per_prompt} "
+        f"--global-batch-size {args.rollout_batch_size * args.n_samples_per_prompt} "
+        "--rollout-max-response-len 2048 "
+        "--max-seq-len 16384 "
+        "--rollout-temperature 1 "
+    )
+
+    agent_args = (
+        f"--custom-generate-function-path {AGENT}.keyframe.generate.generate "
+        f"--custom-agent-function-path {AGENT}.keyframe.env.run_agent "
+        "--use-session-server v2 "
+        "--tito-model qwen35 "
+        f"--sglang-reasoning-parser {_REASONING_PARSER} --sglang-tool-call-parser {_TOOL_CALL_PARSER} "
+        "--router miles "
+        # Generation dominates an episode, so every episode of a round is in flight at once (LIN-2634).
+        f"--sglang-server-concurrency {args.rollout_batch_size * args.n_samples_per_prompt} "
+        f"--custom-rollout-log-function-path {AGENT}.multiturn.episode_metrics.log_episodes "
+        f"--custom-eval-rollout-log-function-path {AGENT}.multiturn.episode_metrics.log_eval_episodes "
+    )
+
+    multimodal_args = (
+        "--multimodal-token-space-processing "
+        "--sglang-enable-token-space-processor "
+        f"--shared-media-dir {args.run_dir}/media "
+        "--trainer-mm-processor-worker-num 8 --trainer-mm-io-worker-num 8 "
+    )
+    if args.feature_cache:
+        # Images are written by content hash and never rewritten, so a cached path never goes stale.
+        multimodal_args += (
+            "--sglang-enable-token-space-preprocess-cache "
+            "--sglang-token-space-preprocess-cache-trust-url "
+            f"--sglang-token-space-preprocess-cache-dir {args.run_dir}/feature_cache "
+        )
+
+    # No --group-rm: the env reward scores episodes sample by sample, and eval refuses it.
+    reward_args = (
+        f"--custom-rm-path {AGENT}.reward.reward_func "
+        f"--reward-pool-config {command_utils.encode_pseudo_file(yaml.safe_dump(_reward_pools(args)))} "
+        "--video-reward-pool judge "
+    )
+
+    eval_args = (
+        f"--eval-interval {args.eval_interval} "
+        f"--eval-config {command_utils.encode_pseudo_file(yaml.safe_dump(_eval_config(args)))} "
+    )
+    if args.eval_gpus:
+        # The eval engine loads an HF snapshot of each eval step, so evaluation never waits on training.
+        eval_args += (
+            f"--eval-num-gpus {args.eval_gpus} --eval-num-gpus-per-engine 1 "
+            f"--eval-hf-dir {args.run_dir}/eval_snapshots "
+        )
+
+    # TimeLens GRPO on Qwen3.5 (#4633): no KL, constant lr 1e-6, TIS against the rollout log-probs.
+    grpo_args = (
+        "--advantage-estimator grpo "
+        "--kl-loss-coef 0.00 "
+        "--entropy-coef 0.00 "
+        "--eps-clip 0.2 "
+        "--eps-clip-high 0.28 "
+        "--use-tis "
+    )
+
+    optimizer_args = (
+        "--optimizer adam --lr 1e-6 --lr-decay-style constant --weight-decay 0.0 --adam-beta1 0.9 --adam-beta2 0.999 "
+    )
+
+    sglang_args = (
+        f"--sglang-config {command_utils.encode_pseudo_file(yaml.safe_dump(_sglang_config(args)))} "
+        f"--rollout-num-gpus {args.policy_gpus + args.image_gpus + args.video_gpus} "
+        "--rollout-num-gpus-per-engine 1 "
+        "--sglang-mem-fraction-static 0.6 "
+    )
+
+    perf_args = (
+        f"--tensor-model-parallel-size {args.train_gpus} "
+        "--sequence-parallel "
+        "--pipeline-model-parallel-size 1 "
+        "--context-parallel-size 1 "
+        "--recompute-granularity full "
+        "--recompute-method uniform "
+        "--recompute-num-layers 1 "
+        "--use-dynamic-batch-size "
+        "--max-tokens-per-gpu 20480 "
+    )
+
+    misc_args = (
+        "--attention-dropout 0.0 "
+        "--hidden-dropout 0.0 "
+        "--accumulate-allreduce-grads-in-fp32 "
+        "--attention-softmax-in-fp32 "
+        "--attention-backend flash "
+        f"--actor-num-nodes {args.num_nodes} "
+        f"--actor-num-gpus-per-node {args.train_gpus} "
+        f"--num-gpus-per-node {args.num_gpus_per_node} "
+        f"--dump-details {args.run_dir}/dump_details "
+    )
+
+    return (
+        f"{ckpt_args} {rollout_args} {agent_args} {multimodal_args} {reward_args} {eval_args} {grpo_args} "
+        f"{optimizer_args} {command_utils.get_default_wandb_args(__file__, run_id=args.run_id)} "
+        f"{sglang_args} {perf_args} {misc_args} {args.extra_args} "
+    )
+
+
+def _sglang_config(args: ScriptArgs) -> dict:
+    def frozen(name: str, model: str, num_gpus: int, **group) -> dict:
+        diffusion = {
+            "worker_type": "regular",
+            "num_gpus": num_gpus,
+            "num_gpus_per_engine": 1,
+            "engine_kind": "diffusion",
+        }
+        return {
+            "name": name,
+            "model_path": args.local(model),
+            "update_weights": False,
+            "server_groups": [diffusion | group],
+        }
+
+    loras = args.local(LIGHTX2V)
+    video_loras = [
+        {"path": f"{loras}/{args.video.high_noise_lora}", "target": "transformer"},
+        {"path": f"{loras}/{args.video.low_noise_lora}", "target": "transformer_2"},
+    ]
+    models = [
+        {"name": "policy", "server_groups": [{"worker_type": "regular", "num_gpus": args.policy_gpus}]},
+        frozen("image", args.image_model, args.image_gpus),
+        frozen("video", args.video.model, args.video_gpus, loras=video_loras),
+    ]
+    if args.eval_gpus:
+        models.append({"name": "eval", "server_groups": [{"worker_type": "regular", "num_gpus": args.eval_gpus}]})
+    return {"sglang": models}
+
+
+def _reward_pools(args: ScriptArgs) -> list[dict]:
+    return [
+        {
+            "name": "judge",
+            "scorer_path": "miles.rollout.rm_hub.video.vlm_judge.VlmJudgeScorer",
+            "scorer_kwargs": {"model_path": args.local(JUDGE)},
+            "num_workers": 1,
+            "uses_gpu": True,
+            "colocated": True,
+            "batch_size": 4,
+        }
+    ]
+
+
+def _eval_config(args: ScriptArgs) -> dict:
+    return {
+        "eval": {
+            "defaults": {"n_samples_per_eval_prompt": 1, "top_k": 1, "max_response_len": 2048},
+            "datasets": [{"name": "heldout", "path": f"{args.requests_dir}/heldout.jsonl"}],
+        }
+    }
+
+
+@command_utils.dataclass_cli
+def main(args: ScriptArgs):
+    prepare(args)
+    execute(args)
+
+
+if __name__ == "__main__":
+    typer.run(main)

@@ -478,6 +478,7 @@ def _compute_spec_inference_engine(
                 needs_offload=server_group_config.needs_offload,
                 update_weights=model_cfg.update_weights,
                 engine_kind=server_group_config.engine_kind,
+                loras=[lora.model_dump() for lora in server_group_config.loras],
             ),
         ),
     )

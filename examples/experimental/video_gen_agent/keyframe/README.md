@@ -1,0 +1,34 @@
+# Keyframe planner RL: watched images, then one video
+
+A Qwen3.5-9B planner turns a video request into one video in two steps. It calls `generate_image` up to three times and sees each image; then it calls `generate_video` once with the id of the image it picks and a prompt for what moves and how the camera moves. That clip is the submission and ends the episode; the planner never watches it. GRPO trains the planner on a Qwen3-VL judge's score of the clip against the request, through the same [reward step](../reward.py) as the [multi-turn recipe](../multiturn/README.md).
+
+## How an episode runs
+
+The episode is [the keyframe env](env.py) under session server v2, reached through [`generate.py`](generate.py), which hands the env both generators' routers (`--video-generator-model video`, `--image-generator-model image`) and is otherwise `agentic_tool_call.generate`. Each image comes back in the tool reply as an `image_url` part, which the session server carries in token space. [`generator.py`](generator.py)'s `RouterImageGenerator` makes images through `DiffusionApiClient.generate_image`, which stores each as `<sha256>.png`; the video is the multi-turn recipe's `RouterClipGenerator`. A generator outage or timeout discards the group, as does any other env fault; an episode that ends without a video, out of turns or cut at the token limit, scores 0. The env's options are in [`env.py`](env.py).
+
+`--video-mode i2v` (the default) makes the clip image-to-video from the chosen image. `--video-mode preview` makes it text-to-video from the chosen image's prompt followed by the motion prompt, so the images are cheap previews and the clip need not look like the one picked.
+
+## Running it
+
+[`run_qwen35_9b_keyframe.py`](run_qwen35_9b_keyframe.py) runs on one node, not colocated, every engine on one GPU:
+
+| GPUs | Trainer | Planner engine + judge | Image engines | Video engines | Eval engine |
+|---|---|---|---|---|---|
+| 4 | 1 | 1 | 1 | 1 | none: eval runs on the planner engine |
+| 8 | 1 | 1 | 2 | 3 | 1, on exported snapshots |
+
+```bash
+python examples/experimental/video_gen_agent/keyframe/run_qwen35_9b_keyframe.py --num-gpus-per-node 4
+# a smoke run
+python examples/experimental/video_gen_agent/keyframe/run_qwen35_9b_keyframe.py --num-gpus-per-node 4 --num-rollout 2 --rollout-batch-size 2 --eval-interval 1
+# another split or image model
+python examples/experimental/video_gen_agent/keyframe/run_qwen35_9b_keyframe.py --image-gpus 3 --video-gpus 2 --image-model Tongyi-MAI/Z-Image-Turbo
+```
+
+The generators are frozen diffusion model groups. Images: Qwen-Image-2.1-Turbo, 8 steps, at the video's size (832×480), so image-to-video never crops the keyframe. Video: Wan2.2-I2V-A14B (T2V-A14B in preview mode), 2 s at 16 fps (33 frames), with lightx2v's 4-step distill LoRAs and no CFG. Each A14B expert takes its own LoRA, so the video group lists both under `loras` in `--sglang-config`, and Miles merges them into each engine through `/v1/set_lora` before the engine joins its router.
+
+The launcher downloads the models and the mode's two LoRAs, converts Qwen3.5-9B to `torch_dist`, writes VBench's requests with [`make_requests.py`](../make_requests.py) (the held-out split Phase 0 and the multi-turn recipe use), and keeps checkpoints, images, clips and submitted clips under `--output-dir/<run id>`.
+
+## What to read in a run
+
+The multi-turn recipe's [episode metrics](../multiturn/episode_metrics.py) apply, with `episode/images` in place of folding counts: `eval/heldout` for the held-out mean episode reward (step 0 is the untrained planner), `rollout/episode_raw_reward` in training, and `episode/prompt_tokens_per_turn`, `episode/peak_prompt_tokens` and `episode/turn_seconds`.

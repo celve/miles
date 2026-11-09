@@ -151,12 +151,7 @@ class VideoGenEnvOptions:
 
     @classmethod
     def from_env(cls) -> "VideoGenEnvOptions":
-        values = {}
-        for f in fields(cls):
-            raw = os.environ.get(_ENV_PREFIX + f.name.upper())
-            if raw is not None:
-                values[f.name] = raw == "1" if f.type is bool else type(f.default)(raw)
-        return cls(**values)
+        return options_from_env(cls)
 
     @property
     def tools(self) -> list[dict]:
@@ -165,6 +160,16 @@ class VideoGenEnvOptions:
             *([EXTEND_TOOL] if self.max_extends else []),
             *([RECALL_TOOL] if self.keep_clips else []),
         ]
+
+
+def options_from_env(cls):
+    """An options dataclass from its fields' ``AGENT_VIDEO_GEN_<FIELD>`` env vars; an unset one keeps its default."""
+    values = {}
+    for f in fields(cls):
+        raw = os.environ.get(_ENV_PREFIX + f.name.upper())
+        if raw is not None:
+            values[f.name] = raw == "1" if f.type is bool else type(f.default)(raw)
+    return cls(**values)
 
 
 @dataclass
@@ -326,12 +331,9 @@ async def _call_tool(
     episode: _Episode, name: str, raw_arguments: str | dict | None
 ) -> tuple[str | list[dict], str | None]:
     """The tool's reply, and the id of the clip it shows, if any."""
-    try:
-        arguments = json.loads(raw_arguments or "{}") if isinstance(raw_arguments, str) else (raw_arguments or {})
-    except json.JSONDecodeError:
-        return f"Error: the arguments of {name} are not valid JSON. {episode.budget()}", None
-    if not isinstance(arguments, dict):
-        return f"Error: the arguments of {name} must be a JSON object. {episode.budget()}", None
+    arguments, error = parse_arguments(name, raw_arguments)
+    if error:
+        return f"Error: {error}. {episode.budget()}", None
     if name == "generate":
         return await _generate(episode, arguments)
     if name == "submit":
@@ -343,6 +345,17 @@ async def _call_tool(
     names = [tool["function"]["name"] for tool in episode.options.tools]
     listed = f"{', '.join(names[:-1])} and {names[-1]}"
     return f"Error: unknown tool {name!r}; the tools are {listed}. {episode.budget()}", None
+
+
+def parse_arguments(name: str, raw_arguments: str | dict | None) -> tuple[dict | None, str | None]:
+    """A tool call's arguments as a dict, or what is wrong with them."""
+    try:
+        arguments = json.loads(raw_arguments or "{}") if isinstance(raw_arguments, str) else (raw_arguments or {})
+    except json.JSONDecodeError:
+        return None, f"the arguments of {name} are not valid JSON"
+    if not isinstance(arguments, dict):
+        return None, f"the arguments of {name} must be a JSON object"
+    return arguments, None
 
 
 async def _generate(episode: _Episode, arguments: dict) -> tuple[str | list[dict], str | None]:

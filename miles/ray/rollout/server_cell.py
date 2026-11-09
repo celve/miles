@@ -8,6 +8,7 @@ from typing import Any, Literal
 from sglang.srt.constants import GPU_MEMORY_TYPE_WEIGHTS
 
 from miles.backends.sglang_utils.sglang_api_client import SGLangApiClient, WorkerType, probe_server_healthy
+from miles.backends.sglang_utils.sglang_config import DiffusionLora
 from miles.backends.sglang_utils.sglang_engine import build_server_url
 from miles.backends.sglang_utils.sglang_router_api_client import SGLangRouterApiClient
 from miles.diffusion.api_client import DiffusionApiClient
@@ -56,6 +57,7 @@ class ServerCellMetadata(FrozenStrictBaseModel):
     update_weights: bool
     workers_hash: str
     engine_kind: Literal["text", "diffusion"] = "text"
+    loras: tuple[DiffusionLora, ...] = ()
 
 
 @dataclass
@@ -212,6 +214,12 @@ class ServerCell:
                 allow_quant_error=False,
                 selector=self.args.check_weight_update_selector,
                 skip_list=None,
+            )
+
+        if self.meta.loras:
+            # Before the router sees the engine, so no request is served without them.
+            await DiffusionApiClient(server_url=addr_info.server_url, api_key=self.meta.sglang_api_key).set_lora(
+                self.meta.loras
             )
 
         if self.meta.needs_offload:

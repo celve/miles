@@ -1,6 +1,6 @@
 # Video-generation agent
 
-A planner model learns, with RL, to turn a user's video request into a good clip from a frozen video generator, which it calls as a tool. This directory holds the environment and two recipes: [Phase 0](phase0/README.md) (single turn, the baseline) and the [multi-turn planner](multiturn/README.md).
+A planner model learns, with RL, to turn a user's video request into a good clip from a frozen video generator, which it calls as a tool. This directory holds the environment and three recipes: [Phase 0](phase0/README.md) (single turn, the baseline), the [multi-turn planner](multiturn/README.md), and the [keyframe planner](keyframe/README.md) (watched images, then one video).
 
 ## The environment
 
