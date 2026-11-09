@@ -437,6 +437,8 @@ _JSON = (
         ("Sub Run()\n  Shell \"bash -c 'ls'\"\nEnd Sub", True),
         (_VRML, True),
         (_SUMO, True),
+        ('Fog {\n  fogType "EXPONENTIAL"\n  visibilityRange 50.0\n}', True),
+        ("  ContactProperties { coulombFriction 0.4 }", True),
         ("Quarterly report", False),
         ("=SUM(A1:A9)", False),
         ("Introduction to Cells - an overview of cell biology", False),
@@ -445,6 +447,13 @@ _JSON = (
         (_JSON, False),
         (_COURSE_FORM, False),
         (_BEGIN_REPORT, False),
+        ("Results {see below}", False),
+        ("Total {count} items", False),
+        ("Results {see [appendix]}", False),
+        ("Results {see 2nd paragraph}", False),
+        ("Report {status TRUE positive}", False),
+        ('{"notes": "Current Results {count 2} were measured"}', False),
+        ("SELECT 'Current Results {count 2}' AS notes;", False),
     ],
 )
 def test_typed_shell_or_code_gates_the_reward(tmp_path, monkeypatch, typed, gated):
