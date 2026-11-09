@@ -55,8 +55,14 @@ _APP_FILE = re.compile(
     re.M,
 )
 
+# One Webots node typed whole ("Fog { fogType ... }") is under the length bar below, so a valued node counts alone.
+_VRML_NODE = re.compile(
+    r"(?:^|[\s\[])(?:DEF\s+\w+\s+)?[A-Z][A-Za-z0-9]*\s*\{\s*[a-z][A-Za-z0-9]*\s+"
+    r"(?:-?\.?\d|\x22|\[|TRUE\b|FALSE\b|[A-Z]\w*\s*\{)[^{}]*\}"
+)
+
 
 def typed_code(text: str) -> bool:
-    if _SHELL.search(text) or _CODE.search(text):
+    if _SHELL.search(text) or _CODE.search(text) or _VRML_NODE.search(text):
         return True
     return len(text) > 150 and text.count("\n") >= 4 and bool(_APP_FILE.search(text))
