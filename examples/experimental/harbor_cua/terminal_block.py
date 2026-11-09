@@ -44,7 +44,17 @@ _SHELL = re.compile(
     r"|^!\w|(?:^|\s)(?:python3|mkdir|sudo) |(?:^[ \t]*|[;&|(]\s*)(?:ls -|echo |find |ls |cd |sed |grep |cp |mv |chmod |head |pip |cat ))",
     re.M,
 )
-_CODE = re.compile(r"(^import |\bimport \w|print\(|slicer\.|bpy\.|\bdef |\w+ = \w+\.\w+\()")
+# A Python import statement, also after PyMOL's "python " or inside a quoted script line; the bare word is
+# prose ("a large import of new tracks" in a DBeaver report).
+_MODULE = r"[A-Za-z_][\w.]*"
+_NAMES = r"\w+(?:[ \t]+as[ \t]+\w+)?(?:[ \t]*,[ \t]*\w+(?:[ \t]+as[ \t]+\w+)?)*"
+_CODE = re.compile(
+    rf"(?:^|[;\x22'])[ \t]*(?:python[ \t]+)?"
+    rf"(?:import[ \t]+{_MODULE}(?:[ \t]+as[ \t]+\w+)?(?:[ \t]*,[ \t]*{_MODULE}(?:[ \t]+as[ \t]+\w+)?)*"
+    rf"|from[ \t]+{_MODULE}[ \t]+import[ \t]+(?:\*|\(.*|{_NAMES}))[ \t]*(?:$|[;\x22'\\])"
+    r"|print\(|slicer\.|bpy\.|\bdef |\w+ = \w+\.\w+\(",
+    re.M,
+)
 # An app's own file typed out whole (draw.io/SUMO/VLC XML, Webots VRML, a GMAT script) skips its GUI like `cat > file`.
 _APP_FILE = re.compile(
     r"#VRML|#!WRML|<\?xml|^\s*<\w+[\s>/]|^\s*\w+\s*\{\s*$|\bGMATScript\b|\bBEGINScript\b|\bBeginMissionSequence\b"

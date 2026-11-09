@@ -428,6 +428,8 @@ _JSON = (
     [
         ("cat > /tmp/out.csv << EOF", True),
         ("import bpy", True),
+        ("python import os; os.makedirs('/home/ga/PyMOL_Data/images')", True),
+        ('Print #f, "import os, json, csv"', True),
         ("cd /home/ga && ls -l", True),
         ("  echo indented", True),
         ("\n  ls -l /home/ga", True),
@@ -444,6 +446,7 @@ _JSON = (
         ("=SUM(A1:A9)", False),
         ("Introduction to Cells - an overview of cell biology", False),
         ("An echo of the old design", False),
+        ("Rerun ANALYZE after a large\n   import of new tracks or invoices", False),
         (_REPORT, False),
         (_JSON, False),
         (_COURSE_FORM, False),
