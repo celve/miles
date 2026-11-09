@@ -66,7 +66,7 @@ _VRML_NODES = (
     "|Radar|RangeFinder|Receiver|Recognition|Robot|RotationalMotor|Shape|SliderJoint|Slot|Solid|Speaker|Sphere"
     "|SpotLight|TextureCoordinate|TextureTransform|TouchSensor|Track|TrackWheel|Transform|Viewpoint|WorldInfo|Zoom"
 )
-_VRML_NUM = r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?"
+_VRML_NUM = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
 _VRML_VALUE = (
     rf"(?:{_VRML_NUM}(?:[ \t]+{_VRML_NUM})*|\x22[^\x22\n]*\x22|TRUE|FALSE|NULL|\[[\s\d.eE+,-]*\])(?=[\s}}])"
 )

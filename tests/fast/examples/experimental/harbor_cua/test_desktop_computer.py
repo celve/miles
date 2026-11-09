@@ -1,6 +1,7 @@
 """computer-1 on a desktop its image already runs: no browser of its own, a settle after each action."""
 
 import asyncio
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -468,6 +469,21 @@ def test_typed_shell_or_code_gates_the_reward(tmp_path, monkeypatch, typed, gate
 
     assert (dc.REWARD_GATE in context.metadata) is gated
     assert context.metadata["n_episodes"] == 1
+
+
+def test_a_malformed_typed_node_is_rejected_without_backtracking(tmp_path, monkeypatch):
+    _record_executions(monkeypatch)
+
+    async def one_action(self, instruction, environment, context):
+        await self._execute_action(ComputerAction(type="type", text="WorldInfo { gravity " + "111 " * 14 + "oops }"), 0)
+
+    monkeypatch.setattr(dc.Qwen3VLComputer1, "run", one_action)
+    context = SimpleNamespace(metadata={"n_episodes": 1})
+    start = time.perf_counter()
+    asyncio.run(_agent(tmp_path, gate_typed_code=True).run("task", FakeEnvironment(), context))
+
+    assert time.perf_counter() - start < 1.0
+    assert dc.REWARD_GATE not in context.metadata
 
 
 def test_without_the_gate_typed_code_is_not_marked(tmp_path, monkeypatch):
