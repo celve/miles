@@ -1,6 +1,8 @@
+import argparse
 from types import SimpleNamespace
 
 import pytest
+from tests.fast.fixtures.hook_consumer_fixtures import _hook
 from tests.fast.fixtures.sglang_config_fixtures import make_sglang_config
 from tests.fast.utils.output_store.test_dropped import sample_owning
 
@@ -11,9 +13,11 @@ from miles.rollout.base_types import GenerateFnInput
 from miles.rollout.session.samples.codec import SamplesReply
 from miles.rollout.session.types import SessionServerInstance
 from miles.rollout.session.v2.metrics import SESSION_ROLLOUT_METRICS_KEY
+from miles.utils.function_registry import function_registry
 from miles.utils.output_store import dropped
 from miles.utils.output_store.dropped import take_dropped_refs
 from miles.utils.output_store.plan import StorePlanError
+from miles.utils.retry_utils import NonRetryableError
 from miles.utils.types import Sample
 
 
@@ -220,7 +224,11 @@ async def test_any_other_agent_error_keeps_the_recorded_session(monkeypatch):
 async def test_worker_mode_sends_the_call_to_the_worker_with_the_runs_env_and_its_router_scope(monkeypatch):
     sample = Sample(status=Sample.Status.COMPLETED, response="done", response_length=1, tokens=[1])
     _patch_agent(monkeypatch, _Tracer(SamplesReply(samples=[sample], session_metadata={}, empty_reason=None)))
-    monkeypatch.setenv("HARBOR_TASKS_DIR", "/tasks")
+    monkeypatch.setenv("TEST_HARNESS_DIR", "/tasks")
+    monkeypatch.setenv("TEST_RECIPE_KNOB", "1")
+    monkeypatch.setenv("E2B_API_URL", "https://sandbox-service.example")
+    monkeypatch.setenv("HARBOR_TASKS_DIR", "/not-this-harness")
+    monkeypatch.setenv("LITE_TASK", "not-this-recipe")
     seen: dict = {}
 
     async def fake_call(fn, **kwargs):
@@ -229,31 +237,51 @@ async def test_worker_mode_sends_the_call_to_the_worker_with_the_runs_env_and_it
 
     monkeypatch.setattr(agentic_tool_call, "call_agent_function", fake_call)
 
-    await agentic_tool_call.generate(
-        _generate_input(
-            custom_agent_function_mode="worker",
-            custom_agent_function_worker_url="http://worker:11100",
-            custom_agent_function_worker_env=["HARBOR_*"],
-            sglang_router_ip="10.0.0.1",
-            sglang_router_port=31000,
+    with function_registry.temporary("test_harness.agent.WORKER_ENV", ("TEST_HARNESS_*",)):
+        await agentic_tool_call.generate(
+            _generate_input(
+                custom_agent_function_path=_hook("test_harness.agent.run"),
+                custom_agent_function_mode="worker",
+                custom_agent_function_worker="http://worker:11100",
+                custom_agent_function_worker_env=["TEST_RECIPE_*"],
+                sglang_router_ip="10.0.0.1",
+                sglang_router_port=31000,
+            )
         )
-    )
 
-    assert seen["worker_url"] == "http://worker:11100"
-    assert seen["extra_env"] == {"HARBOR_TASKS_DIR": "/tasks"}
+    assert seen["worker"] == "http://worker:11100"
+    assert seen["extra_env"]["TEST_HARNESS_DIR"] == "/tasks"
+    assert seen["extra_env"]["TEST_RECIPE_KNOB"] == "1"
+    assert seen["extra_env"]["E2B_API_URL"] == "https://sandbox-service.example"
+    assert "HARBOR_TASKS_DIR" not in seen["extra_env"]
+    assert "LITE_TASK" not in seen["extra_env"]
     assert seen["abort_scope"] == "10.0.0.1:31000"
 
 
 @pytest.mark.asyncio
-async def test_worker_mode_without_a_worker_url_fails_before_a_session_opens(monkeypatch):
+async def test_worker_mode_without_a_worker_fails_before_a_session_opens_and_stops_the_rollout(monkeypatch):
     extra_keys = _patch_agent(monkeypatch, _Tracer())
 
-    with pytest.raises(ValueError, match="--custom-agent-function-worker-url"):
+    with pytest.raises(NonRetryableError, match="--custom-agent-function-worker"):
         await agentic_tool_call.generate(
-            _generate_input(custom_agent_function_mode="worker", custom_agent_function_worker_url=None)
+            _generate_input(custom_agent_function_mode="worker", custom_agent_function_worker=None)
         )
 
     assert extra_keys == []
+
+
+def test_one_worker_flag_replaces_the_url_flag():
+    parser = argparse.ArgumentParser(exit_on_error=False)
+    agentic_tool_call.generate.add_arguments(parser)
+
+    args = parser.parse_args(
+        ["--custom-agent-function-mode", "worker", "--custom-agent-function-worker", "http://w:1"]
+    )
+
+    assert args.custom_agent_function_worker == "http://w:1"
+    assert args.custom_agent_function_worker_env == []
+    with pytest.raises((argparse.ArgumentError, SystemExit)):
+        parser.parse_args(["--custom-agent-function-worker-url", "http://w:1"])
 
 
 async def _abort_for_infra(**kwargs):

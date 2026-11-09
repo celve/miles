@@ -137,6 +137,15 @@ a sandbox still runs; an agent still running two minutes later is stopped.
 `--custom-agent-function-mode inline` runs the agent on the rollout's event loop,
 as before; use it for debugging and for agents that keep state across calls.
 
+`--custom-agent-function-mode worker` runs the same child process on an agent
+worker (`python -m miles.rollout.agentic.worker`) on another host, named by
+`--custom-agent-function-worker`, so the agents' CPU work leaves the rollout host.
+A rollout abort cancels these calls and discards their samples
+(`exit_status` `Cancelled`). Each call carries each sandbox provider's key-file and
+address variables, the env var patterns in a `WORKER_ENV` tuple the agent function's
+module may expose beside it, and any `--custom-agent-function-worker-env` adds.
+Credentials are never sent by value.
+
 ### Optional teardown hook
 
 The module named by `--custom-agent-function-path` may expose an `abort` function

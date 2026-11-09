@@ -48,6 +48,8 @@ StartFn = Callable[[str, str], tuple[Callable[[], None], str]]
 # tools (scan_golden, eval_tbench2_via_api) all resolve through here, so the
 # accepted names and the "agentenv is the e2b backend" aliasing cannot drift.
 # Adding a provider is one entry plus its two modules (backend + materialization).
+WORKER_ENV = ("OPENENV_*", "TB2_*", "AGENT_*", "SWE_AGENT_MODEL_NAME")
+
 AGENT_MODULES = {
     "daytona": "openenv_daytona_agent_function",
     "e2b": "openenv_e2b_agent_function",

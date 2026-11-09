@@ -52,6 +52,8 @@ import tb2_sandbox_modal
 
 logger = logging.getLogger(__name__)
 
+WORKER_ENV = common.WORKER_ENV
+
 
 # The sandbox's env server is the tbench2_env baked by the recipe, installed
 # per the README (at or after the huggingface/OpenEnv#1025 merge): canonical

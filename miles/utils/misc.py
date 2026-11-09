@@ -7,7 +7,7 @@ from typing import Any, Generic, TypeVar
 
 import ray
 
-from miles.rollout.agentic.remote import cancel_inflight_calls, has_inflight_calls, rollout_abort_scope
+from miles.rollout.agentic.agent_function import cancel_calls, has_calls, rollout_abort_scope
 from miles.utils.function_registry import load_function
 from miles.utils.http_utils import MILES_HOST_IP_ENV, is_port_available
 
@@ -52,7 +52,20 @@ def merge_asserting_consistency(a: dict[_K, _V], b: dict[_K, _V]) -> dict[_K, _V
     return a | b
 
 
-async def call_agent_abort_hook(args, *, every_scope: bool = False) -> None:
+def load_agent_sibling(agent_function_path, name: str) -> Any | None:
+    """What the module of the configured agent function holds under ``name``, or None if it holds nothing there."""
+    if not agent_function_path:
+        return None
+    module_path, _, _ = agent_function_path.path.rpartition(".")
+    if not module_path:
+        return None
+    try:
+        return load_function(f"{module_path}.{name}")
+    except (AttributeError, ModuleNotFoundError):
+        return None
+
+
+async def call_agent_abort_hook(args) -> None:
     """Invoke the agent plugin's optional abort hook, if it defines one.
 
     When oversampling collects enough samples, the rollout aborts SGLang, but an
@@ -62,31 +75,22 @@ async def call_agent_abort_hook(args, *, every_scope: bool = False) -> None:
     sibling ``abort`` callable in the same module as the configured agent function
     and call it. Backends that don't expose one are left to drain as before.
 
-    Calls running on an agent worker are cancelled first: this rollout's, or with
-    ``every_scope`` every one this process made.
+    This rollout's calls running on an agent worker are cancelled first.
     """
     from miles.utils.args.custom_view import compute_custom_function_config
 
-    if has_inflight_calls():
-        cancelled = await cancel_inflight_calls(None if every_scope else rollout_abort_scope(args))
+    if has_calls():
+        cancelled = await cancel_calls(rollout_abort_scope(args))
         logger.info(f"Cancelled {cancelled} agent call(s) running on agent workers")
-    agent_function_path = args.custom_agent_function_path
-    if not agent_function_path:
+    abort_hook = load_agent_sibling(args.custom_agent_function_path, "abort")
+    if abort_hook is None:
         return
 
-    module_path, _, _ = agent_function_path.path.rpartition(".")
-    if not module_path:
-        return
     try:
-        abort_hook = load_function(f"{module_path}.abort")
-    except (AttributeError, ModuleNotFoundError):
-        return  # plugin doesn't expose an abort hook; nothing to tear down
-
-    try:
-        fn_args = compute_custom_function_config(args, agent_function_path)
+        fn_args = compute_custom_function_config(args, args.custom_agent_function_path)
         await abort_hook(fn_args)
     except Exception as e:
-        logger.warning(f"Agent abort hook {module_path}.abort failed: {e}")
+        logger.warning(f"The abort hook beside {args.custom_agent_function_path.path} failed: {e}")
 
 
 class SingletonMeta(type):

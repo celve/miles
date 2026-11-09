@@ -28,7 +28,7 @@ def agentic_train_args(
     session_server_workers: int,
     session_server_port: int = 30000,
     session_server_external_host: str = "",
-    agent_worker_url: str = "",
+    agent_worker: str = "",
 ) -> str:
     """The agentic wiring every Harbor launcher passes to train.py.
 
@@ -40,9 +40,7 @@ def agentic_train_args(
         f"--session-server-external-host {session_server_external_host} " if session_server_external_host else ""
     )
     worker_args = (
-        f"--custom-agent-function-mode worker --custom-agent-function-worker-url {agent_worker_url} "
-        if agent_worker_url
-        else ""
+        f"--custom-agent-function-mode worker --custom-agent-function-worker {agent_worker} " if agent_worker else ""
     )
     return (
         "--custom-generate-function-path miles.rollout.generate_hub.agentic_tool_call.generate "

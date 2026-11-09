@@ -53,6 +53,8 @@ import tb2_sandbox_daytona
 
 logger = logging.getLogger(__name__)
 
+WORKER_ENV = (*common.WORKER_ENV, "DAYTONA_API_URL")
+
 
 # Each episode materializes the per-task image declaratively from the Image
 # definition, read off the local TB2 checkout (OPENENV_TB2_TASKS_DIR); repeat

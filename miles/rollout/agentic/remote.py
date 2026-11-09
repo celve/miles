@@ -38,17 +38,6 @@ _CANCEL_TIMEOUT_S = 10.0
 _SECRET_PATTERNS = ("*SECRET", "*SECRET_KEY", "*TOKEN", "*PASSWORD", "*API_KEY")
 _CREDENTIAL_NAMES = frozenset(name for spec in PROVIDER_CREDENTIALS.values() for name in spec["key_env_vars"])
 
-_inflight: dict[str, tuple[str, str | None]] = {}
-_aborted: set[str] = set()
-
-
-def rollout_abort_scope(args) -> str:
-    return f"{args.sglang_router_ip}:{args.sglang_router_port}"
-
-
-def _reaches(abort_scope: str | None, call_scope: str | None) -> bool:
-    return abort_scope is None or call_scope is None or abort_scope == call_scope
-
 
 def function_path(fn: Callable) -> str:
     return f"{fn.__module__}:{fn.__qualname__}"
@@ -67,21 +56,6 @@ def forwarded_env(patterns: Sequence[str]) -> dict[str, str]:
 
 def _matches(name: str, patterns: Sequence[str]) -> bool:
     return any(fnmatch.fnmatchcase(name, p) for p in patterns)
-
-
-def has_inflight_calls() -> bool:
-    return bool(_inflight)
-
-
-async def cancel_inflight_calls(scope: str | None = None) -> int:
-    """Cancel the calls of ``scope`` (every call when None) this process has submitted or is submitting to a
-    worker; return how many."""
-    calls = [(call_id, url) for call_id, (url, call_scope) in _inflight.items() if _reaches(scope, call_scope)]
-    _aborted.update(call_id for call_id, _ in calls)
-    async with asyncio.TaskGroup() as group:
-        for call_id, url in calls:
-            group.create_task(_cancel_on(url, call_id))
-    return len(calls)
 
 
 @functools.cache
@@ -104,7 +78,6 @@ async def call_on_worker(
     *,
     env: dict[str, str],
     on_child_reports: Callable[[list[Any]], None] | None = None,
-    abort_scope: str | None = None,
 ) -> Any:
     """Run ``fn(**kwargs)`` on the worker and return its result, as ``call_agent_function``'s ``subproc`` would."""
     call_id = uuid.uuid4().hex
@@ -117,16 +90,12 @@ async def call_on_worker(
     }
     json.dumps(body)
     async with _client(worker_url) as client:
-        _inflight[call_id] = (worker_url, abort_scope)
         try:
             await _request(client, "POST", "/calls", json=body)
             return await _poll_until_done(client, call_id, on_child_reports)
         except asyncio.CancelledError:
             await asyncio.shield(_cancel(client, call_id))
             raise
-        finally:
-            _inflight.pop(call_id, None)
-            _aborted.discard(call_id)
 
 
 async def _poll_until_done(
@@ -143,10 +112,6 @@ async def _poll_until_done(
         after = state["next"]
         if state["state"] == "done":
             return _unpack_outcome(state["outcome"])
-        if call_id in _aborted:
-            raise InfraAbort(
-                "WorkerCancelled", f"the rollout aborted call {call_id} on agent worker {client.base_url}"
-            )
 
 
 def _unpack_outcome(outcome: dict[str, Any]) -> Any:
@@ -180,11 +145,6 @@ async def _request(client: httpx.AsyncClient, method: str, path: str, **kwargs: 
             )
         return response.json()
     raise AssertionError("unreachable")
-
-
-async def _cancel_on(worker_url: str, call_id: str) -> None:
-    async with _client(worker_url) as client:
-        await _cancel(client, call_id)
 
 
 async def _cancel(client: httpx.AsyncClient, call_id: str) -> None:

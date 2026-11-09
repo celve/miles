@@ -42,19 +42,24 @@ import httpx
 from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
 
 from miles.dashboard.hooks import push_sandbox_reports
-from miles.rollout.agentic.agent_function import AGENT_FUNCTION_MODES, InfraAbort, call_agent_function
+from miles.rollout.agentic.agent_function import (
+    AGENT_FUNCTION_MODES,
+    InfraAbort,
+    call_agent_function,
+    resolve_worker,
+    rollout_abort_scope,
+)
 from miles.rollout.agentic.credentials import provider_env_names
-from miles.rollout.agentic.remote import forwarded_env, rollout_abort_scope
+from miles.rollout.agentic.remote import forwarded_env
 from miles.rollout.base_types import GenerateFnInput, GenerateFnOutput
 from miles.rollout.generate_utils.openai_endpoint_utils import OpenAIEndpointTracer
 from miles.rollout.session.v2.metrics import SESSION_ROLLOUT_METRICS_KEY
 from miles.utils.function_registry import load_function
+from miles.utils.misc import load_agent_sibling
 from miles.utils.output_store.dropped import record_dropped_samples
 from miles.utils.types import Sample
 
 logger = logging.getLogger(__name__)
-
-_DEFAULT_WORKER_ENV = ("HARBOR_*", "AGENT_*", "LITE_*", *provider_env_names())
 
 
 async def generate(input: GenerateFnInput) -> GenerateFnOutput:
@@ -219,13 +224,19 @@ def _aborted_output(
 def _worker_options(args) -> dict[str, Any]:
     if args.custom_agent_function_mode != "worker":
         return {}
-    if not args.custom_agent_function_worker_url:
-        raise ValueError("--custom-agent-function-mode worker needs --custom-agent-function-worker-url")
     return {
-        "worker_url": args.custom_agent_function_worker_url,
-        "extra_env": forwarded_env(args.custom_agent_function_worker_env),
+        "worker": resolve_worker(args.custom_agent_function_worker),
+        "extra_env": forwarded_env(_worker_env_patterns(args)),
         "abort_scope": rollout_abort_scope(args),
     }
+
+
+def _worker_env_patterns(args) -> tuple[str, ...]:
+    return (
+        *provider_env_names(),
+        *(load_agent_sibling(args.custom_agent_function_path, "WORKER_ENV") or ()),
+        *args.custom_agent_function_worker_env,
+    )
 
 
 def _add_arguments(parser: argparse.ArgumentParser):
@@ -235,22 +246,22 @@ def _add_arguments(parser: argparse.ArgumentParser):
         default="subproc",
         help="Where each agent call runs: subproc, a child process of its own so one episode's "
         "blocking step or crash cannot stall the others; inline, on the rollout's event loop; or worker, "
-        "a subproc child on an agent worker (python -m miles.rollout.agentic.worker) at "
-        "--custom-agent-function-worker-url, so the agents' CPU work leaves this host.",
+        "a subproc child on an agent worker (python -m miles.rollout.agentic.worker) named by "
+        "--custom-agent-function-worker, so the agents' CPU work leaves this host.",
     )
     parser.add_argument(
-        "--custom-agent-function-worker-url",
+        "--custom-agent-function-worker",
         type=str,
         default=None,
-        help="The agent worker's URL for --custom-agent-function-mode worker.",
+        help="The agent worker for --custom-agent-function-mode worker: its URL.",
     )
     parser.add_argument(
         "--custom-agent-function-worker-env",
         nargs="*",
-        default=list(_DEFAULT_WORKER_ENV),
-        help="Env var names (fnmatch patterns) sent with each worker call for its agent process, so this run's "
-        "runtime env stays where they are set. Credentials are never sent by value. Paths among them must "
-        "exist on the worker.",
+        default=[],
+        help="Env var names (fnmatch patterns) a recipe adds to those sent with each worker call for its agent "
+        "process: each sandbox provider's key-file and address vars, and the WORKER_ENV tuple beside the agent "
+        "function. Credentials are never sent by value. Paths among them must exist on the worker.",
     )
     parser.add_argument(
         "--max-seq-len",

@@ -119,12 +119,12 @@ def test_with_an_agent_worker_no_local_provider_key_is_needed(monkeypatch):
     assert "E2B_API_KEY_FILE" not in env and "E2B_API_KEY" not in env
 
 
-def test_an_agent_worker_url_selects_the_worker_mode():
+def test_an_agent_worker_selects_the_worker_mode():
     args = launch_common.agentic_train_args(
-        tito_model="qwen3", session_server_workers=4, agent_worker_url="http://w:11100"
+        tito_model="qwen3", session_server_workers=4, agent_worker="http://w:11100"
     )
 
-    assert "--custom-agent-function-mode worker --custom-agent-function-worker-url http://w:11100" in args
+    assert "--custom-agent-function-mode worker --custom-agent-function-worker http://w:11100 " in args
     assert "--custom-agent-function-mode" not in launch_common.agentic_train_args(
         tito_model="qwen3", session_server_workers=4
     )

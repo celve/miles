@@ -12,13 +12,14 @@ import httpx
 import pytest
 from aiohttp import web
 
-from miles.rollout.agentic import remote
-from miles.rollout.agentic.agent_function import InfraAbort, call_agent_function
+from miles.rollout.agentic import agent_function, remote
+from miles.rollout.agentic.agent_function import InfraAbort, call_agent_function, cancel_calls, has_calls
+from miles.rollout.agentic.credentials import provider_env_names
 from miles.rollout.agentic.rollout_limits import current_scope
 from miles.rollout.agentic.worker import create_app
-from miles.rollout.generate_hub.agentic_tool_call import _DEFAULT_WORKER_ENV
 from miles.rollout.inference_rollout import inference_rollout_train
 from miles.utils.misc import call_agent_abort_hook
+from miles.utils.retry_utils import NonRetryableError
 from miles.utils.test_utils import agent_function_stubs as stubs
 
 
@@ -63,7 +64,7 @@ def _rollout_args(router_port: int = 30000, **overrides):
 def _on_worker(url, fn, extra_env=None, on_child_reports=None, **kwargs):
     return asyncio.run(
         call_agent_function(
-            fn, mode="worker", worker_url=url, extra_env=extra_env, on_child_reports=on_child_reports, **kwargs
+            fn, mode="worker", worker=url, extra_env=extra_env, on_child_reports=on_child_reports, **kwargs
         )
     )
 
@@ -74,7 +75,7 @@ def _start_waiting_call(url, tmp_path, name="call", **kwargs):
         call_agent_function(
             stubs.wait_until_cancelled,
             mode="worker",
-            worker_url=url,
+            worker=url,
             pid_file=str(pid_file),
             cleaned_up=str(cleaned_up),
             **kwargs,
@@ -178,12 +179,131 @@ def test_a_rollout_abort_cancels_the_calls_running_on_workers(serve, tmp_path):
         await call_agent_abort_hook(_rollout_args())
         with pytest.raises(InfraAbort) as raised:
             await asyncio.wait_for(task, timeout=60)
-        return raised.value.exit_status, cleaned_up
+        return raised.value.exit_status, cleaned_up, has_calls()
 
-    exit_status, cleaned_up = asyncio.run(abort_while_running())
+    exit_status, cleaned_up, calls_left = asyncio.run(abort_while_running())
 
-    assert exit_status == "WorkerCancelled"
+    assert exit_status == "Cancelled"
+    assert not calls_left
     assert _wait_for(cleaned_up)
+
+
+def _recording_cancels(cancelled: list[str]) -> web.Application:
+    app = create_app()
+
+    @web.middleware
+    async def record(request, handler):
+        if request.method == "DELETE":
+            cancelled.append(request.match_info["call_id"])
+        return await handler(request)
+
+    app.middlewares.append(record)
+    return app
+
+
+def test_the_abort_hook_returns_only_after_the_worker_got_the_cancel(serve, tmp_path):
+    cancelled: list[str] = []
+    url = serve(app=_recording_cancels(cancelled))
+
+    async def abort_while_running():
+        task, pid_file, _ = _start_waiting_call(url, tmp_path, abort_scope="127.0.0.1:30000")
+        await _until_exists(pid_file)
+        await call_agent_abort_hook(_rollout_args())
+        seen_when_the_hook_returned = list(cancelled)
+        with pytest.raises(InfraAbort):
+            await asyncio.wait_for(task, timeout=60)
+        return seen_when_the_hook_returned
+
+    assert len(asyncio.run(abort_while_running())) == 1
+
+
+def test_a_cancel_that_hangs_holds_the_abort_hook_only_up_to_the_bound(serve, tmp_path, monkeypatch):
+    monkeypatch.setattr(agent_function, "_ABORT_WAIT_S", 0.5)
+    release = asyncio.Event()
+
+    async def hang(client, call_id):
+        await release.wait()
+
+    monkeypatch.setattr(remote, "_cancel", hang)
+    url = serve(orphan_timeout_s=2.0)
+
+    async def abort_with_a_hung_cancel():
+        task, pid_file, _ = _start_waiting_call(url, tmp_path, abort_scope="127.0.0.1:30000")
+        await _until_exists(pid_file)
+        await asyncio.wait_for(call_agent_abort_hook(_rollout_args()), timeout=10)
+        still_cancelling = not task.done()
+        release.set()
+        with pytest.raises(InfraAbort):
+            await asyncio.wait_for(task, timeout=10)
+        return still_cancelling
+
+    assert asyncio.run(abort_with_a_hung_cancel())
+
+
+def test_cancelling_the_caller_of_an_aborted_call_stays_a_cancel(serve, tmp_path, monkeypatch):
+    monkeypatch.setattr(agent_function, "_ABORT_WAIT_S", 0.1)
+    release = asyncio.Event()
+
+    async def hang(client, call_id):
+        await release.wait()
+
+    monkeypatch.setattr(remote, "_cancel", hang)
+    url = serve(orphan_timeout_s=2.0)
+
+    async def cancel_during_the_abort():
+        task, pid_file, _ = _start_waiting_call(url, tmp_path)
+        await _until_exists(pid_file)
+        await cancel_calls()
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(cancel_during_the_abort())
+
+
+@pytest.mark.parametrize("mode", ["subproc", "inline"])
+def test_a_rollout_abort_leaves_calls_in_other_modes_running(tmp_path, mode):
+    pid_file, cleaned_up = tmp_path / "pid", tmp_path / "cleaned_up"
+
+    async def abort_while_running():
+        task = asyncio.create_task(
+            call_agent_function(
+                stubs.wait_until_cancelled,
+                mode=mode,
+                abort_scope="127.0.0.1:30000",
+                pid_file=str(pid_file),
+                cleaned_up=str(cleaned_up),
+            )
+        )
+        await _until_exists(pid_file)
+        assert not has_calls()
+        await call_agent_abort_hook(_rollout_args())
+        assert await cancel_calls() == 0
+        await asyncio.sleep(0.5)
+        still_running = not task.done()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return still_running
+
+    assert asyncio.run(abort_while_running())
+
+
+def test_a_cancel_no_rollout_abort_asked_for_stays_worker_cancelled(serve):
+    async def accept(request):
+        return web.json_response({"call_id": "x"})
+
+    async def cancelled_by_the_worker(request):
+        return web.json_response({"state": "done", "reports": [], "next": 0, "outcome": {"kind": "cancelled"}})
+
+    app = web.Application()
+    app.add_routes([web.post("/calls", accept), web.get("/calls/{call_id}", cancelled_by_the_worker)])
+
+    with pytest.raises(InfraAbort) as raised:
+        _on_worker(serve(app=app), stubs.report_pid)
+
+    assert raised.value.exit_status == "WorkerCancelled"
 
 
 def test_a_rollout_abort_leaves_another_rollouts_calls_running(serve, tmp_path):
@@ -199,7 +319,7 @@ def test_a_rollout_abort_leaves_another_rollouts_calls_running(serve, tmp_path):
             await asyncio.wait_for(train, timeout=60)
         await asyncio.sleep(2)
         still_running = not evaluation.done()
-        await call_agent_abort_hook(_rollout_args(), every_scope=True)
+        assert await cancel_calls() == 1
         with pytest.raises(InfraAbort):
             await asyncio.wait_for(evaluation, timeout=60)
         return still_running, train_cleaned, eval_cleaned
@@ -266,39 +386,38 @@ def test_an_abort_during_the_submit_keeps_the_trial_from_starting(serve, tmp_pat
     async def abort_during_submit():
         task, pid_file, _ = _start_waiting_call(url, tmp_path)
         await asyncio.sleep(0.5)
-        assert await remote.cancel_inflight_calls() == 1
+        assert await cancel_calls() == 1
         with pytest.raises(InfraAbort) as raised:
             await asyncio.wait_for(task, timeout=60)
         return raised.value.exit_status, pid_file
 
     exit_status, pid_file = asyncio.run(abort_during_submit())
 
-    assert exit_status == "WorkerCancelled"
+    assert exit_status == "Cancelled"
     time.sleep(2)
     assert not pid_file.exists()
 
 
 def test_an_aborted_call_whose_cancel_is_lost_stops_polling_and_is_reaped(serve, tmp_path, monkeypatch):
     monkeypatch.setattr("miles.rollout.agentic.worker._REAP_INTERVAL_S", 0.2)
-    monkeypatch.setattr(remote, "_POLL_WAIT_S", 1.0)
     url = serve(orphan_timeout_s=2.0)
 
-    async def lose_the_cancel(worker_url, call_id):
+    async def lose_the_cancel(client, call_id):
         return None
 
-    monkeypatch.setattr(remote, "_cancel_on", lose_the_cancel)
+    monkeypatch.setattr(remote, "_cancel", lose_the_cancel)
 
     async def abort_with_a_lost_cancel():
         task, pid_file, cleaned_up = _start_waiting_call(url, tmp_path)
         await _until_exists(pid_file)
-        await remote.cancel_inflight_calls()
+        await cancel_calls()
         with pytest.raises(InfraAbort) as raised:
             await asyncio.wait_for(task, timeout=30)
         return raised.value.exit_status, cleaned_up
 
     exit_status, cleaned_up = asyncio.run(abort_with_a_lost_cancel())
 
-    assert exit_status == "WorkerCancelled"
+    assert exit_status == "Cancelled"
     assert _wait_for(cleaned_up, timeout_s=30)
 
 
@@ -322,10 +441,10 @@ def test_secrets_are_not_forwarded_by_value(monkeypatch):
     assert env["MODAL_PROFILE"] == "team"
 
 
-def test_the_default_forwarded_names_carry_every_providers_endpoint_but_no_key():
+def test_the_provider_names_carry_every_providers_endpoint_but_no_key():
     for name in ("E2B_API_URL", "E2B_SANDBOX_URL", "E2B_DOMAIN", "E2B_API_KEY_FILE", "MODAL_PROFILE"):
-        assert name in _DEFAULT_WORKER_ENV
-    assert "E2B_API_KEY" not in _DEFAULT_WORKER_ENV
+        assert name in provider_env_names()
+    assert "E2B_API_KEY" not in provider_env_names()
 
 
 def test_a_call_whose_caller_vanished_is_cancelled(serve, tmp_path, monkeypatch):
@@ -378,9 +497,10 @@ def test_a_kwarg_the_protocol_cannot_carry_fails_before_the_call(serve):
         _on_worker(serve(), stubs.report_pid, payload=object())
 
 
-def test_worker_mode_without_a_worker_url_is_refused():
-    with pytest.raises(ValueError, match="--custom-agent-function-worker-url"):
-        asyncio.run(call_agent_function(stubs.report_pid, mode="worker"))
+@pytest.mark.parametrize("worker", [None, "", "not_a_url.start"])
+def test_worker_mode_without_a_worker_url_is_refused(worker):
+    with pytest.raises(NonRetryableError, match="--custom-agent-function-worker"):
+        asyncio.run(call_agent_function(stubs.report_pid, mode="worker", worker=worker))
 
 
 def test_the_worker_side_imports_without_torch_sglang_or_ray():

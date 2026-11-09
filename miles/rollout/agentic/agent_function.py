@@ -26,8 +26,18 @@ from miles.rollout.agentic import rollout_limits
 from miles.rollout.agentic.errors import InfraAbort, RemoteTraceback
 from miles.rollout.agentic.remote import call_on_worker
 from miles.utils.logging_utils import configure_logger_raw
+from miles.utils.retry_utils import NonRetryableError
 
-__all__ = ["AGENT_FUNCTION_MODES", "InfraAbort", "call_agent_function", "report_to_caller"]
+__all__ = [
+    "AGENT_FUNCTION_MODES",
+    "InfraAbort",
+    "call_agent_function",
+    "cancel_calls",
+    "has_calls",
+    "report_to_caller",
+    "resolve_worker",
+    "rollout_abort_scope",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +47,7 @@ AGENT_FUNCTION_MODES = ("subproc", "inline", "worker")
 _CANCEL_GRACE_S = 120.0
 # Once the call is over, cleanup the agent left running (a thread closing a sandbox) gets this long.
 _LEFTOVER_CLEANUP_S = 600.0
+_ABORT_WAIT_S = 30.0
 
 # the child takes the rollout's import path before it imports anything from miles
 _CHILD_BOOTSTRAP = (
@@ -73,6 +84,8 @@ class _ResultPipe:
 # set in a ``subproc`` agent process only (see report_to_caller)
 _result_pipe: _ResultPipe | None = None
 
+_calls: dict[asyncio.Task, dict[str, Any]] = {}
+
 
 def report_to_caller(item: Any) -> bool:
     """Send a picklable ``item`` to the process that made this ``subproc`` agent call.
@@ -90,24 +103,74 @@ async def call_agent_function(
     *,
     mode: str,
     on_child_reports: Callable[[list[Any]], None] | None = None,
-    worker_url: str | None = None,
+    worker: str | None = None,
     extra_env: dict[str, str] | None = None,
     abort_scope: str | None = None,
     **kwargs: Any,
 ) -> Any:
     """Await ``fn(**kwargs)`` on this loop (``inline``), in a child process of its own (``subproc``), or in one on
-    the agent worker at ``worker_url`` (``worker``), whose ``subproc`` runs it.
+    an agent worker (``worker``, see ``resolve_worker``), whose ``subproc`` runs it.
 
     Under ``subproc`` and ``worker``, ``on_child_reports`` receives each item the agent sends with
-    ``report_to_caller``, and ``extra_env`` is added to the agent process's environment. Under ``worker``, a rollout
-    abort cancels the call only if it aborts ``abort_scope`` or every scope."""
+    ``report_to_caller``, and ``extra_env`` is added to the agent process's environment. Under ``worker``, a
+    ``cancel_calls`` that reaches ``abort_scope`` cancels the call, which then raises ``InfraAbort("Cancelled")``."""
+    placement = _place(fn, mode, worker, on_child_reports, extra_env, kwargs)
+    if mode != "worker":
+        return await placement
+    task = asyncio.ensure_future(placement)
+    call = _calls[task] = {"scope": abort_scope, "aborted": False}
+    try:
+        return await task
+    except asyncio.CancelledError:
+        if call["aborted"] and not asyncio.current_task().cancelling():
+            raise InfraAbort("Cancelled", "a rollout abort cancelled this agent call") from None
+        raise
+    finally:
+        del _calls[task]
+
+
+def has_calls() -> bool:
+    return bool(_calls)
+
+
+async def cancel_calls(scope: str | None = None) -> int:
+    """Cancel this process's calls in ``scope`` (every call when None) and wait, within a bound, until they have
+    finished cancelling; return how many. Run it on the loop that made the calls."""
+    tasks = [task for task, call in _calls.items() if scope is None or call["scope"] in (None, scope)]
+    for task in tasks:
+        _calls[task]["aborted"] = True
+        task.cancel()
+    if tasks:
+        await asyncio.wait(tasks, timeout=_ABORT_WAIT_S)
+    return len(tasks)
+
+
+def rollout_abort_scope(args) -> str:
+    return f"{args.sglang_router_ip}:{args.sglang_router_port}"
+
+
+def resolve_worker(worker: str | None) -> str:
+    """The URL of the agent worker ``--custom-agent-function-worker`` names."""
+    if not worker:
+        raise NonRetryableError("--custom-agent-function-mode worker needs --custom-agent-function-worker")
+    if not worker.startswith(("http://", "https://")):
+        raise NonRetryableError(f"--custom-agent-function-worker must be an http(s) URL, got {worker!r}")
+    return worker
+
+
+async def _place(
+    fn: Callable[..., Awaitable[Any]],
+    mode: str,
+    worker: str | None,
+    on_child_reports: Callable[[list[Any]], None] | None,
+    extra_env: dict[str, str] | None,
+    kwargs: dict[str, Any],
+) -> Any:
     if mode == "inline":
         return await fn(**kwargs)
     if mode == "worker":
-        if worker_url is None:
-            raise ValueError("--custom-agent-function-mode worker needs --custom-agent-function-worker-url")
         return await call_on_worker(
-            worker_url, fn, kwargs, env=extra_env or {}, on_child_reports=on_child_reports, abort_scope=abort_scope
+            resolve_worker(worker), fn, kwargs, env=extra_env or {}, on_child_reports=on_child_reports
         )
     # pickled before the process starts, so an unpicklable argument fails here
     call = pickle.dumps(sys.path) + pickle.dumps((fn, kwargs, _CANCEL_GRACE_S, _LEFTOVER_CLEANUP_S))
