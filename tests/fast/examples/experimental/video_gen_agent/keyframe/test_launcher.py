@@ -16,11 +16,13 @@ from transformers import Qwen3_5Config
 def _config(monkeypatch, tmp_path, **script_args):
     """The launcher's argv, parsed by Miles against a stand-in Qwen3.5 config."""
     monkeypatch.delenv("WANDB_API_KEY", raising=False)
-    text = {"hidden_size": 128, "num_attention_heads": 2, "num_hidden_layers": 1, "intermediate_size": 256}
-    text |= {"rms_norm_eps": 1e-5, "tie_word_embeddings": True}
-    Qwen3_5Config(text_config=text).save_pretrained(tmp_path / "Qwen3.5-9B")
     args = ScriptArgs(run_id="test", model_dir=str(tmp_path), **script_args)
-    return parse_megatron_test_config("--ffn-hidden-size", "256", *shlex.split(_train_args(args)))
+    text = {"hidden_size": 128, "num_attention_heads": 4, "num_key_value_heads": 4, "num_hidden_layers": 1}
+    text |= {"intermediate_size": 256, "rms_norm_eps": 1e-5, "tie_word_embeddings": True}
+    Qwen3_5Config(text_config=text).save_pretrained(args.local(args.recipe.repo))
+    return parse_megatron_test_config(
+        "--ffn-hidden-size", "256", "--num-attention-heads", "4", *shlex.split(_train_args(args))
+    )
 
 
 def _loras(model):
@@ -92,6 +94,32 @@ def test_the_reward_is_a_flag(monkeypatch, tmp_path, reward, adherence_gate, sig
         assert hook.video_reward_adherence_pool == "adherence" and hook.video_reward_adherence_threshold > 0
         adherence = next(pool for pool in config.reward_pools if pool.name == "adherence")
         assert adherence.scorer_kwargs["axis_weights"] == {"prompt_adherence": 1.0}
+
+
+def test_the_27b_planner_trains_at_tp4_with_its_own_template_and_eval_on_the_planner_engine(monkeypatch, tmp_path):
+    argv = _train_args(ScriptArgs(run_id="test", planner="qwen3.8-27b"))
+    assert "--tensor-model-parallel-size 4 " in argv and "--actor-num-gpus-per-node 4 " in argv
+    assert "--optimizer-cpu-offload --overlap-cpu-optimizer-d2h-h2d --use-precision-aware-optimizer " in argv
+
+    # Megatron asks the GPU's architecture to validate TP above 1, so the rest parses at TP1.
+    config = _config(monkeypatch, tmp_path, planner="qwen3.8-27b", extra_args="--tensor-model-parallel-size 1")
+
+    assert config.hf_checkpoint == f"{tmp_path}/Qwen3.8-27B" and config.tito_model == "qwen38small"
+    assert [config.sglang.common_value(name) for name in ("reasoning_parser", "tool_call_parser")] == [
+        "qwen3",
+        "qwen3_coder",
+    ]
+    for name, gpus in {"policy": 1, "image": 1, "video": 2}.items():
+        assert config.sglang_scaling.group(model_name=name, group_index=0).num_gpus == gpus
+    assert "eval" not in {model.name for model in config.sglang.models} and config.eval_num_gpus == 0
+    assert config.raw_megatron.base_args["optimizer_cpu_offload"]
+
+
+def test_the_9b_planner_keeps_its_template_and_optimizer_on_gpu(monkeypatch, tmp_path):
+    config = _config(monkeypatch, tmp_path)
+
+    assert config.tito_model == "qwen35" and config.raw_megatron.base_args["tensor_model_parallel_size"] == 1
+    assert not config.raw_megatron.base_args["optimizer_cpu_offload"]
 
 
 def test_i2v_mode_serves_image_to_video_with_its_own_loras(monkeypatch, tmp_path):
@@ -188,6 +216,15 @@ def test_prepare_downloads_the_defaults_models_and_only_the_modes_lightx2v_loras
     assert any("make_requests" in command for command in commands)
 
 
+def test_prepare_downloads_and_converts_the_27b_planner(monkeypatch, tmp_path):
+    commands = _recorded(monkeypatch, tmp_path, "prepare", planner="qwen3.8-27b")
+
+    assert any("hf download Qwen/Qwen3.8-27B " in command for command in commands)
+    assert not any("Qwen/Qwen3.5-9B" in command for command in commands)
+    (convert,) = [command for command in commands if "convert_hf_to_torch_dist" in command]
+    assert "Qwen3.8-27B_torch_dist" in convert and "--num-layers 64 " in convert
+
+
 def test_execute_submits_the_run_with_the_keyframe_env(monkeypatch, tmp_path):
     commands = _recorded(monkeypatch, tmp_path, "execute", num_gpus_per_node=4)
 
@@ -201,6 +238,8 @@ def test_execute_submits_the_run_with_the_keyframe_env(monkeypatch, tmp_path):
     [
         (dict(eval_gpus=0), "adds up to 7, not 8"),
         (dict(num_gpus_per_node=2), "no layout for 2 GPUs"),
+        (dict(planner="qwen3.8-27b", num_gpus_per_node=4), "qwen3.8-27b has no layout for 4 GPUs"),
+        (dict(planner="qwen3.6-27b"), "--planner is one of"),
         (dict(video_mode="t2v"), "--video-mode is one of"),
         (dict(image_model="org/Image"), "has no recipe"),
         (dict(reward="judge"), "--reward is one of"),

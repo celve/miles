@@ -5,6 +5,7 @@ sample carries the images for the trainer's rebuild along with the submitted vid
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import examples.experimental.video_gen_agent.keyframe.env as env
 import pytest
@@ -17,6 +18,7 @@ from tests.fast.examples.experimental.video_gen_agent.multiturn.test_clip_observ
 from tests.fast.rollout.session.test_token_space_images import TokenSpaceEngine, _samples
 from tests.fast.rollout.session.test_token_space_videos import _make_core
 
+from miles.utils.chat_template_utils.tito_tokenizer import TEMPLATE_DIR, Qwen38SmallTITOTokenizer
 from miles.utils.media_refs import collect_media_refs
 
 IMAGE_PAD = "<|image_pad|>"
@@ -24,8 +26,10 @@ _FAKES = "examples.experimental.video_gen_agent.generator"
 __all__ = ["model_path", "tokenizer"]
 
 
-@pytest.fixture(scope="module")
-def processor_core(model_path):
+QWEN38 = "Qwen/Qwen3.8-27B"
+
+
+def _processor_core(model_path):
     pytest.importorskip("sglang.srt.multimodal.token_space_mm_process.processor")
     from miles.backends.training_utils.data.token_space_media_process import (
         RolloutEngineProcessorArgs,
@@ -48,6 +52,28 @@ def processor_core(model_path):
     return build_trainer_processor(
         engine_args, mm_processor_worker_num=1, mm_io_worker_num=0, device=torch.device("cpu")
     ).core
+
+
+@pytest.fixture(scope="module")
+def processor_core(model_path):
+    return _processor_core(model_path)
+
+
+@pytest.fixture(scope="module")
+def qwen38():
+    """Qwen3.8-27B's tokenizer under the qwen38small fixed template, and its token-space processor."""
+    from huggingface_hub import snapshot_download
+    from transformers import AutoTokenizer
+
+    try:
+        path = snapshot_download(QWEN38, local_files_only=True, allow_patterns=["*.json", "*.jinja", "*.txt"])
+    except Exception as e:  # noqa: BLE001 - no cache
+        pytest.skip(f"{QWEN38} is not in the HF cache: {e}")
+    tokenizer = AutoTokenizer.from_pretrained(path)
+    tokenizer.chat_template = (TEMPLATE_DIR / Qwen38SmallTITOTokenizer.FIXED_TEMPLATE.template).read_text(
+        encoding="utf-8"
+    )
+    return SimpleNamespace(path=path, tokenizer=tokenizer, core=_processor_core(path))
 
 
 def _set_fakes(monkeypatch, tmp_path):
@@ -93,6 +119,26 @@ def test_each_image_is_observed_in_token_space_and_the_sample_carries_them_and_t
     pad_id = tokenizer.convert_tokens_to_ids(IMAGE_PAD)
     # The second image doubles the expanded image tokens of the first.
     assert engine.prompts[2].count(pad_id) == 2 * engine.prompts[1].count(pad_id) > 2
+    (sample,) = _samples(core, session_id, "v2")
+    assert sample.multimodal_inputs == {"images": images}
+    assert sample.tokens == engine.prompts[-1] + engine.output_ids
+
+
+def test_a_qwen38_planner_sees_each_image_under_the_counted_check(monkeypatch, tmp_path, qwen38):
+    _set_fakes(monkeypatch, tmp_path)
+    calls = [
+        ("generate_image", {"prompt": "a red square"}),
+        ("generate_image", {"prompt": "a blue square"}),
+        ("generate_video", {"image_id": "image_1", "prompt": "it slides right"}),
+    ]
+    engine = _ScriptedPlannerEngine(qwen38.core, qwen38.tokenizer, calls)
+    core, registry = _make_core(
+        "v2", qwen38.path, qwen38.tokenizer, engine, tmp_path / "media", tito_model="qwen38small"
+    )
+    session_id, result = _run_episode(monkeypatch, engine, core, registry)
+
+    images = [str(Path(image["path"]).resolve()) for image in result["video_gen"]["images"]]
+    assert result["video_gen"]["submitted"]["image_id"] == "image_1" and len(images) == 2
     (sample,) = _samples(core, session_id, "v2")
     assert sample.multimodal_inputs == {"images": images}
     assert sample.tokens == engine.prompts[-1] + engine.output_ids
