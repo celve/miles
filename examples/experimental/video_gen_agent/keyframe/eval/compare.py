@@ -22,7 +22,7 @@ METRICS = {
     "ocr_lines": lambda row: row["ocr_lines"],
     "prompt_words": lambda row: row["prompt_words"],
 }
-AGAINST = ("B0", "B1", "K0", "K-blind")
+AGAINST = ("B0", "B1", "B0-i2v", "K0", "K-blind")
 
 
 def sign_test(wins: int, losses: int) -> float:

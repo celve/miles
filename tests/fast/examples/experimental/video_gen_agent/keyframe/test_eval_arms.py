@@ -7,10 +7,11 @@ import json
 import numpy as np
 import pytest
 import torch
-from examples.experimental.video_gen_agent.generator import FakeClipGenerator
+from examples.experimental.video_gen_agent.generator import FakeClipGenerator, FakeImageGenerator
 from examples.experimental.video_gen_agent.keyframe.eval import arms, blind, compare, score
 from examples.experimental.video_gen_agent.keyframe.run_qwen35_9b_keyframe import ScriptArgs
 from examples.experimental.video_gen_agent.phase0.reward import request_seed
+from PIL import Image
 
 av = pytest.importorskip("av")
 
@@ -45,6 +46,22 @@ def test_the_generated_arms_prompts_and_seeds(tmp_path):
     assert by["B0", "a fox"]["prompt"] == "a fox" and by["B1", "a fox"]["prompt"] == "A fox runs."
     assert by["K-blind", "a fox"]["prompt"] == "fox, snow"
     assert by["B1", "a tv"]["prompt"] is None and by["K-blind", "a red car"]["prompt"] is None
+
+
+def test_the_i2v_one_shot_arm_conditions_the_video_on_an_image_of_the_raw_request(tmp_path, monkeypatch):
+    rows = arms.arm_prompts(["a fox"], {}, {}, i2v=True)
+    (row,) = [row for row in rows if row["arm"] == "B0-i2v"]
+    assert (row["prompt"], row["image_prompt"], row["seed"]) == ("a fox", "a fox", request_seed("a fox"))
+    assert "B0-i2v" not in {row["arm"] for row in arms.arm_prompts(["a fox"], {}, {})}
+    monkeypatch.setenv("AGENT_VIDEO_GEN_FAKE_DIR", str(tmp_path / "made"))
+
+    (made,) = asyncio.run(arms.generate([row], FakeClipGenerator(), FakeImageGenerator()))
+
+    asked = json.loads(open(made["path"]).read())
+    assert asked["image_path"] == made["image_path"] and Image.open(made["image_path"]).size == (832, 480)
+    assert json.loads(Image.open(made["image_path"]).text["request"])["prompt"] == "a fox"
+    with pytest.raises(ValueError, match="AGENT_VIDEO_GEN_IMAGE_GENERATOR"):
+        asyncio.run(arms.generate([row], FakeClipGenerator()))
 
 
 def test_generate_asks_the_env_generator_for_the_runs_clip_shape(tmp_path, monkeypatch):
