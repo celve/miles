@@ -31,7 +31,7 @@ async def test_the_video_is_made_from_the_watched_assets_and_the_planners_prompt
         [
             _call("generate_image", {"prompt": "a corgi, isolated on a plain white background"}),
             _call("generate_image", {"prompt": "a red ball, isolated on a plain white background"}),
-            _call("generate_image", {"prompt": "a sunny park, empty"}),
+            _call("generate_image", {"prompt": "a frisbee, isolated on a plain white background"}),
         ],
         [_call("generate_image", {"prompt": "a bench, isolated on a plain white background"})],
         [_call("generate_video", {"image_ids": ["image_3", "image_1", "image_2"], "prompt": composed})],
@@ -41,8 +41,8 @@ async def test_the_video_is_made_from_the_watched_assets_and_the_planners_prompt
     result = await _run()
 
     system = sent[0][0]["content"]
-    assert "one image for each subject or object" in system and "one image of the setting" in system
-    assert "Do not make whole scenes" in system and "You have 4 images" in system
+    assert "one image for each subject or object" in system and "isolated on a plain background" in system
+    assert "Do not make images of the setting, of whole scenes" in system and "You have 4 images" in system
     record = result["video_gen"]
     image_1, image_2, image_3, _ = record["images"]
     clip = _clip_request(record["video"]["path"])
@@ -56,7 +56,11 @@ async def test_the_video_is_made_from_the_watched_assets_and_the_planners_prompt
         "prompt": composed,
         "prompt_words": 12,
         "image_ids": ["image_3", "image_1", "image_2"],
-        "image_prompts": ["a sunny park, empty", "a corgi, isolated on a plain white background", "a red ball, isolated on a plain white background"],
+        "image_prompts": [
+            "a frisbee, isolated on a plain white background",
+            "a corgi, isolated on a plain white background",
+            "a red ball, isolated on a plain white background",
+        ],
     }
     assert record["video"]["image_ids"] == ["image_3", "image_1", "image_2"] and record["video_mode"] == "reference"
 
@@ -128,7 +132,8 @@ def test_the_asset_tools_ask_for_one_isolated_asset_per_image_and_a_composing_vi
     image, video = env.REFERENCE_TOOLS
 
     assert "isolated on a plain background" in image["function"]["description"]
-    assert "where each asset is" in video["function"]["parameters"]["properties"]["prompt"]["description"]
+    assert "the setting, where each asset is" in video["function"]["parameters"]["properties"]["prompt"]["description"]
+    assert "setting" not in image["function"]["description"]
     assert env.TOOLS[0]["function"]["description"].startswith("Generate a keyframe image")
 
 

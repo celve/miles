@@ -21,8 +21,8 @@ Args:
     --optimizer-cpu-offload: keep Adam's state in host memory (default: the planner's recipe, on for the 27B).
     --video-mode: ``preview`` (default) makes the video from text, the chosen image's prompt plus the motion prompt,
         with Wan2.2-T2V-A14B; ``i2v`` makes it from the image with Wan2.2-I2V-A14B, whose clips LIN-2809 measured
-        moving far less; ``reference`` makes it with Wan2.1-VACE-14B from the planner's asset images (one per subject,
-        isolated, and one of the setting) as reference images, which LIN-2830 measured holding the image at no cost in reward, at twice T2V's GPU time.
+        moving far less; ``reference`` makes it with Wan2.1-VACE-14B from the planner's asset images (one per subject
+        or object, isolated on a plain background) as reference images, which LIN-2830 measured holding the image at no cost in reward, at twice T2V's GPU time.
         Each takes its own lightx2v LoRAs. Reference mode serves VACE through sglang's diffusers backend from a
         directory ``prepare`` builds beside the checkpoint (``keyframe/reference_model.py``).
     --reference-scale: how strongly a reference-mode clip holds its images, VACE's conditioning scale (default 0.5,
@@ -33,7 +33,7 @@ Args:
         9 steps without CFG; Qwen/Qwen-Image-2.1-Turbo gets 8 steps at CFG 1; the video model follows --video-mode).
     --num-rollout, --rollout-batch-size, --n-samples-per-prompt: GRPO steps, requests per step, episodes per request.
     --max-images, --max-turns, --seconds: the episode's budgets and the video's length (images: 4 in reference mode,
-        one asset per subject plus the setting; 3 otherwise).
+        one asset per subject or object; 3 otherwise).
     --max-prompt-words: a longer generator prompt gets an error reply (default 0, no cap: Linyu, 2026-11-10, "more
         detailed prompt might generate better video"); 120 is the survey's cap.
     --reward: the signal terms, ``hpsv3+vqascore`` (default), ``hpsv3+unifiedreward``, ``hpsv3`` or ``pickscore``;
@@ -216,8 +216,7 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
             self.optimizer_cpu_offload = self.recipe.optimizer_cpu_offload
         assert self.video_mode in _VIDEO_RECIPES, f"--video-mode is one of {sorted(_VIDEO_RECIPES)}"
         if self.max_images is None:
-            # Reference mode's assets are one per subject plus the setting, so two subjects and a place need 3 and
-            # three subjects need 4 (LIN-2830).
+            # Reference mode makes one asset per subject or object, and T2V-CompBench requests name up to four (LIN-2830).
             self.max_images = 4 if self.video_mode == "reference" else 3
         if self.video_mode == "reference":
             self.reference_scale = 0.5 if self.reference_scale is None else self.reference_scale

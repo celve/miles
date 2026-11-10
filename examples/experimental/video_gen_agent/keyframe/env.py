@@ -5,9 +5,10 @@ An agent function for ``agentic_tool_call.generate`` under session v2, with two 
 ``generate_video(image_id, prompt, negative_prompt, seed)`` makes one clip and ends the episode with it as the
 submission. In ``preview`` mode the clip is text-to-video from the chosen image's prompt followed by that prompt,
 which says what moves and how the camera moves; in ``i2v`` mode it is image-to-video from the chosen image. In
-``reference`` mode the images are assets, one per subject or object isolated on a plain background plus one for the
-setting, and ``generate_video`` takes ``image_ids``, one or more watched assets: the clip is reference-to-video, showing
-them without starting from any of them, from the planner's prompt alone, which composes them. The planner never
+``reference`` mode the images are assets, one per subject or object, each isolated on a plain background, and
+``generate_video`` takes ``image_ids``, one or more watched assets: the clip is reference-to-video, showing them without
+starting from any of them, from the planner's prompt alone, which places them in a setting it describes. A setting image
+is not asked for: LIN-2830 measured one as a reference making clips flicker and lose subjects. The planner never
 watches the clip.
 
 Like ``examples.experimental.video_gen_agent.env``, it does not score: the clip is copied out by content hash and
@@ -103,8 +104,8 @@ REFERENCE_TOOLS = [
         "function": {
             "name": "generate_image",
             "description": (
-                "Generate one asset image: a single subject or object isolated on a plain background, or the setting "
-                "with nothing in it. Returns the image and its id."
+                "Generate one asset image: a single subject or object, isolated on a plain background. Returns the "
+                "image and its id."
             ),
             "parameters": {
                 "type": "object",
@@ -129,7 +130,10 @@ REFERENCE_TOOLS = [
                     },
                     "prompt": {
                         "type": "string",
-                        "description": "The whole video: where each asset is, what it does, and how the camera moves.",
+                        "description": (
+                            "The whole video: the setting, where each asset is in it, what it does, and how the camera "
+                            "moves."
+                        ),
                     },
                 }
                 | _SHARED_PARAMETERS,
@@ -298,9 +302,9 @@ def _reference_system_prompt(options: KeyframeEnvOptions) -> str:
     return (
         "You turn a user's video request into a video, using an image generator and a video generator through "
         "tools. First call generate_image to make the video's assets, and you see each one: one image for each "
-        "subject or object in the video, alone and isolated on a plain background, and one image of the setting with "
-        "nothing in it. Do not make whole scenes or variants of one scene. Then call generate_video with the ids of "
-        "the assets the video shows and a prompt that composes them: where each one is, what it does, and how the "
+        "subject or object in the video, alone and isolated on a plain background. Do not make images of the setting, "
+        "of whole scenes, or variants of one scene. Then call generate_video with the ids of the assets the video "
+        "shows and a prompt that composes them: the setting, where each asset is in it, what it does, and how the "
         "camera moves. The video generator uses the assets as references, and reads only your prompt as text, so the "
         "prompt names everything the video shows. That clip is your answer, and the episode ends. Images and the "
         f"video are {options.width}x{options.height}; the video is {options.seconds:g} seconds at {options.fps} fps. "
