@@ -274,6 +274,10 @@ def test_in_i2v_mode_the_win_bar_holds_k_to_b0_i2v_and_still_reports_b0():
     assert set(results) == {"B0", "B0-i2v", "B1"}
     assert bar["reward beats B0-i2v and B1"] is False and bar["blind: K in >= 15 of 20 decided vs B0-i2v"] is True
     assert compare.win_bar(results, None)["reward beats B0 and B1"] is True
+    with pytest.raises(ValueError, match="not judged against B0-i2v"):
+        compare.win_bar(results, {"A": {"K": 20, "B0": 0, "tie": 0}}, i2v=True)
+    with pytest.raises(ValueError, match="not judged against B0:"):
+        compare.win_bar(results, {"A": {"K": 20, "B0-i2v": 0, "tie": 0}})
 
 
 def test_the_blind_page_draws_outside_lin2741s_requests_and_keeps_the_key_apart(tmp_path):

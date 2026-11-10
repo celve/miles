@@ -74,6 +74,11 @@ def win_bar(results: dict, picks: dict | None, *, i2v: bool = False) -> dict[str
         result = results.get(other, {}).get(metric)
         return None if result is None else result["wins"] > result["losses"] and result["p"] < 0.05
 
+    if picks is not None and one_shot not in picks["A"]:
+        raise ValueError(
+            f"the blind look's Set A was not judged against {one_shot}: {picks['A']}; rerun blind.py with "
+            f"the same --i2v as compare.py"
+        )
     frame = results.get(one_shot, {}).get("frame_diff") or {}
     # No paired request has both arms' clips, so neither mean exists: the check is pending, not failed.
     frame_check = None if frame.get("ours_mean") is None else frame["ours_mean"] >= frame["theirs_mean"]
