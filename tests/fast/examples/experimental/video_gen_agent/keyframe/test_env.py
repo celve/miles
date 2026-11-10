@@ -41,13 +41,13 @@ def _call(name: str, arguments) -> dict:
     return {"id": f"call_{name}", "type": "function", "function": {"name": name, "arguments": raw}}
 
 
-def _script(monkeypatch, *replies) -> list[list[dict]]:
+def _script(monkeypatch, *replies, tools=env.TOOLS) -> list[list[dict]]:
     """Answer each chat request with the next reply: a list of tool calls, plain text, or ``"length"``."""
     sent: list[list[dict]] = []
 
     async def fake_post(url, payload):
         assert url == "http://session/v1/chat/completions"
-        assert payload["tools"] == env.TOOLS and payload["temperature"] == 0.5
+        assert payload["tools"] == tools and payload["temperature"] == 0.5
         sent.append(json.loads(json.dumps(payload["messages"])))
         reply = replies[len(sent) - 1]
         if reply == "length":

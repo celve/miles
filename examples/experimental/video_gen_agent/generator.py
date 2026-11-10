@@ -28,6 +28,8 @@ class ClipRequest:
     fps: int
     # A frame to continue from, for image-to-video; None generates from text alone.
     image_path: str | None = None
+    # Images the clip shows as subjects and look rather than starts from, for reference-to-video.
+    reference_paths: tuple[str, ...] = ()
 
     @property
     def num_frames(self) -> int:

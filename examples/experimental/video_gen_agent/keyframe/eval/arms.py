@@ -6,7 +6,7 @@
            an i2v-mode agent is fair against, since B0's text-to-video does not pay image-to-video's stillness
   B1       Phase 0's trained planner prompt (LIN-2737's ``answer99``) → the video model
   K0, K    the keyframe agent at its step-0 and final eval: the video request its episode submitted (prompt, negative
-           prompt, and in i2v mode the image), read from the run's eval dumps and generated again
+           prompt, and in i2v or reference mode the images), read from the run's eval dumps and generated again
   K-blind  the final agent's first image prompt → the video model, with no image watched; with ``--i2v``, the video is
            image-to-video from the first image the agent made, so K-blind differs from K only in watching
 
@@ -110,6 +110,7 @@ async def generate(rows: list[dict], generator, image_generator=None, concurrenc
                     negative_prompt=row.get("negative_prompt") or "",
                     seed=row["seed"],
                     image_path=row.get("image_path"),
+                    reference_paths=tuple(row.get("reference_paths") or ()),
                     **SHAPE,
                 )
             )
@@ -126,6 +127,8 @@ def from_dump(dump: Path, arm: str, requests: list[str]) -> list[dict]:
     for request in requests:
         record = recorded.get(request) or {}
         video = record.get("video") or {}
+        # Reference mode's images, which the replay needs as much as its prompt.
+        references = {"reference_paths": video["reference_paths"]} if video.get("reference_paths") else {}
         rows.append(
             {
                 "arm": arm,
@@ -137,6 +140,7 @@ def from_dump(dump: Path, arm: str, requests: list[str]) -> list[dict]:
                 "episode_path": (record.get("submitted") or {}).get("path"),
                 "episode_seed": video.get("seed"),
             }
+            | references
         )
     return rows
 

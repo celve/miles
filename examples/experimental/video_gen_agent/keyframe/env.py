@@ -4,8 +4,10 @@ An agent function for ``agentic_tool_call.generate`` under session v2, with two 
 ``generate_image(prompt, negative_prompt, seed)`` returns the image as an ``image_url`` part beside a receipt, and
 ``generate_video(image_id, prompt, negative_prompt, seed)`` makes one clip and ends the episode with it as the
 submission. In ``preview`` mode the clip is text-to-video from the chosen image's prompt followed by that prompt,
-which says what moves and how the camera moves; in ``i2v`` mode it is image-to-video from the chosen image.
-The planner never watches the clip.
+which says what moves and how the camera moves; in ``i2v`` mode it is image-to-video from the chosen image. In
+``reference`` mode ``generate_video`` takes ``image_ids``, one or more watched images, and the clip is
+reference-to-video: it shows their subjects and look without starting from any of them, from their prompts followed by
+the planner's. The planner never watches the clip.
 
 Like ``examples.experimental.video_gen_agent.env``, it does not score: the clip is copied out by content hash and
 recorded under ``metadata["video_gen"]["submitted"]``, which ``reward.reward_func`` scores. A turn cut at the token
@@ -20,17 +22,18 @@ Run-wide options come from ``AGENT_VIDEO_GEN_*`` env vars, which worker and sand
   AGENT_VIDEO_GEN_MAX_IMAGES       images per episode, at most 3 (default 3)
   AGENT_VIDEO_GEN_MAX_TURNS        policy turns per episode (default 6)
   AGENT_VIDEO_GEN_MAX_PROMPT_WORDS a longer generator prompt gets an error reply; 0, the default, sets no cap. In
-                                   preview mode the video's prompt is the image's and the planner's together
+                                   preview and reference modes the video's prompt is the images' and the planner's
+                                   together
   AGENT_VIDEO_GEN_SECONDS          the video's length (default 2)
   AGENT_VIDEO_GEN_WIDTH / _HEIGHT / _FPS  every image's and the video's shape (default 832x480 at 16 fps)
   AGENT_VIDEO_GEN_TIMEOUT_S        a generation slower than this is an outage (default 600)
-  AGENT_VIDEO_GEN_VIDEO_MODE       ``preview`` or ``i2v`` (default preview)
+  AGENT_VIDEO_GEN_VIDEO_MODE       ``preview``, ``i2v`` or ``reference`` (default preview)
   AGENT_VIDEO_GEN_IMAGE_MODEL / _VIDEO_MODEL  the generators' names, recorded on each episode (default: unrecorded)
 """
 
 import asyncio
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
 from examples.experimental.video_gen_agent.env import (
@@ -53,7 +56,7 @@ from miles.rollout.agentic.agent_function import InfraAbort
 from miles.utils.function_registry import load_function
 
 _IMAGES_LIMIT = 3
-_VIDEO_MODES = ("preview", "i2v")
+_VIDEO_MODES = ("preview", "i2v", "reference")
 _VIDEO_ID = "video_1"
 
 _SHARED_PARAMETERS = {
@@ -88,6 +91,35 @@ TOOLS = [
                 }
                 | _SHARED_PARAMETERS,
                 "required": ["image_id", "prompt"],
+            },
+        },
+    },
+]
+
+# Reference mode's generate_video takes the ids of several images in place of one.
+REFERENCE_TOOLS = [
+    TOOLS[0],
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_video",
+            "description": (
+                "Generate the final video showing what one or more of your images show. Submits it and ends the "
+                "episode."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "image_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "The ids generate_image returned for the images whose subjects and look the "
+                        "video shows.",
+                    },
+                    "prompt": {"type": "string", "description": "What moves in the video and how the camera moves."},
+                }
+                | _SHARED_PARAMETERS,
+                "required": ["image_ids", "prompt"],
             },
         },
     },
@@ -195,7 +227,8 @@ async def run_agent(base_url: str, prompt: list[dict], request_kwargs: dict, met
 
 async def _play(episode: _Episode, messages: list[dict], base_url: str, request_kwargs: dict) -> None:
     while episode.submitted is None and episode.turns < episode.options.max_turns:
-        payload = {**request_kwargs, "model": "default", "messages": messages, "tools": TOOLS}
+        tools = REFERENCE_TOOLS if episode.options.video_mode == "reference" else TOOLS
+        payload = {**request_kwargs, "model": "default", "messages": messages, "tools": tools}
         for image in episode.images.values():
             image.shown = True
         started = time.monotonic()
@@ -224,19 +257,28 @@ async def _play(episode: _Episode, messages: list[dict], base_url: str, request_
 
 
 def _system_prompt(options: KeyframeEnvOptions) -> str:
-    if options.video_mode == "i2v":
+    if options.video_mode == "reference":
         video = (
-            "it makes one clip that starts from that image, and the prompt says what moves and how the camera moves"
+            "generate_video with the ids of one or more images whose subjects and look the video should show, and a "
+            "prompt: it makes one clip from those images as references, and from their prompts followed by yours, so "
+            "the clip shows what they show without starting from any of them; your prompt says what moves and how "
+            "the camera moves"
+        )
+    elif options.video_mode == "i2v":
+        video = (
+            "generate_video with the id of the image the video should come from and a prompt: it makes one clip "
+            "that starts from that image, and the prompt says what moves and how the camera moves"
         )
     else:
         video = (
-            "it makes one clip from text, the chosen image's prompt followed by yours, so the clip looks like the "
-            "image without starting from it; your prompt says what moves and how the camera moves"
+            "generate_video with the id of the image the video should come from and a prompt: it makes one clip from "
+            "text, the chosen image's prompt followed by yours, so the clip looks like the image without starting "
+            "from it; your prompt says what moves and how the camera moves"
         )
     return (
         "You turn a user's video request into a video, using an image generator and a video generator through "
-        "tools. Call generate_image to make keyframe images; you see each one. Then call generate_video with the "
-        f"id of the image the video should come from and a prompt: {video}. That clip is your answer, and the "
+        f"tools. Call generate_image to make keyframe images; you see each one. Then call {video}. That clip is your "
+        "answer, and the "
         f"episode ends. Images and the video are {options.width}x{options.height}; the video is "
         f"{options.seconds:g} seconds at {options.fps} fps. You have {options.max_images} images, 1 video and "
         f"{options.max_turns} turns. {_prompt_cap(options)}An episode that ends without a video fails."
@@ -248,10 +290,8 @@ def _prompt_cap(options: KeyframeEnvOptions) -> str:
         return ""
     if options.video_mode == "i2v":
         return f"Each prompt is at most {options.max_prompt_words} words. "
-    return (
-        f"Each prompt is at most {options.max_prompt_words} words, and the chosen image's prompt and your video "
-        "prompt together too. "
-    )
+    chosen = "the chosen images' prompts" if options.video_mode == "reference" else "the chosen image's prompt"
+    return f"Each prompt is at most {options.max_prompt_words} words, and {chosen} and your video prompt together too. "
 
 
 async def _call_tool(episode: _Episode, name: str, raw_arguments: str | dict | None) -> str | list[dict]:
@@ -285,21 +325,16 @@ async def _generate_image(episode: _Episode, arguments: dict) -> str | list[dict
 
 
 async def _generate_video(episode: _Episode, arguments: dict) -> str:
-    image_id = arguments.get("image_id")
-    image = episode.images.get(image_id) if isinstance(image_id, str) else None
-    if image is None:
-        known = ", ".join(episode.images) or "none yet; call generate_image first"
-        return f"Error: unknown image_id {image_id!r}; generated images: {known}. {episode.budget()}"
-    if not image.shown:
-        return (
-            f"Error: you have not seen {image.image_id} yet; look at it, then call generate_video. {episode.budget()}"
-        )
+    options = episode.options
+    reference = options.video_mode == "reference"
+    images, error = _chosen_images(episode, arguments, several=reference)
+    if error:
+        return f"Error: {error}. {episode.budget()}"
     prompted, error = _prompted(
         arguments, tool="generate_video", default_seed=0, max_words=episode.options.max_prompt_words
     )
     if error:
         return f"Error: {error}. {episode.budget()}"
-    options = episode.options
     request = ClipRequest(
         **prompted,
         seconds=options.seconds,
@@ -308,26 +343,66 @@ async def _generate_video(episode: _Episode, arguments: dict) -> str:
         fps=options.fps,
     )
     if options.video_mode == "i2v":
-        request = ClipRequest(**(asdict(request) | {"image_path": image.path}))
+        request = replace(request, image_path=images[0].path)
     else:
-        request = ClipRequest(**(asdict(request) | {"prompt": f"{image.request.prompt} {request.prompt}"}))
-        # The cap bounds what the generator reads, here the chosen image's prompt and this one together.
+        image_prompts = " ".join(image.request.prompt for image in images)
+        request = replace(request, prompt=f"{image_prompts} {request.prompt}")
+        if reference:
+            request = replace(request, reference_paths=tuple(image.path for image in images))
+        # The cap bounds what the generator reads, here the chosen images' prompts and this one together.
         if options.max_prompt_words and (words := len(request.prompt.split())) > options.max_prompt_words:
             return (
-                f"Error: {image.image_id}'s prompt and the generate_video prompt have {words} words together; the "
+                f"Error: {_prompt_owners(images)} and the generate_video prompt have {words} words together; the "
                 f"limit is {options.max_prompt_words}. {episode.budget()}"
             )
     clip = await _generated(episode, episode.video_generator.generate(request))
-    episode.video = {"clip_id": _VIDEO_ID, "path": clip.path, "image_id": image.image_id, **asdict(request)}
+    if reference:
+        chosen = {"image_ids": [image.image_id for image in images]}
+        chosen_prompts = {"image_prompts": [image.request.prompt for image in images]}
+    else:
+        chosen = {"image_id": images[0].image_id}
+        chosen_prompts = {"image_prompt": images[0].request.prompt}
+    episode.video = {"clip_id": _VIDEO_ID, "path": clip.path, **chosen, **asdict(request)}
     episode.submitted = {
         "clip_id": _VIDEO_ID,
         "path": _keep(clip.path, options.submitted_dir),
         "prompt": request.prompt,
         "prompt_words": len(request.prompt.split()),
-        "image_id": image.image_id,
-        "image_prompt": image.request.prompt,
+        **chosen,
+        **chosen_prompts,
     }
     return f"Submitted {_VIDEO_ID}."
+
+
+def _chosen_images(
+    episode: _Episode, arguments: dict, *, several: bool
+) -> tuple[list[_GeneratedImage] | None, str | None]:
+    """The watched images a generate_video call names, ``image_ids`` when it takes several, or what is wrong."""
+    if several:
+        image_ids = arguments.get("image_ids")
+        if not isinstance(image_ids, list) or not image_ids or not all(isinstance(i, str) for i in image_ids):
+            return None, "image_ids must be a non-empty list of the ids generate_image returned"
+        if len(set(image_ids)) != len(image_ids):
+            return None, f"image_ids names an image twice: {image_ids}"
+    else:
+        image_ids = [arguments.get("image_id")]
+    images = []
+    for image_id in image_ids:
+        image = episode.images.get(image_id) if isinstance(image_id, str) else None
+        if image is None:
+            known = ", ".join(episode.images) or "none yet; call generate_image first"
+            name = "image_ids entry" if several else "image_id"
+            return None, f"unknown {name} {image_id!r}; generated images: {known}"
+        if not image.shown:
+            return None, f"you have not seen {image.image_id} yet; look at it, then call generate_video"
+        images.append(image)
+    return images, None
+
+
+def _prompt_owners(images: list[_GeneratedImage]) -> str:
+    if len(images) == 1:
+        return f"{images[0].image_id}'s prompt"
+    return f"the prompts of {', '.join(image.image_id for image in images)}"
 
 
 async def _generated(episode: _Episode, generation):
