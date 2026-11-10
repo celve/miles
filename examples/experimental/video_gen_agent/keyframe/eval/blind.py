@@ -22,6 +22,13 @@ from examples.experimental.video_gen_agent.keyframe.eval.compare import one_shot
 
 _PAGE = Path(__file__).with_name("blind_page.html")
 SEED = 2821
+_MODELS = {
+    False: "by the same frozen Wan2.2-T2V-A14B with the lightx2v LoRAs.",
+    True: (
+        "by frozen Wan2.2-A14B with the lightx2v LoRAs: in set A both clips are image-to-video from a generated "
+        "image; in set B one is image-to-video and the other text-to-video."
+    ),
+}
 PAIRS = 20
 
 
@@ -56,7 +63,8 @@ def make(
             pairs.append({"pair": pair, "set": set_name, "baseline": baseline, "request": request})
             key[pair] = "left" if k_left else "right"
     (out / "pairs.json").write_text(json.dumps(pairs, indent=1))
-    (out / "index.html").write_text(_PAGE.read_text().replace("__PAIRS__", json.dumps(pairs)))
+    page = _PAGE.read_text().replace("__MODELS__", _MODELS[i2v]).replace("__PAIRS__", json.dumps(pairs))
+    (out / "index.html").write_text(page)
     (out.parent / f"{out.name}_key.json").write_text(json.dumps(key, indent=1))
     return pairs, key
 

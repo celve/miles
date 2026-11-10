@@ -7,8 +7,8 @@
   B1       Phase 0's trained planner prompt (LIN-2737's ``answer99``) → the video model
   K0, K    the keyframe agent at its step-0 and final eval: the video request its episode submitted (prompt, negative
            prompt, and in i2v mode the image), read from the run's eval dumps and generated again
-  K-blind  the final agent's first image prompt → the video model, with no image watched; with ``--i2v``, that prompt
-           is made into an image and the video is image-to-video from it, so K-blind differs from K only in watching
+  K-blind  the final agent's first image prompt → the video model, with no image watched; with ``--i2v``, the video is
+           image-to-video from the first image the agent made, so K-blind differs from K only in watching
 
 Every arm takes Phase 0's per-request seed and the run's clip shape (832x480, 2 s at 16 fps: 33 frames), so arms
 differ only in what the generator is asked; K0 and K keep the clip and seed their episode made as ``episode_path`` and
@@ -75,7 +75,7 @@ def arm_prompts(
             for arm in GENERATED_ARMS
         ]
         if i2v and prompts["K-blind"] is not None:
-            rows[-1]["image_prompt"] = prompts["K-blind"]
+            rows[-1]["image_path"] = images[0]["path"]
         if i2v:
             rows.append(
                 {"arm": "B0-i2v", "request": request, "prompt": request, "image_prompt": request}

@@ -64,20 +64,24 @@ def test_the_i2v_one_shot_arm_conditions_the_video_on_an_image_of_the_raw_reques
         asyncio.run(arms.generate([row], FakeClipGenerator()))
 
 
-def test_in_i2v_mode_k_blind_makes_its_first_image_and_animates_it():
-    final = {"a fox": {"images": [{"prompt": "fox, snow"}, {"prompt": "fox, close"}]}}
+def test_in_i2v_mode_k_blind_animates_the_agents_recorded_first_image(tmp_path, monkeypatch):
+    final = {"a fox": {"images": [{"prompt": "fox, snow", "path": "/img/first.png"}, {"prompt": "fox, close"}]}}
+    rows = arms.arm_prompts(["a fox", "a tv"], {}, final, i2v=True)
+    by = {(row["arm"], row["request"]): row for row in rows}
+    monkeypatch.setenv("AGENT_VIDEO_GEN_FAKE_DIR", str(tmp_path / "made"))
 
-    by = {
-        row["arm"]: row
-        for row in arms.arm_prompts(["a fox", "a tv"], {}, final, i2v=True)
-        if row["request"] == "a fox"
-    }
-    tv = [row for row in arms.arm_prompts(["a tv"], {}, {}, i2v=True) if row["arm"] == "K-blind"]
+    (made,) = asyncio.run(arms.generate([by["K-blind", "a fox"]], FakeClipGenerator()))
 
-    assert (by["K-blind"]["prompt"], by["K-blind"]["image_prompt"]) == ("fox, snow", "fox, snow")
-    assert "image_prompt" not in by["B0"] and "image_prompt" not in by["B1"]
-    assert tv[0]["prompt"] is None and "image_prompt" not in tv[0]
-    assert "image_prompt" not in next(r for r in arms.arm_prompts(["a fox"], {}, final) if r["arm"] == "K-blind")
+    asked = json.loads(open(made["path"]).read())
+    assert (asked["image_path"], asked["prompt"], asked["seed"]) == (
+        "/img/first.png",
+        "fox, snow",
+        request_seed("a fox"),
+    )
+    assert "image_path" not in by["B0", "a fox"] and "image_path" not in by["B1", "a fox"]
+    assert by["K-blind", "a tv"]["prompt"] is None and "image_path" not in by["K-blind", "a tv"]
+    t2v = next(r for r in arms.arm_prompts(["a fox"], {}, final) if r["arm"] == "K-blind")
+    assert "image_path" not in t2v
 
 
 def test_generate_asks_the_env_generator_for_the_runs_clip_shape(tmp_path, monkeypatch):
@@ -288,6 +292,7 @@ def test_the_blind_page_draws_outside_lin2741s_requests_and_keeps_the_key_apart(
     assert json.loads((tmp_path / "blind_key.json").read_text()) == key
     page = (tmp_path / "blind" / "index.html").read_text()
     assert f"const PAIRS = {json.dumps(pairs)};" in page and "__PAIRS__" not in page
+    assert "by the same frozen Wan2.2-T2V-A14B" in page
     assert "_key.json" not in page and '"left"' not in json.dumps(pairs)
     assert 'src: p.pair + "_" + side + ".mp4"' in page and "picks.json" in page
     # The export button is styled as a tab but must not switch sets, which would empty the list.
@@ -309,6 +314,8 @@ def test_in_i2v_mode_blind_set_a_is_k_against_b0_i2v(tmp_path):
 
     pairs, key = blind.make(clips, set(), tmp_path / "blind", i2v=True)
 
+    page = (tmp_path / "blind" / "index.html").read_text()
+    assert "in set A both clips are image-to-video" in page and "__MODELS__" not in page
     a_pair = next(pair for pair in pairs if pair["set"] == "A")
     other = "right" if key[a_pair["pair"]] == "left" else "left"
     assert (tmp_path / "blind" / f"{a_pair['pair']}_{other}.mp4").read_text() == "B0-i2v"
