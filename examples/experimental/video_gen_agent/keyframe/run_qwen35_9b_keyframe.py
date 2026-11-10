@@ -16,7 +16,7 @@ the planner as an ``image_url`` part in token space.
 Args:
     --planner: ``qwen3.5-9b`` (default) or ``qwen3.8-27b``, the planner's checkpoint, TITO family and layouts.
     --num-gpus-per-node: picks the planner's layout of trainer, planner, image, video and eval GPUs (9B: 4 is
-        1/1/1/1/0, 8 is 1/1/2/3/1; 27B: 8 is 4/1/1/2/0, its trainer at TP4); --train-gpus, --policy-gpus, --image-gpus,
+        1/1/1/1/0, 8 is 1/1/2/3/1, or 1/1/1/4/1 in reference mode; 27B: 8 is 4/1/1/2/0, its trainer at TP4); --train-gpus, --policy-gpus, --image-gpus,
         --video-gpus, --eval-gpus override it. The trainer's GPUs are its tensor-parallel group.
     --optimizer-cpu-offload: keep Adam's state in host memory (default: the planner's recipe, on for the 27B).
     --video-mode: ``preview`` (default) makes the video from text, the chosen image's prompt plus the motion prompt,
@@ -44,7 +44,7 @@ Example:
     python examples/experimental/video_gen_agent/keyframe/run_qwen35_9b_keyframe.py --planner qwen3.8-27b
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 import typer
 import yaml
@@ -71,6 +71,8 @@ class _PlannerRecipe:
     # Trainer, planner, image, video and eval GPUs, by GPUs per node.
     layouts: dict[int, tuple[int, int, int, int, int]]
     optimizer_cpu_offload: bool = False
+    # Layouts that replace those in reference mode, whose video model is the bottleneck (LIN-2830).
+    reference_layouts: dict[int, tuple[int, int, int, int, int]] = field(default_factory=dict)
 
 
 _PLANNERS = {
@@ -79,6 +81,7 @@ _PLANNERS = {
         megatron_model_type="qwen3.5-9B",
         tito_model="qwen35",
         layouts={4: (1, 1, 1, 1, 0), 8: (1, 1, 2, 3, 1)},
+        reference_layouts={8: (1, 1, 1, 4, 1)},
     ),
     # LIN-2699 trained Qwen3.8-27B at TP4; with four trainer GPUs, eval shares the planner's engine.
     "qwen3.8-27b": _PlannerRecipe(
@@ -208,7 +211,8 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
             self.image_guidance_scale = recipe[1] if self.image_guidance_scale is None else self.image_guidance_scale
         split = (self.train_gpus, self.policy_gpus, self.image_gpus, self.video_gpus, self.eval_gpus)
         if None in split:
-            layout = self.recipe.layouts.get(self.num_gpus_per_node)
+            layouts = self.recipe.layouts | (self.recipe.reference_layouts if self.video_mode == "reference" else {})
+            layout = layouts.get(self.num_gpus_per_node)
             assert (
                 layout is not None
             ), f"{self.planner} has no layout for {self.num_gpus_per_node} GPUs, so set all five GPU counts"

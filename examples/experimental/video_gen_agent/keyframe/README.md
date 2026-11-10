@@ -10,7 +10,7 @@ The episode is [the keyframe env](env.py) under session server v2, reached throu
 
 ## Running it
 
-[`run_qwen35_9b_keyframe.py`](run_qwen35_9b_keyframe.py) runs on one node, not colocated, every engine on one GPU:
+[`run_qwen35_9b_keyframe.py`](run_qwen35_9b_keyframe.py) runs on one node, not colocated, every engine on one GPU; in `reference` mode the 9B's 8-GPU layout moves an image GPU to video (1/1/1/4/1), since VACE is the bottleneck:
 
 | Planner | GPUs | Trainer | Planner engine + judge | Image engines | Video engines | Eval engine |
 |---|---|---|---|---|---|---|

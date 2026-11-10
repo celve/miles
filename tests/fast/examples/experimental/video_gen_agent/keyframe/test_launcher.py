@@ -136,9 +136,9 @@ def test_i2v_mode_serves_image_to_video_with_its_own_loras(monkeypatch, tmp_path
     )
 
 
-@pytest.mark.parametrize("num_gpus, video_gpus", [(4, 1), (8, 3)])
+@pytest.mark.parametrize("num_gpus, image_gpus, video_gpus", [(4, 1, 1), (8, 1, 4)])
 def test_reference_mode_serves_vace_through_the_diffusers_backend_from_the_built_directory(
-    monkeypatch, tmp_path, num_gpus, video_gpus
+    monkeypatch, tmp_path, num_gpus, image_gpus, video_gpus
 ):
     config = _config(monkeypatch, tmp_path, num_gpus_per_node=num_gpus, video_mode="reference")
 
@@ -146,7 +146,8 @@ def test_reference_mode_serves_vace_through_the_diffusers_backend_from_the_built
     (group,) = video.server_groups
     assert video.model_path == f"{tmp_path}/Wan2.1-VACE-14B-diffusers-reference" and not video.update_weights
     assert group.overrides["backend"] == "diffusers" and not group.loras and group.engine_kind == "diffusion"
-    assert config.sglang_scaling.group(model_name="video", group_index=0).num_gpus == video_gpus
+    for name, gpus in {"image": image_gpus, "video": video_gpus}.items():
+        assert config.sglang_scaling.group(model_name=name, group_index=0).num_gpus == gpus
     env = _agent_env(ScriptArgs(run_id="test", video_mode="reference"))
     assert (env["AGENT_VIDEO_GEN_VIDEO_MODE"], env["AGENT_VIDEO_GEN_REFERENCE_SCALE"]) == ("reference", "0.5")
     assert env["AGENT_VIDEO_GEN_VIDEO_MODEL"] == "Wan-AI/Wan2.1-VACE-14B-diffusers"
