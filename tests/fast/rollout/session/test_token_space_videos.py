@@ -137,20 +137,20 @@ class ToolCallingEngine(TokenSpaceEngine):
         return result
 
 
-def _make_core(version: str, model_path, tokenizer, engine, media_dir):
+def _make_core(version: str, model_path, tokenizer, engine, media_dir, *, tito_model: str = "qwen35"):
     config = make_session_server_config(
         use_session_server=version,
         hf_checkpoint=model_path,
-        tito_model="qwen35",
+        tito_model=tito_model,
         instance_id=uuid.uuid4().hex,
         session_sample_picker_path="miles.rollout.session.v2.picker_hub.drop_rolled_back_leaves",
         session_sample_postprocessor_path="miles.rollout.session.v2.postprocessor_hub.default_postprocess",
         multimodal_token_space_processing=True,
         run_media_dir=str(media_dir),
     )
-    tito = get_tito_tokenizer(tokenizer, tokenizer_type="qwen35")
+    tito = get_tito_tokenizer(tokenizer, tokenizer_type=tito_model)
     counter = build_image_token_counter(config, tokenizer)
-    assert counter is not None, "qwen35 turns run the counted check"
+    assert counter is not None, f"{tito_model} turns run the counted check"
     if version == "v2":
         registry = SessionRegistryV2(tokenizer, tito_tokenizer=tito)
         core = SessionCoreV2(engine, registry, config, config.instance_id, image_token_counter=counter)
