@@ -312,3 +312,57 @@ def test_execute_submits_the_run_with_the_keyframe_env(monkeypatch, tmp_path):
 def test_a_bad_layout_or_mode_is_refused(script_args, message):
     with pytest.raises(AssertionError, match=message):
         ScriptArgs(run_id="test", **script_args)
+
+
+def test_compbench_requests_are_fetched_at_the_pinned_commit_and_split_beside_vbench(monkeypatch, tmp_path):
+    commands = _recorded(monkeypatch, tmp_path, "prepare", requests="t2v-compbench")
+
+    data = tmp_path / "data"
+    clone = next(c for c in commands if launcher.COMPBENCH in c)
+    assert clone.startswith(f"[ -d {data}/T2V-CompBench ] ||")
+    assert any(
+        f"git -C {data}/T2V-CompBench checkout -q {launcher.COMPBENCH_COMMIT} -- prompts meta_data" in c
+        for c in commands
+    )
+    (build,) = [c for c in commands if "make_compbench_requests" in c]
+    assert (
+        f"make_compbench_requests {data}/T2V-CompBench {data}/video_gen_requests_t2v_compbench --heldout 200" in build
+    )
+    (vbench,) = [c for c in commands if "make_requests " in c]
+    assert f"all_dimension.txt {data}/video_gen_requests " in vbench
+    assert not any("make_compbench_requests" in c for c in _recorded(monkeypatch, tmp_path / "vb", "prepare"))
+
+
+def test_compbench_trains_on_its_requests_and_evals_both_held_out_sets(monkeypatch, tmp_path):
+    config = _config(monkeypatch, tmp_path, requests="t2v-compbench", data_dir="/d")
+
+    assert config.prompt_data == "/d/video_gen_requests_t2v_compbench/train.jsonl"
+    assert [(d.name, d.path) for d in config.eval_datasets] == [
+        ("heldout", "/d/video_gen_requests/heldout.jsonl"),
+        ("compbench_heldout", "/d/video_gen_requests_t2v_compbench/heldout.jsonl"),
+    ]
+    vbench = _config(monkeypatch, tmp_path, data_dir="/d")
+    assert vbench.prompt_data == "/d/video_gen_requests/train.jsonl"
+    assert [(d.name, d.path) for d in vbench.eval_datasets] == [("heldout", "/d/video_gen_requests/heldout.jsonl")]
+
+
+@pytest.mark.parametrize(
+    "script_args, timeout",
+    [
+        # A step's 128 episodes plus 200 + 95 held-out ones on four VACE engines: 106 clips at 20 s.
+        (dict(num_gpus_per_node=8), 2120.0),
+        (dict(num_gpus_per_node=8, compbench_heldout=0, heldout_percent=0), 640.0),
+    ],
+)
+def test_the_reference_timeout_counts_both_held_out_sets(monkeypatch, script_args, timeout):
+    monkeypatch.delenv("AGENT_VIDEO_GEN_TIMEOUT_S", raising=False)
+    env = _agent_env(ScriptArgs(run_id="test", video_mode="reference", requests="t2v-compbench", **script_args))
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+
+    assert KeyframeEnvOptions.from_env().timeout_s == timeout
+
+
+def test_an_unknown_request_set_is_refused():
+    with pytest.raises(AssertionError, match="--requests is vbench or t2v-compbench"):
+        ScriptArgs(run_id="test", requests="vidprom")

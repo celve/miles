@@ -37,6 +37,10 @@ Args:
         detailed prompt might generate better video"); 120 is the survey's cap.
     --reward: the signal terms, ``hpsv3+vqascore`` (default), ``hpsv3+unifiedreward``, ``hpsv3`` or ``pickscore``;
         --adherence-gate adds the judge's prompt-adherence gate, off by default.
+    --requests: the training requests, ``vbench`` (default; VBench's prompts, 10% held out by hash) or
+        ``t2v-compbench`` (T2V-CompBench's 1,400 compositional prompts, --compbench-heldout of them held out across its
+        seven categories, LIN-2834). With ``t2v-compbench`` eval runs both held-out sets: ``compbench_heldout``, logged
+        per category too, and VBench's as ``heldout``, so ``eval/heldout`` stays comparable with VBench runs.
     --model-dir, --data-dir: where models and the requests live; checkpoints, images and clips go under --output-dir.
 
 Example:
@@ -62,6 +66,11 @@ LIGHTX2V_WAN21 = "lightx2v/Wan2.1-Distill-Loras"
 FTFY = "ftfy==6.3.1"
 # Twice the GPU-seconds a served VACE-14B clip took at 832x480, 33 frames, 4 steps on H200 (LIN-2830).
 _REFERENCE_SECONDS_PER_CLIP = 20.0
+# T2V-CompBench's repository has no licence: prepare fetches its prompts at this commit and nothing redistributes them.
+COMPBENCH = "https://github.com/KaiyueSun98/T2V-CompBench.git"
+COMPBENCH_COMMIT = "dd5eff7b93af0550b9efa2bdabbb21b3b017ceda"
+# Lines in VBench's prompts/all_dimension.txt, which bound its held-out share in the reference-mode timeout.
+_VBENCH_REQUESTS = 946
 HPSV3 = "MizzenAI/HPSv3"
 HPSV3_BASE = "Qwen/Qwen2-VL-7B-Instruct"
 UNIFIED_REWARD = "CodeGoat24/UnifiedReward-2.0-qwen3vl-8b"
@@ -191,6 +200,8 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     adherence_gate: bool = False
     eval_interval: int = 10
     heldout_percent: int = 10
+    requests: str = "vbench"
+    compbench_heldout: int = 200
     feature_cache: bool = True
     model_dir: str = "/root/models"
     data_dir: str = "/root/datasets"
@@ -210,6 +221,7 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
             assert self.reference_scale is None, "--reference-scale applies to --video-mode reference only"
         assert self.generation_timeout is None or self.generation_timeout > 0, "--generation-timeout must be positive"
         assert self.reward in _REWARDS, f"--reward is one of {sorted(_REWARDS)}"
+        assert self.requests in ("vbench", "t2v-compbench"), "--requests is vbench or t2v-compbench"
         if self.image_steps is None or self.image_guidance_scale is None:
             recipe = _IMAGE_RECIPES.get(self.image_model)
             assert (
@@ -252,6 +264,15 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
 
     @property
     def requests_dir(self) -> str:
+        """Where the training requests and their held-out set live."""
+        return (
+            self.vbench_requests_dir
+            if self.requests == "vbench"
+            else f"{self.data_dir}/video_gen_requests_t2v_compbench"
+        )
+
+    @property
+    def vbench_requests_dir(self) -> str:
         return f"{self.data_dir}/video_gen_requests"
 
     @property
@@ -295,9 +316,19 @@ def prepare(args: ScriptArgs):
     U.exec_command_cpu(f"[ -d {args.data_dir}/VBench ] || git clone --depth 1 {VBENCH} {args.data_dir}/VBench")
     U.exec_command_cpu(
         f"cd {command_utils.repo_base_dir} && python -m {AGENT}.make_requests "
-        f"{args.data_dir}/VBench/prompts/all_dimension.txt {args.requests_dir} "
+        f"{args.data_dir}/VBench/prompts/all_dimension.txt {args.vbench_requests_dir} "
         f"--heldout-percent {args.heldout_percent}"
     )
+    if args.requests == "t2v-compbench":
+        compbench = f"{args.data_dir}/T2V-CompBench"
+        U.exec_command_cpu(
+            f"[ -d {compbench} ] || git clone -q --filter=blob:none --no-checkout {COMPBENCH} {compbench}"
+        )
+        U.exec_command_cpu(f"git -C {compbench} checkout -q {COMPBENCH_COMMIT} -- prompts meta_data")
+        U.exec_command_cpu(
+            f"cd {command_utils.repo_base_dir} && python -m {AGENT}.make_compbench_requests {compbench} "
+            f"{args.requests_dir} --heldout {args.compbench_heldout}"
+        )
 
 
 def execute(args: ScriptArgs):
@@ -313,10 +344,16 @@ def execute(args: ScriptArgs):
 
 def _generation_timeout(args: ScriptArgs) -> float | None:
     """The flag, or in reference mode a bound on the wait behind a full queue: VACE renders one clip at a time, so a
-    step's episodes plus as many eval episodes, spread over the video engines, at twice LIN-2830's 9.7 s a clip."""
+    step's episodes plus an eval's, spread over the video engines, at twice LIN-2830's 9.7 s a clip."""
     if args.generation_timeout is not None or args.video_mode != "reference":
         return args.generation_timeout
-    queued = math.ceil(2 * args.rollout_batch_size * args.n_samples_per_prompt / args.video_gpus)
+    episodes = args.rollout_batch_size * args.n_samples_per_prompt
+    if args.requests == "t2v-compbench":
+        # Eval runs both held-out sets, one episode a request; VBench's hash split holds about its share out.
+        episodes += args.compbench_heldout + math.ceil(_VBENCH_REQUESTS * args.heldout_percent / 100)
+    else:
+        episodes *= 2
+    queued = math.ceil(episodes / args.video_gpus)
     return max(600.0, queued * _REFERENCE_SECONDS_PER_CLIP)
 
 
@@ -583,7 +620,12 @@ def _eval_config(args: ScriptArgs) -> dict:
     return {
         "eval": {
             "defaults": {"n_samples_per_eval_prompt": 1, "top_k": 1, "max_response_len": 2048},
-            "datasets": [{"name": "heldout", "path": f"{args.requests_dir}/heldout.jsonl"}],
+            "datasets": [{"name": "heldout", "path": f"{args.vbench_requests_dir}/heldout.jsonl"}]
+            + (
+                [{"name": "compbench_heldout", "path": f"{args.requests_dir}/heldout.jsonl"}]
+                if args.requests == "t2v-compbench"
+                else []
+            ),
         }
     }
 

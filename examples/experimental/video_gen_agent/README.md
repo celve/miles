@@ -32,6 +32,8 @@ export AGENT_VIDEO_GEN_SUBMITTED_DIR=/root/shared_data/video_gen/submitted
 
 `make_requests.py` reads one request per line, such as VBench's `prompts/all_dimension.txt`, and splits them into `train.jsonl` and `heldout.jsonl` by a hash of each request, so the split is the same in every run.
 
+`make_compbench_requests.py` does the same for [T2V-CompBench](https://github.com/KaiyueSun98/T2V-CompBench)'s 1,400 compositional prompts, holding out 200 spread over its seven categories, with each request's category and named subjects in its `metadata`. T2V-CompBench's repository carries no licence, so the keyframe launcher's `--requests t2v-compbench` fetches it at a pinned commit rather than copying it here.
+
 Score without `--group-rm`: under session v2 it hands the reward step a group of episodes, each a list of samples, which neither `reward.py` nor Miles' batched reward setter takes.
 
 The env reads its options from `AGENT_VIDEO_GEN_*` environment variables, listed in `env.py`. `--custom-agent-function-mode worker` and `sandbox` forward them by default; there, the generator's clip directory and the submitted-clip directory must be shared paths that the agent's host can reach.

@@ -413,3 +413,97 @@ def test_k_arms_replay_a_reference_mode_episodes_images(tmp_path, monkeypatch):
         None,
         request_seed("a fox"),
     )
+
+
+def test_b1_rewrite_replaces_b1_where_phase0_has_no_answers_and_rows_carry_categories(tmp_path):
+    heldout = tmp_path / "heldout.jsonl"
+    rows = [
+        {"messages": [{"role": "user", "content": r}], "metadata": {"category": c}}
+        for r, c in (("a fox", "x"), ("a tv", "y"))
+    ]
+    heldout.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    rewrites = tmp_path / "rewrites.jsonl"
+    rewrites.write_text(json.dumps({"request": "a fox", "answer": "A red fox trots through snow."}) + "\n")
+    dump = _dump(tmp_path, "eval_9.pt", {"a fox": {"images": [{"prompt": "fox, snow"}]}})
+    out = tmp_path / "prompts.jsonl"
+
+    arms.main(
+        [
+            "prompts",
+            "--heldout",
+            str(heldout),
+            "--b1-rewrite",
+            str(rewrites),
+            "--final-dump",
+            str(dump),
+            "--out",
+            str(out),
+        ]
+    )
+
+    made = [json.loads(line) for line in out.read_text().splitlines()]
+    by = {(row["arm"], row["request"]): row for row in made}
+    assert {row["arm"] for row in made} == {"B0", "B1-rewrite", "K-blind"}
+    assert (
+        by["B1-rewrite", "a fox"]["prompt"] == "A red fox trots through snow."
+        and by["B1-rewrite", "a tv"]["prompt"] is None
+    )
+    assert {(row["request"], row["category"]) for row in made} == {("a fox", "x"), ("a tv", "y")}
+
+
+def test_rewrite_asks_the_served_planner_with_phase0s_prompt_greedy_and_without_thinking():
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    from examples.experimental.video_gen_agent.phase0.make_planner_data import SYSTEM_PROMPT
+
+    asked = []
+
+    class Planner(BaseHTTPRequestHandler):
+        def do_POST(self):
+            payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            asked.append((self.path, payload))
+            answer = f"A clip of {payload['messages'][-1]['content']}."
+            body = json.dumps({"choices": [{"message": {"content": answer}}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Planner)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        rows = asyncio.run(arms.rewrite(["a fox", "a tv"], f"http://127.0.0.1:{server.server_port}"))
+    finally:
+        server.shutdown()
+
+    assert rows == [
+        {"request": "a fox", "answer": "A clip of a fox."},
+        {"request": "a tv", "answer": "A clip of a tv."},
+    ]
+    path, payload = asked[0]
+    assert path == "/v1/chat/completions" and payload["messages"][0] == {"role": "system", "content": SYSTEM_PROMPT}
+    assert (payload["temperature"], payload["chat_template_kwargs"]) == (0, {"enable_thinking": False})
+
+
+def test_the_win_bar_can_hold_k_to_b1_rewrite_and_compare_splits_by_category(tmp_path, capsys):
+    k = {f"r{i}": 1.0 for i in range(10)}
+    rows = _rows("K", k) + _rows("B0-ref", {f"r{i}": 0.0 for i in range(10)})
+    rows += _rows("B1-rewrite", {f"r{i}": 0.0 for i in range(10)})
+    rows = [row | {"category": "spatial" if row["request"] < "r5" else "numeracy"} for row in rows]
+    results = compare.compare(rows)
+
+    bar = compare.win_bar(results, None, mode="reference", b1="B1-rewrite")
+
+    assert set(results) == {"B0-ref", "B1-rewrite"}
+    assert bar["reward beats B0-ref and B1-rewrite"] is True
+    assert compare.win_bar(results, None, mode="reference")["reward beats B0-ref and B1"] is None
+    scored = tmp_path / "scored.jsonl"
+    scored.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    compare.main([str(scored), "--mode", "reference", "--b1", "B1-rewrite", "--by-category"])
+    printed = capsys.readouterr().out
+    assert "- reward beats B0-ref and B1-rewrite: pass" in printed
+    assert "## numeracy" in printed and "| B1-rewrite | reward | 5 | 1.0000 | 0.0000 | 5 | 0 | 0 |" in printed
