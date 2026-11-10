@@ -49,7 +49,7 @@ def test_the_generated_arms_prompts_and_seeds(tmp_path):
 
 
 def test_the_i2v_one_shot_arm_conditions_the_video_on_an_image_of_the_raw_request(tmp_path, monkeypatch):
-    rows = arms.arm_prompts(["a fox"], {}, {}, i2v=True)
+    rows = arms.arm_prompts(["a fox"], {}, {}, mode="i2v")
     (row,) = [row for row in rows if row["arm"] == "B0-i2v"]
     assert (row["prompt"], row["image_prompt"], row["seed"]) == ("a fox", "a fox", request_seed("a fox"))
     assert "B0-i2v" not in {row["arm"] for row in arms.arm_prompts(["a fox"], {}, {})}
@@ -64,9 +64,31 @@ def test_the_i2v_one_shot_arm_conditions_the_video_on_an_image_of_the_raw_reques
         asyncio.run(arms.generate([row], FakeClipGenerator()))
 
 
+def test_in_reference_mode_both_image_arms_condition_the_video_on_a_reference(tmp_path, monkeypatch):
+    final = {"a fox": {"images": [{"prompt": "fox, snow", "path": "/img/first.png"}]}}
+    by = {row["arm"]: row for row in arms.arm_prompts(["a fox"], {}, final, mode="reference")}
+    monkeypatch.setenv("AGENT_VIDEO_GEN_FAKE_DIR", str(tmp_path / "made"))
+
+    one_shot, blind_k = asyncio.run(
+        arms.generate([by["B0-ref"], by["K-blind"]], FakeClipGenerator(), FakeImageGenerator())
+    )
+
+    assert set(by) == {"B0", "B1", "K-blind", "B0-ref"}
+    asked = json.loads(open(one_shot["path"]).read())
+    assert asked["reference_paths"] == [one_shot["reference_paths"][0]] and asked["image_path"] is None
+    assert json.loads(Image.open(one_shot["reference_paths"][0]).text["request"])["prompt"] == "a fox"
+    asked = json.loads(open(blind_k["path"]).read())
+    assert (asked["reference_paths"], asked["image_path"], asked["seed"]) == (
+        ["/img/first.png"],
+        None,
+        request_seed("a fox"),
+    )
+    assert "reference_paths" not in by["B0"] and "reference_paths" not in by["B1"]
+
+
 def test_in_i2v_mode_k_blind_animates_the_agents_recorded_first_image(tmp_path, monkeypatch):
     final = {"a fox": {"images": [{"prompt": "fox, snow", "path": "/img/first.png"}, {"prompt": "fox, close"}]}}
-    rows = arms.arm_prompts(["a fox", "a tv"], {}, final, i2v=True)
+    rows = arms.arm_prompts(["a fox", "a tv"], {}, final, mode="i2v")
     by = {(row["arm"], row["request"]): row for row in rows}
     monkeypatch.setenv("AGENT_VIDEO_GEN_FAKE_DIR", str(tmp_path / "made"))
 
@@ -269,15 +291,31 @@ def test_in_i2v_mode_the_win_bar_holds_k_to_b0_i2v_and_still_reports_b0():
     )
     results = compare.compare(rows)
 
-    bar = compare.win_bar(results, {"A": {"K": 15, "B0-i2v": 5, "tie": 0}}, i2v=True)
+    bar = compare.win_bar(results, {"A": {"K": 15, "B0-i2v": 5, "tie": 0}}, mode="i2v")
 
     assert set(results) == {"B0", "B0-i2v", "B1"}
     assert bar["reward beats B0-i2v and B1"] is False and bar["blind: K in >= 15 of 20 decided vs B0-i2v"] is True
     assert compare.win_bar(results, None)["reward beats B0 and B1"] is True
     with pytest.raises(ValueError, match="not judged against B0-i2v"):
-        compare.win_bar(results, {"A": {"K": 20, "B0": 0, "tie": 0}}, i2v=True)
+        compare.win_bar(results, {"A": {"K": 20, "B0": 0, "tie": 0}}, mode="i2v")
     with pytest.raises(ValueError, match="not judged against B0:"):
         compare.win_bar(results, {"A": {"K": 20, "B0-i2v": 0, "tie": 0}})
+
+
+def test_in_reference_mode_the_win_bar_holds_k_to_b0_ref_and_refuses_other_picks():
+    k = {f"r{i}": 1.0 for i in range(10)}
+    rows = _rows("K", k) + _rows("B0", {f"r{i}": 2.0 for i in range(10)})
+    rows += _rows("B0-ref", {f"r{i}": 0.0 for i in range(10)}) + _rows("B1", {f"r{i}": 0.0 for i in range(10)})
+    results = compare.compare(rows)
+
+    bar = compare.win_bar(results, {"A": {"K": 16, "B0-ref": 4, "tie": 0}}, mode="reference")
+
+    assert set(results) == {"B0", "B0-ref", "B1"}
+    assert bar["reward beats B0-ref and B1"] is True and bar["blind: K in >= 15 of 20 decided vs B0-ref"] is True
+    assert compare.win_bar(results, None)["reward beats B0 and B1"] is False
+    for picks in ({"K": 20, "B0": 0, "tie": 0}, {"K": 20, "B0-i2v": 0, "tie": 0}):
+        with pytest.raises(ValueError, match="not judged against B0-ref"):
+            compare.win_bar(results, {"A": picks}, mode="reference")
 
 
 def test_the_blind_page_draws_outside_lin2741s_requests_and_keeps_the_key_apart(tmp_path):
@@ -316,7 +354,7 @@ def test_in_i2v_mode_blind_set_a_is_k_against_b0_i2v(tmp_path):
             path.write_text(arm)
             clips.setdefault(arm, {})[f"r{i}"] = str(path)
 
-    pairs, key = blind.make(clips, set(), tmp_path / "blind", i2v=True)
+    pairs, key = blind.make(clips, set(), tmp_path / "blind", mode="i2v")
 
     page = (tmp_path / "blind" / "index.html").read_text()
     assert "in set A both clips are image-to-video" in page and "__MODELS__" not in page
@@ -333,6 +371,20 @@ def test_in_i2v_mode_blind_set_a_is_k_against_b0_i2v(tmp_path):
         blind.draw(clips, set())
 
 
+def test_in_reference_mode_blind_set_a_is_k_against_b0_ref(tmp_path):
+    clips = {arm: {f"r{i}": arm for i in range(25)} for arm in ("K", "B0-ref", "B1")}
+    for arm, by_request in clips.items():
+        for request in by_request:
+            path = tmp_path / f"{arm}_{request}.mp4"
+            path.write_text(arm)
+            by_request[request] = str(path)
+
+    pairs, key = blind.make(clips, set(), tmp_path / "blind", mode="reference")
+
+    assert {pair["baseline"] for pair in pairs if pair["set"] == "A"} == {"B0-ref"}
+    assert "made by Wan2.1-VACE-14B" in (tmp_path / "blind" / "index.html").read_text()
+
+
 def test_the_blind_draw_is_fixed():
     clips = {arm: {f"r{i}": f"{arm}{i}" for i in range(30)} for arm in ("K", "B0", "B1")}
 
@@ -342,7 +394,12 @@ def test_the_blind_draw_is_fixed():
 
 
 def test_k_arms_replay_a_reference_mode_episodes_images(tmp_path, monkeypatch):
-    video = {"prompt": "a corgi a park it runs", "seed": 0, "image_path": None, "reference_paths": ["/i/a.png", "/i/b.png"]}
+    video = {
+        "prompt": "a corgi a park it runs",
+        "seed": 0,
+        "image_path": None,
+        "reference_paths": ["/i/a.png", "/i/b.png"],
+    }
     dump = _dump(tmp_path, "eval_0.pt", {"a fox": {"video": video, "submitted": {"path": "/kept/f.mp4"}}})
 
     (row, *_) = arms.from_dump(dump, "K", REQUESTS)
@@ -351,4 +408,8 @@ def test_k_arms_replay_a_reference_mode_episodes_images(tmp_path, monkeypatch):
 
     asked = json.loads(open(made["path"]).read())
     assert row["reference_paths"] == ["/i/a.png", "/i/b.png"] and asked["reference_paths"] == ["/i/a.png", "/i/b.png"]
-    assert (asked["prompt"], asked["image_path"], asked["seed"]) == ("a corgi a park it runs", None, request_seed("a fox"))
+    assert (asked["prompt"], asked["image_path"], asked["seed"]) == (
+        "a corgi a park it runs",
+        None,
+        request_seed("a fox"),
+    )
