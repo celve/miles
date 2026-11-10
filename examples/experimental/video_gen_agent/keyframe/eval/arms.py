@@ -2,10 +2,13 @@
 ``{arm, request, prompt, seed, path}``, with ``path`` None when the arm made no clip for the request.
 
   B0       the raw request → the video model
+  B0-i2v   the raw request → the image model → image-to-video from that image (``prompts --i2v``), the one-shot arm
+           an i2v-mode agent is fair against, since B0's text-to-video does not pay image-to-video's stillness
   B1       Phase 0's trained planner prompt (LIN-2737's ``answer99``) → the video model
   K0, K    the keyframe agent at its step-0 and final eval: the video request its episode submitted (prompt, negative
            prompt, and in i2v mode the image), read from the run's eval dumps and generated again
-  K-blind  the final agent's first image prompt → the video model, with no image watched
+  K-blind  the final agent's first image prompt → the video model, with no image watched; with ``--i2v``, the video is
+           image-to-video from the first image the agent made, so K-blind differs from K only in watching
 
 Every arm takes Phase 0's per-request seed and the run's clip shape (832x480, 2 s at 16 fps: 33 frames), so arms
 differ only in what the generator is asked; K0 and K keep the clip and seed their episode made as ``episode_path`` and
@@ -18,7 +21,9 @@ differ only in what the generator is asked; K0 and K keep the clip and seed thei
   python -m examples.experimental.video_gen_agent.keyframe.eval.arms generate prompts.jsonl k0.jsonl k.jsonl --out clips.jsonl
 
 ``generate`` makes clips with the env's generator, so ``AGENT_VIDEO_GEN_GENERATOR`` and its options pick the router
-(or a fake) exactly as in training.
+(or a fake) exactly as in training; a row with an ``image_prompt`` first gets its image from
+``AGENT_VIDEO_GEN_IMAGE_GENERATOR``. B0 and B1 are text-to-video and B0-i2v image-to-video, so generate them in
+separate calls, each against its own video engines (with ``--i2v``, K-blind goes with B0-i2v).
 """
 
 import argparse
@@ -29,7 +34,7 @@ from pathlib import Path
 
 import torch
 
-from examples.experimental.video_gen_agent.generator import ClipRequest
+from examples.experimental.video_gen_agent.generator import ClipRequest, ImageRequest
 from examples.experimental.video_gen_agent.phase0.reward import planner_prompt, request_seed
 from miles.utils.function_registry import load_function
 
@@ -51,8 +56,11 @@ def episodes(dump: Path) -> dict[str, dict]:
     return out
 
 
-def arm_prompts(requests: list[str], phase0: dict[str, str], final: dict[str, dict]) -> list[dict]:
-    """B0, B1 and K-blind's prompt per request; a request an arm has no prompt for gets prompt None."""
+def arm_prompts(
+    requests: list[str], phase0: dict[str, str], final: dict[str, dict], *, i2v: bool = False
+) -> list[dict]:
+    """B0, B1 and K-blind's prompt per request, and B0-i2v's with ``i2v``, where K-blind is image-to-video too; a
+    request an arm has no prompt for gets prompt None."""
     rows = []
     for request in requests:
         images = (final.get(request) or {}).get("images") or []
@@ -66,16 +74,36 @@ def arm_prompts(requests: list[str], phase0: dict[str, str], final: dict[str, di
             {"arm": arm, "request": request, "prompt": prompts[arm], "seed": request_seed(request)}
             for arm in GENERATED_ARMS
         ]
+        if i2v and prompts["K-blind"] is not None:
+            rows[-1]["image_path"] = images[0]["path"]
+        if i2v:
+            rows.append(
+                {"arm": "B0-i2v", "request": request, "prompt": request, "image_prompt": request}
+                | {"seed": request_seed(request)}
+            )
     return rows
 
 
-async def generate(rows: list[dict], generator, concurrency: int = 8) -> list[dict]:
+async def generate(rows: list[dict], generator, image_generator=None, concurrency: int = 8) -> list[dict]:
+    if image_generator is None and any(row.get("image_prompt") for row in rows):
+        raise ValueError("rows with an image_prompt need AGENT_VIDEO_GEN_IMAGE_GENERATOR")
     semaphore = asyncio.Semaphore(concurrency)
 
     async def one(row: dict) -> dict:
         if row["prompt"] is None:
             return row | {"path": None}
         async with semaphore:
+            if row.get("image_prompt"):
+                image = await image_generator.generate(
+                    ImageRequest(
+                        prompt=row["image_prompt"],
+                        negative_prompt="",
+                        seed=row["seed"],
+                        width=SHAPE["width"],
+                        height=SHAPE["height"],
+                    )
+                )
+                row = row | {"image_path": image.path}
             clip = await generator.generate(
                 ClipRequest(
                     prompt=row["prompt"],
@@ -125,6 +153,11 @@ def main(argv: list[str] | None = None) -> None:
     prompts.add_argument("--phase0", type=Path, required=True, help="LIN-2737's heldout_paired_step0_step99.jsonl")
     prompts.add_argument("--final-dump", type=Path, required=True, help="the final eval's eval_<step>.pt")
     prompts.add_argument("--out", type=Path, required=True)
+    prompts.add_argument(
+        "--i2v",
+        action="store_true",
+        help="for an agent trained in i2v mode: add B0-i2v and make K-blind image-to-video",
+    )
     generated = commands.add_parser("generate")
     generated.add_argument("prompts", type=Path, nargs="+")
     generated.add_argument("--out", type=Path, required=True)
@@ -137,11 +170,13 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.command == "prompts":
         phase0 = {r["request"]: r["answer99"] for r in map(json.loads, args.phase0.read_text().splitlines())}
-        _write(args.out, arm_prompts(heldout_requests(args.heldout), phase0, episodes(args.final_dump)))
+        _write(args.out, arm_prompts(heldout_requests(args.heldout), phase0, episodes(args.final_dump), i2v=args.i2v))
     elif args.command == "generate":
         generator = load_function(os.environ["AGENT_VIDEO_GEN_GENERATOR"])()
+        image_path = os.environ.get("AGENT_VIDEO_GEN_IMAGE_GENERATOR")
+        image_generator = load_function(image_path)() if image_path else None
         rows = [json.loads(line) for path in args.prompts for line in path.read_text().splitlines()]
-        _write(args.out, asyncio.run(generate(rows, generator)))
+        _write(args.out, asyncio.run(generate(rows, generator, image_generator)))
     else:
         _write(args.out, from_dump(args.dump, args.arm, heldout_requests(args.heldout)))
 
