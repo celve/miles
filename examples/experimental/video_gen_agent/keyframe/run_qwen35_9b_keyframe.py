@@ -27,6 +27,8 @@ Args:
         directory ``prepare`` builds beside the checkpoint (``keyframe/reference_model.py``).
     --reference-scale: how strongly a reference-mode clip holds its images, VACE's conditioning scale (default 0.5,
         LIN-2830's pick; 1.0 copies the image as a near-still frame).
+    --generation-timeout: seconds after which a generation counts as an outage, which drops its group (default: the
+        env's 600; in reference mode, long enough for the queue on a VACE engine, which renders one clip at a time).
     --image-model, --image-steps, --image-guidance-scale, --video-model: the generators (default: Z-Image-Turbo at
         9 steps without CFG; Qwen/Qwen-Image-2.1-Turbo gets 8 steps at CFG 1; the video model follows --video-mode).
     --num-rollout, --rollout-batch-size, --n-samples-per-prompt: GRPO steps, requests per step, episodes per request.
@@ -44,6 +46,7 @@ Example:
     python examples/experimental/video_gen_agent/keyframe/run_qwen35_9b_keyframe.py --planner qwen3.8-27b
 """
 
+import math
 from dataclasses import dataclass, field, replace
 
 import typer
@@ -56,6 +59,8 @@ from miles.utils.external_utils import command_utils
 
 LIGHTX2V = "lightx2v/Wan2.2-Distill-Loras"
 LIGHTX2V_WAN21 = "lightx2v/Wan2.1-Distill-Loras"
+# Twice the GPU-seconds a served VACE-14B clip took at 832x480, 33 frames, 4 steps on H200 (LIN-2830).
+_REFERENCE_SECONDS_PER_CLIP = 20.0
 HPSV3 = "MizzenAI/HPSv3"
 HPSV3_BASE = "Qwen/Qwen2-VL-7B-Instruct"
 UNIFIED_REWARD = "CodeGoat24/UnifiedReward-2.0-qwen3vl-8b"
@@ -173,6 +178,7 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     image_guidance_scale: float | None = None
     video_model: str | None = None
     reference_scale: float | None = None
+    generation_timeout: float | None = None
     num_rollout: int = 200
     rollout_batch_size: int = 16
     n_samples_per_prompt: int = 8
@@ -201,6 +207,7 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
             assert self.reference_scale > 0, f"--reference-scale must be positive, got {self.reference_scale}"
         else:
             assert self.reference_scale is None, "--reference-scale applies to --video-mode reference only"
+        assert self.generation_timeout is None or self.generation_timeout > 0, "--generation-timeout must be positive"
         assert self.reward in _REWARDS, f"--reward is one of {sorted(_REWARDS)}"
         if self.image_steps is None or self.image_guidance_scale is None:
             recipe = _IMAGE_RECIPES.get(self.image_model)
@@ -301,6 +308,15 @@ def execute(args: ScriptArgs):
     )
 
 
+def _generation_timeout(args: ScriptArgs) -> float | None:
+    """The flag, or in reference mode a bound on the wait behind a full queue: VACE renders one clip at a time, so a
+    step's episodes plus as many eval episodes, spread over the video engines, at twice LIN-2830's 9.7 s a clip."""
+    if args.generation_timeout is not None or args.video_mode != "reference":
+        return args.generation_timeout
+    queued = math.ceil(2 * args.rollout_batch_size * args.n_samples_per_prompt / args.video_gpus)
+    return max(600.0, queued * _REFERENCE_SECONDS_PER_CLIP)
+
+
 def _agent_env(args: ScriptArgs) -> dict[str, str]:
     env = {
         "AGENT_VIDEO_GEN_GENERATOR": f"{AGENT}.multiturn.generator.RouterClipGenerator",
@@ -326,6 +342,8 @@ def _agent_env(args: ScriptArgs) -> dict[str, str]:
     }
     if args.video_mode == "reference":
         env["AGENT_VIDEO_GEN_REFERENCE_SCALE"] = str(args.reference_scale)
+    if (timeout := _generation_timeout(args)) is not None:
+        env["AGENT_VIDEO_GEN_TIMEOUT_S"] = str(timeout)
     else:
         env["AGENT_VIDEO_GEN_GUIDANCE_SCALE_2"] = "1.0"
     return env

@@ -2,6 +2,7 @@ import shlex
 
 import examples.experimental.video_gen_agent.keyframe.run_qwen35_9b_keyframe as launcher
 import pytest
+from examples.experimental.video_gen_agent.keyframe.env import KeyframeEnvOptions
 from examples.experimental.video_gen_agent.keyframe.run_qwen35_9b_keyframe import (
     LIGHTX2V,
     ScriptArgs,
@@ -156,6 +157,26 @@ def test_reference_mode_serves_vace_through_the_diffusers_backend_from_the_built
     assert scaled["AGENT_VIDEO_GEN_REFERENCE_SCALE"] == "0.7"
 
 
+@pytest.mark.parametrize(
+    "script_args, timeout",
+    [
+        # One VACE engine renders a step's 128 episodes and as many eval episodes one at a time, 20 s each.
+        (dict(video_mode="reference", num_gpus_per_node=4), 5120.0),
+        (dict(video_mode="reference", num_gpus_per_node=8), 1280.0),
+        (dict(video_mode="reference", num_gpus_per_node=8, rollout_batch_size=2, n_samples_per_prompt=2), 600.0),
+        (dict(video_mode="reference", generation_timeout=900.0), 900.0),
+        (dict(generation_timeout=900.0), 900.0),
+        (dict(), 600.0),
+    ],
+)
+def test_the_env_waits_for_the_video_queue_the_layout_holds(monkeypatch, script_args, timeout):
+    monkeypatch.delenv("AGENT_VIDEO_GEN_TIMEOUT_S", raising=False)
+    for name, value in _agent_env(ScriptArgs(run_id="test", **script_args)).items():
+        monkeypatch.setenv(name, value)
+
+    assert KeyframeEnvOptions.from_env().timeout_s == timeout
+
+
 def test_prepare_builds_the_reference_directory_with_the_wan21_lightx2v_lora(monkeypatch, tmp_path):
     commands = _recorded(monkeypatch, tmp_path, "prepare", video_mode="reference")
 
@@ -277,6 +298,7 @@ def test_execute_submits_the_run_with_the_keyframe_env(monkeypatch, tmp_path):
         (dict(video_mode="t2v"), "--video-mode is one of"),
         (dict(reference_scale=0.5), "--reference-scale applies to --video-mode reference only"),
         (dict(video_mode="reference", reference_scale=0), "--reference-scale must be positive"),
+        (dict(generation_timeout=0), "--generation-timeout must be positive"),
         (dict(image_model="org/Image"), "has no recipe"),
         (dict(reward="judge"), "--reward is one of"),
     ],
