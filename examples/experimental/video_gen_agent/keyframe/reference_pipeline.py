@@ -8,6 +8,7 @@ images. ``lora_paths`` in ``model_index.json`` lists ``[path, component]`` pairs
 
 import torch
 from diffusers import WanVACEPipeline
+from diffusers.utils import is_ftfy_available
 from PIL import Image
 
 
@@ -33,6 +34,9 @@ class WanVACEReferencePipeline(WanVACEPipeline):
             transformer_2=transformer_2,
             boundary_ratio=boundary_ratio,
         )
+        # Without ftfy every request fails in the parent's prompt cleaning, so refuse to serve at all.
+        if not is_ftfy_available():
+            raise ImportError("WanVACEPipeline cleans prompts with ftfy; install it (the keyframe launcher's prepare does)")
         self.register_to_config(lora_paths=lora_paths)
         # Wan's VAE decodes in fp32, as LIN-2830 measured it; the backend loads every component in bf16.
         self.vae.to(torch.float32)

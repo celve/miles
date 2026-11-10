@@ -59,6 +59,7 @@ from miles.utils.external_utils import command_utils
 
 LIGHTX2V = "lightx2v/Wan2.2-Distill-Loras"
 LIGHTX2V_WAN21 = "lightx2v/Wan2.1-Distill-Loras"
+FTFY = "ftfy==6.3.1"
 # Twice the GPU-seconds a served VACE-14B clip took at 832x480, 33 frames, 4 steps on H200 (LIN-2830).
 _REFERENCE_SECONDS_PER_CLIP = 20.0
 HPSV3 = "MizzenAI/HPSv3"
@@ -276,6 +277,8 @@ def prepare(args: ScriptArgs):
     lora_files = " ".join(name for name, _ in video.loras)
     U.exec_command_cpu(f"hf download {video.lora_repo} {lora_files} --local-dir {args.local(video.lora_repo)}")
     if video.reference_flow_shift is not None:
+        # diffusers' WanVACEPipeline cleans every prompt with ftfy, which the Miles image does not ship.
+        U.exec_command_cpu(f"python -c 'import ftfy' 2>/dev/null || pip install {FTFY}")
         loras = " ".join(f"--lora {path}:{target}" for path, target in args.video_lora_paths())
         U.exec_command_cpu(
             f"cd {command_utils.repo_base_dir} && python -m {AGENT}.keyframe.reference_model "
