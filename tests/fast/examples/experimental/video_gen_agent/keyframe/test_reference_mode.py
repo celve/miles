@@ -45,7 +45,7 @@ async def test_the_video_is_made_from_several_watched_images_as_references(refer
         "clip_id": "video_1",
         "path": str(kept),
         "prompt": "a sunny park a corgi it runs at the camera",
-        "prompt_words": 9,
+        "prompt_words": 10,
         "image_ids": ["image_2", "image_1"],
         "image_prompts": ["a sunny park", "a corgi"],
     }
