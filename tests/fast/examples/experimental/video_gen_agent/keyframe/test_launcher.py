@@ -190,6 +190,7 @@ def test_prepare_builds_the_reference_directory_with_the_wan21_lightx2v_lora(mon
     assert any(f"hf download lightx2v/Wan2.1-Distill-Loras {lora} " in c for c in commands)
     assert not any(LIGHTX2V in command for command in commands)
     (build,) = [command for command in commands if "keyframe.reference_model" in command]
+    assert any("pip install ftfy==" in command for command in commands)
     assert f"--src {models}/Wan2.1-VACE-14B-diffusers --dst {models}/Wan2.1-VACE-14B-diffusers-reference" in build
     assert f"--flow-shift 5.0 --lora {models}/Wan2.1-Distill-Loras/{lora}:transformer" in build
 
@@ -271,6 +272,7 @@ def test_prepare_downloads_the_defaults_models_and_only_the_modes_lightx2v_loras
     assert any("pip install paddleocr==2.9.1" in command for command in commands)
     assert any("Wan-AI/Wan2.2-T2V-A14B-Diffusers" in command for command in downloads)
     (loras,) = [command for command in downloads if LIGHTX2V in command]
+    assert not any("pip install ftfy==" in command for command in commands)
     assert loras.count("t2v_A14b") == 2 and "i2v" not in loras
     assert any("make_requests" in command for command in commands)
 
