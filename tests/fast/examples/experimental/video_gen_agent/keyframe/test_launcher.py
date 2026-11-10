@@ -136,6 +136,38 @@ def test_i2v_mode_serves_image_to_video_with_its_own_loras(monkeypatch, tmp_path
     )
 
 
+@pytest.mark.parametrize("num_gpus, video_gpus", [(4, 1), (8, 3)])
+def test_reference_mode_serves_vace_through_the_diffusers_backend_from_the_built_directory(
+    monkeypatch, tmp_path, num_gpus, video_gpus
+):
+    config = _config(monkeypatch, tmp_path, num_gpus_per_node=num_gpus, video_mode="reference")
+
+    video = next(model for model in config.sglang.models if model.name == "video")
+    (group,) = video.server_groups
+    assert video.model_path == f"{tmp_path}/Wan2.1-VACE-14B-diffusers-reference" and not video.update_weights
+    assert group.overrides["backend"] == "diffusers" and not group.loras and group.engine_kind == "diffusion"
+    assert config.sglang_scaling.group(model_name="video", group_index=0).num_gpus == video_gpus
+    env = _agent_env(ScriptArgs(run_id="test", video_mode="reference"))
+    assert (env["AGENT_VIDEO_GEN_VIDEO_MODE"], env["AGENT_VIDEO_GEN_REFERENCE_SCALE"]) == ("reference", "0.5")
+    assert env["AGENT_VIDEO_GEN_VIDEO_MODEL"] == "Wan-AI/Wan2.1-VACE-14B-diffusers"
+    assert "AGENT_VIDEO_GEN_GUIDANCE_SCALE_2" not in env and env["AGENT_VIDEO_GEN_NUM_INFERENCE_STEPS"] == "4"
+    scaled = _agent_env(ScriptArgs(run_id="test", video_mode="reference", reference_scale=0.7))
+    assert scaled["AGENT_VIDEO_GEN_REFERENCE_SCALE"] == "0.7"
+
+
+def test_prepare_builds_the_reference_directory_with_the_wan21_lightx2v_lora(monkeypatch, tmp_path):
+    commands = _recorded(monkeypatch, tmp_path, "prepare", video_mode="reference")
+
+    models = tmp_path / "models"
+    assert any(f"hf download Wan-AI/Wan2.1-VACE-14B-diffusers --local-dir {models}/" in c for c in commands)
+    lora = "wan2.1_t2v_14b_lora_rank64_lightx2v_4step.safetensors"
+    assert any(f"hf download lightx2v/Wan2.1-Distill-Loras {lora} " in c for c in commands)
+    assert not any(LIGHTX2V in command for command in commands)
+    (build,) = [command for command in commands if "keyframe.reference_model" in command]
+    assert f"--src {models}/Wan2.1-VACE-14B-diffusers --dst {models}/Wan2.1-VACE-14B-diffusers-reference" in build
+    assert f"--flow-shift 5.0 --lora {models}/Wan2.1-Distill-Loras/{lora}:transformer" in build
+
+
 @pytest.mark.parametrize(
     "image_model, steps, guidance",
     [("Tongyi-MAI/Z-Image-Turbo", "9", "0.0"), ("Qwen/Qwen-Image-2.1-Turbo", "8", "1.0")],
@@ -162,7 +194,7 @@ def test_the_split_and_models_are_flags():
     )
 
     assert (args.train_gpus, args.policy_gpus, args.image_gpus, args.video_gpus, args.eval_gpus) == (1, 1, 1, 4, 1)
-    assert args.video.model == "org/Wan-T2V" and "t2v" in args.video.high_noise_lora
+    assert args.video.model == "org/Wan-T2V" and "t2v" in args.video.loras[0][0]
     assert (args.image_steps, args.image_guidance_scale) == (4, 2.0)
     assert "--rollout-num-gpus 6 " in _train_args(args)
 
@@ -242,6 +274,8 @@ def test_execute_submits_the_run_with_the_keyframe_env(monkeypatch, tmp_path):
         (dict(planner="qwen3.8-27b", num_gpus_per_node=4), "qwen3.8-27b has no layout for 4 GPUs"),
         (dict(planner="qwen3.6-27b"), "--planner is one of"),
         (dict(video_mode="t2v"), "--video-mode is one of"),
+        (dict(reference_scale=0.5), "--reference-scale applies to --video-mode reference only"),
+        (dict(video_mode="reference", reference_scale=0), "--reference-scale must be positive"),
         (dict(image_model="org/Image"), "has no recipe"),
         (dict(reward="judge"), "--reward is one of"),
     ],

@@ -21,7 +21,12 @@ Args:
     --optimizer-cpu-offload: keep Adam's state in host memory (default: the planner's recipe, on for the 27B).
     --video-mode: ``preview`` (default) makes the video from text, the chosen image's prompt plus the motion prompt,
         with Wan2.2-T2V-A14B; ``i2v`` makes it from the image with Wan2.2-I2V-A14B, whose clips LIN-2809 measured
-        moving far less. Each takes its own lightx2v LoRAs.
+        moving far less; ``reference`` makes it with Wan2.1-VACE-14B from one or more of the planner's images as
+        reference images, which LIN-2830 measured holding the image at no cost in reward, at twice T2V's GPU time.
+        Each takes its own lightx2v LoRAs. Reference mode serves VACE through sglang's diffusers backend from a
+        directory ``prepare`` builds beside the checkpoint (``keyframe/reference_model.py``).
+    --reference-scale: how strongly a reference-mode clip holds its images, VACE's conditioning scale (default 0.5,
+        LIN-2830's pick; 1.0 copies the image as a near-still frame).
     --image-model, --image-steps, --image-guidance-scale, --video-model: the generators (default: Z-Image-Turbo at
         9 steps without CFG; Qwen/Qwen-Image-2.1-Turbo gets 8 steps at CFG 1; the video model follows --video-mode).
     --num-rollout, --rollout-batch-size, --n-samples-per-prompt: GRPO steps, requests per step, episodes per request.
@@ -39,7 +44,7 @@ Example:
     python examples/experimental/video_gen_agent/keyframe/run_qwen35_9b_keyframe.py --planner qwen3.8-27b
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import typer
 import yaml
@@ -50,6 +55,7 @@ from miles.utils.chat_template_utils import resolve_reasoning_and_tool_call_pars
 from miles.utils.external_utils import command_utils
 
 LIGHTX2V = "lightx2v/Wan2.2-Distill-Loras"
+LIGHTX2V_WAN21 = "lightx2v/Wan2.1-Distill-Loras"
 HPSV3 = "MizzenAI/HPSv3"
 HPSV3_BASE = "Qwen/Qwen2-VL-7B-Instruct"
 UNIFIED_REWARD = "CodeGoat24/UnifiedReward-2.0-qwen3vl-8b"
@@ -92,20 +98,37 @@ _IMAGE_RECIPES = {"Tongyi-MAI/Z-Image-Turbo": (9, 0.0), "Qwen/Qwen-Image-2.1-Tur
 @dataclass(frozen=True)
 class _VideoRecipe:
     model: str
-    high_noise_lora: str
-    low_noise_lora: str
+    lora_repo: str
+    # Each LoRA file in lora_repo, with the expert it merges into.
+    loras: tuple[tuple[str, str], ...]
+    # Served by sglang's diffusers backend from a directory reference_model.py builds, which fuses the LoRAs at load
+    # and runs its scheduler at this flow shift; None serves the checkpoint natively and merges them by set_lora.
+    reference_flow_shift: float | None = None
 
 
 _VIDEO_RECIPES = {
     "i2v": _VideoRecipe(
         model="Wan-AI/Wan2.2-I2V-A14B-Diffusers",
-        high_noise_lora="wan2.2_i2v_A14b_high_noise_lora_rank64_lightx2v_4step_1022.safetensors",
-        low_noise_lora="wan2.2_i2v_A14b_low_noise_lora_rank64_lightx2v_4step_1022.safetensors",
+        lora_repo=LIGHTX2V,
+        loras=(
+            ("wan2.2_i2v_A14b_high_noise_lora_rank64_lightx2v_4step_1022.safetensors", "transformer"),
+            ("wan2.2_i2v_A14b_low_noise_lora_rank64_lightx2v_4step_1022.safetensors", "transformer_2"),
+        ),
     ),
     "preview": _VideoRecipe(
         model="Wan-AI/Wan2.2-T2V-A14B-Diffusers",
-        high_noise_lora="wan2.2_t2v_A14b_high_noise_lora_rank64_lightx2v_4step_1217.safetensors",
-        low_noise_lora="wan2.2_t2v_A14b_low_noise_lora_rank64_lightx2v_4step_1217.safetensors",
+        lora_repo=LIGHTX2V,
+        loras=(
+            ("wan2.2_t2v_A14b_high_noise_lora_rank64_lightx2v_4step_1217.safetensors", "transformer"),
+            ("wan2.2_t2v_A14b_low_noise_lora_rank64_lightx2v_4step_1217.safetensors", "transformer_2"),
+        ),
+    ),
+    # lightx2v's Wan2.1-T2V-14B 4-step LoRA on VACE-14B, at the flow shift LIN-2830 measured.
+    "reference": _VideoRecipe(
+        model="Wan-AI/Wan2.1-VACE-14B-diffusers",
+        lora_repo=LIGHTX2V_WAN21,
+        loras=(("wan2.1_t2v_14b_lora_rank64_lightx2v_4step.safetensors", "transformer"),),
+        reference_flow_shift=5.0,
     ),
 }
 
@@ -146,6 +169,7 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     image_steps: int | None = None
     image_guidance_scale: float | None = None
     video_model: str | None = None
+    reference_scale: float | None = None
     num_rollout: int = 200
     rollout_batch_size: int = 16
     n_samples_per_prompt: int = 8
@@ -169,6 +193,11 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
         if self.optimizer_cpu_offload is None:
             self.optimizer_cpu_offload = self.recipe.optimizer_cpu_offload
         assert self.video_mode in _VIDEO_RECIPES, f"--video-mode is one of {sorted(_VIDEO_RECIPES)}"
+        if self.video_mode == "reference":
+            self.reference_scale = 0.5 if self.reference_scale is None else self.reference_scale
+            assert self.reference_scale > 0, f"--reference-scale must be positive, got {self.reference_scale}"
+        else:
+            assert self.reference_scale is None, "--reference-scale applies to --video-mode reference only"
         assert self.reward in _REWARDS, f"--reward is one of {sorted(_REWARDS)}"
         if self.image_steps is None or self.image_guidance_scale is None:
             recipe = _IMAGE_RECIPES.get(self.image_model)
@@ -198,11 +227,16 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     @property
     def video(self) -> _VideoRecipe:
         recipe = _VIDEO_RECIPES[self.video_mode]
-        return (
-            _VideoRecipe(self.video_model, recipe.high_noise_lora, recipe.low_noise_lora)
-            if self.video_model
-            else recipe
-        )
+        return replace(recipe, model=self.video_model) if self.video_model else recipe
+
+    @property
+    def video_path(self) -> str:
+        """The directory the video engines load: the checkpoint, or in reference mode the directory built beside it."""
+        local = self.local(self.video.model)
+        return f"{local}-reference" if self.video.reference_flow_shift is not None else local
+
+    def video_lora_paths(self) -> list[tuple[str, str]]:
+        return [(f"{self.local(self.video.lora_repo)}/{name}", target) for name, target in self.video.loras]
 
     @property
     def requests_dir(self) -> str:
@@ -227,10 +261,15 @@ def prepare(args: ScriptArgs):
         f"PYTHONPATH={command_utils.repo_base_dir} python -c "
         "'from miles.diffusion.rollout.ocr import OcrScorer; OcrScorer()'"
     )
-    U.exec_command_cpu(
-        f"hf download {LIGHTX2V} {args.video.high_noise_lora} {args.video.low_noise_lora} "
-        f"--local-dir {args.local(LIGHTX2V)}"
-    )
+    video = args.video
+    lora_files = " ".join(name for name, _ in video.loras)
+    U.exec_command_cpu(f"hf download {video.lora_repo} {lora_files} --local-dir {args.local(video.lora_repo)}")
+    if video.reference_flow_shift is not None:
+        loras = " ".join(f"--lora {path}:{target}" for path, target in args.video_lora_paths())
+        U.exec_command_cpu(
+            f"cd {command_utils.repo_base_dir} && python -m {AGENT}.keyframe.reference_model "
+            f"--src {args.local(video.model)} --dst {args.video_path} --flow-shift {video.reference_flow_shift} {loras}"
+        )
     U.convert_checkpoint(
         model_name=args.recipe.repo.split("/")[1],
         megatron_model_type=args.recipe.megatron_model_type,
@@ -259,7 +298,7 @@ def execute(args: ScriptArgs):
 
 
 def _agent_env(args: ScriptArgs) -> dict[str, str]:
-    return {
+    env = {
         "AGENT_VIDEO_GEN_GENERATOR": f"{AGENT}.multiturn.generator.RouterClipGenerator",
         "AGENT_VIDEO_GEN_IMAGE_GENERATOR": f"{AGENT}.keyframe.generator.RouterImageGenerator",
         "AGENT_VIDEO_GEN_CLIP_DIR": f"{args.run_dir}/clips",
@@ -277,11 +316,15 @@ def _agent_env(args: ScriptArgs) -> dict[str, str]:
         "AGENT_VIDEO_GEN_VIDEO_MODEL": args.video.model,
         "AGENT_VIDEO_GEN_IMAGE_NUM_INFERENCE_STEPS": str(args.image_steps),
         "AGENT_VIDEO_GEN_IMAGE_GUIDANCE_SCALE": str(args.image_guidance_scale),
-        # lightx2v's 4-step distill runs without CFG on both experts.
+        # lightx2v's 4-step distill runs without CFG, on both of an A14B's experts.
         "AGENT_VIDEO_GEN_NUM_INFERENCE_STEPS": "4",
         "AGENT_VIDEO_GEN_GUIDANCE_SCALE": "1.0",
-        "AGENT_VIDEO_GEN_GUIDANCE_SCALE_2": "1.0",
     }
+    if args.video_mode == "reference":
+        env["AGENT_VIDEO_GEN_REFERENCE_SCALE"] = str(args.reference_scale)
+    else:
+        env["AGENT_VIDEO_GEN_GUIDANCE_SCALE_2"] = "1.0"
+    return env
 
 
 def _train_args(args: ScriptArgs) -> str:
@@ -414,7 +457,7 @@ def _train_args(args: ScriptArgs) -> str:
 
 
 def _sglang_config(args: ScriptArgs) -> dict:
-    def frozen(name: str, model: str, num_gpus: int, **group) -> dict:
+    def frozen(name: str, model_path: str, num_gpus: int, **group) -> dict:
         diffusion = {
             "worker_type": "regular",
             "num_gpus": num_gpus,
@@ -423,20 +466,20 @@ def _sglang_config(args: ScriptArgs) -> dict:
         }
         return {
             "name": name,
-            "model_path": args.local(model),
+            "model_path": model_path,
             "update_weights": False,
             "server_groups": [diffusion | group],
         }
 
-    loras = args.local(LIGHTX2V)
-    video_loras = [
-        {"path": f"{loras}/{args.video.high_noise_lora}", "target": "transformer"},
-        {"path": f"{loras}/{args.video.low_noise_lora}", "target": "transformer_2"},
-    ]
+    if args.video.reference_flow_shift is not None:
+        # The served directory's pipeline fuses its LoRAs at load, which the diffusers backend needs: it has no set_lora.
+        video = {"overrides": {"backend": "diffusers"}}
+    else:
+        video = {"loras": [{"path": path, "target": target} for path, target in args.video_lora_paths()]}
     models = [
         {"name": "policy", "server_groups": [{"worker_type": "regular", "num_gpus": args.policy_gpus}]},
-        frozen("image", args.image_model, args.image_gpus),
-        frozen("video", args.video.model, args.video_gpus, loras=video_loras),
+        frozen("image", args.local(args.image_model), args.image_gpus),
+        frozen("video", args.video_path, args.video_gpus, **video),
     ]
     if args.eval_gpus:
         models.append({"name": "eval", "server_groups": [{"worker_type": "regular", "num_gpus": args.eval_gpus}]})

@@ -75,3 +75,21 @@ async def test_a_failing_generator_is_an_outage_not_a_policy_failure(clip_genera
 
     with pytest.raises(GeneratorUnavailable, match="router failed"):
         await clip_generator.generate(_request("an outage", seconds=2))
+
+
+async def test_a_reference_clip_sends_its_images_and_frames_as_the_reference_pipelines_arguments(
+    clip_generator, monkeypatch
+):
+    _, seen, _ = clip_generator
+    monkeypatch.setenv(generator.REFERENCE_SCALE_ENV, "0.5")
+    request = replace(_request("a corgi runs", seconds=2), reference_paths=("/img/a.png", "/img/b.png"))
+
+    await RouterClipGenerator().generate(request)
+    await RouterClipGenerator().generate(_request("a corgi runs", seconds=2))
+
+    reference, text = seen
+    assert "image_path" not in reference and reference["prompt"] == "a corgi runs"
+    assert reference["extra_sampling_params"] == {
+        "diffusers_kwargs": {"reference_image_paths": ["/img/a.png", "/img/b.png"], "num_frames": 9, "conditioning_scale": 0.5}
+    }
+    assert "extra_sampling_params" not in text
