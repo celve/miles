@@ -314,7 +314,7 @@ async def test_an_unavailable_generator_aborts_the_group(options):
     "variable, value",
     [
         ("AGENT_VIDEO_GEN_GENERATOR", f"{__name__}._BrokenGenerator"),
-        ("AGENT_VIDEO_GEN_MAX_IMAGES", "4"),
+        ("AGENT_VIDEO_GEN_MAX_IMAGES", "5"),
         ("AGENT_VIDEO_GEN_VIDEO_MODE", "t2v"),
         ("AGENT_VIDEO_GEN_IMAGE_GENERATOR", ""),
     ],
