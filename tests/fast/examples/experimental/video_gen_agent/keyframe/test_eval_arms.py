@@ -65,7 +65,11 @@ def test_the_i2v_one_shot_arm_conditions_the_video_on_an_image_of_the_raw_reques
 
 
 def test_in_reference_mode_both_image_arms_condition_the_video_on_a_reference(tmp_path, monkeypatch):
-    final = {"a fox": {"images": [{"prompt": "fox, snow", "path": "/img/first.png"}]}}
+    final = {
+        "a fox": {
+            "images": [{"prompt": "a fox, isolated", "path": "/img/fox.png"}, {"prompt": "snow", "path": "/img/snow.png"}]
+        }
+    }
     by = {row["arm"]: row for row in arms.arm_prompts(["a fox"], {}, final, mode="reference")}
     monkeypatch.setenv("AGENT_VIDEO_GEN_FAKE_DIR", str(tmp_path / "made"))
 
@@ -78,10 +82,12 @@ def test_in_reference_mode_both_image_arms_condition_the_video_on_a_reference(tm
     assert asked["reference_paths"] == [one_shot["reference_paths"][0]] and asked["image_path"] is None
     assert json.loads(Image.open(one_shot["reference_paths"][0]).text["request"])["prompt"] == "a fox"
     asked = json.loads(open(blind_k["path"]).read())
-    assert (asked["reference_paths"], asked["image_path"], asked["seed"]) == (
-        ["/img/first.png"],
+    # Each image is one asset, so K-blind takes them all, as K's video does.
+    assert (asked["reference_paths"], asked["image_path"], asked["seed"], asked["prompt"]) == (
+        ["/img/fox.png", "/img/snow.png"],
         None,
         request_seed("a fox"),
+        "a fox, isolated snow",
     )
     assert "reference_paths" not in by["B0"] and "reference_paths" not in by["B1"]
 

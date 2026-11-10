@@ -5,9 +5,10 @@ An agent function for ``agentic_tool_call.generate`` under session v2, with two 
 ``generate_video(image_id, prompt, negative_prompt, seed)`` makes one clip and ends the episode with it as the
 submission. In ``preview`` mode the clip is text-to-video from the chosen image's prompt followed by that prompt,
 which says what moves and how the camera moves; in ``i2v`` mode it is image-to-video from the chosen image. In
-``reference`` mode ``generate_video`` takes ``image_ids``, one or more watched images, and the clip is
-reference-to-video: it shows their subjects and look without starting from any of them, from their prompts followed by
-the planner's. The planner never watches the clip.
+``reference`` mode the images are assets, one per subject or object isolated on a plain background plus one for the
+setting, and ``generate_video`` takes ``image_ids``, one or more watched assets: the clip is reference-to-video, showing
+them without starting from any of them, from the planner's prompt alone, which composes them. The planner never
+watches the clip.
 
 Like ``examples.experimental.video_gen_agent.env``, it does not score: the clip is copied out by content hash and
 recorded under ``metadata["video_gen"]["submitted"]``, which ``reward.reward_func`` scores. A turn cut at the token
@@ -19,11 +20,10 @@ Run-wide options come from ``AGENT_VIDEO_GEN_*`` env vars, which worker and sand
   AGENT_VIDEO_GEN_GENERATOR        import path of a zero-argument callable returning a ``ClipGenerator`` (required)
   AGENT_VIDEO_GEN_IMAGE_GENERATOR  import path of a zero-argument callable returning an ``ImageGenerator`` (required)
   AGENT_VIDEO_GEN_SUBMITTED_DIR    a durable dir submitted clips are copied to (required)
-  AGENT_VIDEO_GEN_MAX_IMAGES       images per episode, at most 3 (default 3)
+  AGENT_VIDEO_GEN_MAX_IMAGES       images per episode, at most 4 (default 3)
   AGENT_VIDEO_GEN_MAX_TURNS        policy turns per episode (default 6)
   AGENT_VIDEO_GEN_MAX_PROMPT_WORDS a longer generator prompt gets an error reply; 0, the default, sets no cap. In
-                                   preview and reference modes the video's prompt is the images' and the planner's
-                                   together
+                                   preview mode the video's prompt is the image's and the planner's together
   AGENT_VIDEO_GEN_SECONDS          the video's length (default 2)
   AGENT_VIDEO_GEN_WIDTH / _HEIGHT / _FPS  every image's and the video's shape (default 832x480 at 16 fps)
   AGENT_VIDEO_GEN_TIMEOUT_S        a generation slower than this is an outage (default 600)
@@ -55,7 +55,7 @@ from examples.experimental.video_gen_agent.generator import (
 from miles.rollout.agentic.agent_function import InfraAbort
 from miles.utils.function_registry import load_function
 
-_IMAGES_LIMIT = 3
+_IMAGES_LIMIT = 4
 _VIDEO_MODES = ("preview", "i2v", "reference")
 _VIDEO_ID = "video_1"
 
@@ -96,27 +96,41 @@ TOOLS = [
     },
 ]
 
-# Reference mode's generate_video takes the ids of several images in place of one.
+# Reference mode's images are assets, and its generate_video takes the ids of several of them in place of one.
 REFERENCE_TOOLS = [
-    TOOLS[0],
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_image",
+            "description": (
+                "Generate one asset image: a single subject or object isolated on a plain background, or the setting "
+                "with nothing in it. Returns the image and its id."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"prompt": {"type": "string", "description": "The one asset this image shows, in detail."}}
+                | _SHARED_PARAMETERS,
+                "required": ["prompt"],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
             "name": "generate_video",
-            "description": (
-                "Generate the final video showing what one or more of your images show. Submits it and ends the "
-                "episode."
-            ),
+            "description": "Generate the final video from your assets. Submits it and ends the episode.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "image_ids": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "The ids generate_image returned for the images whose subjects and look the "
-                        "video shows.",
+                        "description": "The ids generate_image returned for the assets the video shows.",
                     },
-                    "prompt": {"type": "string", "description": "What moves in the video and how the camera moves."},
+                    "prompt": {
+                        "type": "string",
+                        "description": "The whole video: where each asset is, what it does, and how the camera moves.",
+                    },
                 }
                 | _SHARED_PARAMETERS,
                 "required": ["image_ids", "prompt"],
@@ -258,13 +272,8 @@ async def _play(episode: _Episode, messages: list[dict], base_url: str, request_
 
 def _system_prompt(options: KeyframeEnvOptions) -> str:
     if options.video_mode == "reference":
-        video = (
-            "generate_video with the ids of one or more images whose subjects and look the video should show, and a "
-            "prompt: it makes one clip from those images as references, and from their prompts followed by yours, so "
-            "the clip shows what they show without starting from any of them; your prompt says what moves and how "
-            "the camera moves"
-        )
-    elif options.video_mode == "i2v":
+        return _reference_system_prompt(options)
+    if options.video_mode == "i2v":
         video = (
             "generate_video with the id of the image the video should come from and a prompt: it makes one clip "
             "that starts from that image, and the prompt says what moves and how the camera moves"
@@ -285,13 +294,30 @@ def _system_prompt(options: KeyframeEnvOptions) -> str:
     )
 
 
+def _reference_system_prompt(options: KeyframeEnvOptions) -> str:
+    return (
+        "You turn a user's video request into a video, using an image generator and a video generator through "
+        "tools. First call generate_image to make the video's assets, and you see each one: one image for each "
+        "subject or object in the video, alone and isolated on a plain background, and one image of the setting with "
+        "nothing in it. Do not make whole scenes or variants of one scene. Then call generate_video with the ids of "
+        "the assets the video shows and a prompt that composes them: where each one is, what it does, and how the "
+        "camera moves. The video generator uses the assets as references, and reads only your prompt as text, so the "
+        "prompt names everything the video shows. That clip is your answer, and the episode ends. Images and the "
+        f"video are {options.width}x{options.height}; the video is {options.seconds:g} seconds at {options.fps} fps. "
+        f"You have {options.max_images} images, 1 video and {options.max_turns} turns. {_prompt_cap(options)}An "
+        "episode that ends without a video fails."
+    )
+
+
 def _prompt_cap(options: KeyframeEnvOptions) -> str:
     if not options.max_prompt_words:
         return ""
-    if options.video_mode == "i2v":
+    if options.video_mode != "preview":
         return f"Each prompt is at most {options.max_prompt_words} words. "
-    chosen = "the chosen images' prompts" if options.video_mode == "reference" else "the chosen image's prompt"
-    return f"Each prompt is at most {options.max_prompt_words} words, and {chosen} and your video prompt together too. "
+    return (
+        f"Each prompt is at most {options.max_prompt_words} words, and the chosen image's prompt and your video prompt "
+        "together too. "
+    )
 
 
 async def _call_tool(episode: _Episode, name: str, raw_arguments: str | dict | None) -> str | list[dict]:
@@ -344,15 +370,15 @@ async def _generate_video(episode: _Episode, arguments: dict) -> str:
     )
     if options.video_mode == "i2v":
         request = replace(request, image_path=images[0].path)
+    elif reference:
+        # An asset's prompt describes it isolated on a plain background, so only the planner's prompt reaches the video.
+        request = replace(request, reference_paths=tuple(image.path for image in images))
     else:
-        image_prompts = " ".join(image.request.prompt for image in images)
-        request = replace(request, prompt=f"{image_prompts} {request.prompt}")
-        if reference:
-            request = replace(request, reference_paths=tuple(image.path for image in images))
-        # The cap bounds what the generator reads, here the chosen images' prompts and this one together.
+        request = replace(request, prompt=f"{images[0].request.prompt} {request.prompt}")
+        # The cap bounds what the generator reads, here the chosen image's prompt and this one together.
         if options.max_prompt_words and (words := len(request.prompt.split())) > options.max_prompt_words:
             return (
-                f"Error: {_prompt_owners(images)} and the generate_video prompt have {words} words together; the "
+                f"Error: {images[0].image_id}'s prompt and the generate_video prompt have {words} words together; the "
                 f"limit is {options.max_prompt_words}. {episode.budget()}"
             )
     clip = await _generated(episode, episode.video_generator.generate(request))
@@ -398,11 +424,6 @@ def _chosen_images(
         images.append(image)
     return images, None
 
-
-def _prompt_owners(images: list[_GeneratedImage]) -> str:
-    if len(images) == 1:
-        return f"{images[0].image_id}'s prompt"
-    return f"the prompts of {', '.join(image.image_id for image in images)}"
 
 
 async def _generated(episode: _Episode, generation):

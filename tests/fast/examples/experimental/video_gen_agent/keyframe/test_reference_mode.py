@@ -1,4 +1,4 @@
-"""Reference mode: the video is made from one or more watched images as references (LIN-2830)."""
+"""Reference mode: the planner's images are assets, and the video is made from one or more watched ones (LIN-2830)."""
 
 import json
 import os
@@ -23,33 +23,42 @@ def reference(options):  # noqa: F811
     return options
 
 
-async def test_the_video_is_made_from_several_watched_images_as_references(reference, tmp_path):
+async def test_the_video_is_made_from_the_watched_assets_and_the_planners_prompt_alone(reference, tmp_path):
+    reference.setenv("AGENT_VIDEO_GEN_MAX_IMAGES", "4")
+    composed = "a corgi chases a ball across a sunny park, camera tracks it"
     sent = _script(
         reference,
-        [_call("generate_image", {"prompt": "a corgi"})],
-        [_call("generate_image", {"prompt": "a sunny park"})],
-        [_call("generate_video", {"image_ids": ["image_2", "image_1"], "prompt": "it runs at the camera"})],
+        [
+            _call("generate_image", {"prompt": "a corgi, isolated on a plain white background"}),
+            _call("generate_image", {"prompt": "a red ball, isolated on a plain white background"}),
+            _call("generate_image", {"prompt": "a sunny park, empty"}),
+        ],
+        [_call("generate_image", {"prompt": "a bench, isolated on a plain white background"})],
+        [_call("generate_video", {"image_ids": ["image_3", "image_1", "image_2"], "prompt": composed})],
         tools=env.REFERENCE_TOOLS,
     )
 
     result = await _run()
 
-    assert "ids of one or more images whose subjects and look the video should show" in sent[0][0]["content"]
+    system = sent[0][0]["content"]
+    assert "one image for each subject or object" in system and "one image of the setting" in system
+    assert "Do not make whole scenes" in system and "You have 4 images" in system
     record = result["video_gen"]
-    image_1, image_2 = record["images"]
+    image_1, image_2, image_3, _ = record["images"]
     clip = _clip_request(record["video"]["path"])
-    assert clip["reference_paths"] == [image_2["path"], image_1["path"]] and clip["image_path"] is None
-    assert clip["prompt"] == "a sunny park a corgi it runs at the camera"
+    assert clip["reference_paths"] == [image_3["path"], image_1["path"], image_2["path"]] and clip["image_path"] is None
+    # An asset's prompt describes it alone on a plain background, so it stays out of the video's prompt.
+    assert clip["prompt"] == composed
     (kept,) = (tmp_path / "kept").iterdir()
     assert record["submitted"] == {
         "clip_id": "video_1",
         "path": str(kept),
-        "prompt": "a sunny park a corgi it runs at the camera",
-        "prompt_words": 10,
-        "image_ids": ["image_2", "image_1"],
-        "image_prompts": ["a sunny park", "a corgi"],
+        "prompt": composed,
+        "prompt_words": 12,
+        "image_ids": ["image_3", "image_1", "image_2"],
+        "image_prompts": ["a sunny park, empty", "a corgi, isolated on a plain white background", "a red ball, isolated on a plain white background"],
     }
-    assert record["video"]["image_ids"] == ["image_2", "image_1"] and record["video_mode"] == "reference"
+    assert record["video"]["image_ids"] == ["image_3", "image_1", "image_2"] and record["video_mode"] == "reference"
 
 
 @pytest.mark.parametrize(
@@ -97,24 +106,30 @@ async def test_every_reference_must_have_been_seen(reference):
     assert result["video_gen"]["submitted"]["image_ids"] == ["image_1", "image_2"]
 
 
-async def test_the_word_cap_counts_every_chosen_images_prompt(reference):
+async def test_the_word_cap_is_on_the_planners_prompt_alone(reference):
     reference.setenv("AGENT_VIDEO_GEN_MAX_PROMPT_WORDS", "5")
     sent = _script(
         reference,
-        [_call("generate_image", {"prompt": "a red fox"})],
-        [_call("generate_image", {"prompt": "deep snow"})],
-        [_call("generate_video", {"image_ids": ["image_1", "image_2"], "prompt": "it runs"})],
-        [_call("generate_video", {"image_ids": ["image_1"], "prompt": "it runs"})],
+        [_call("generate_image", {"prompt": "a red fox alone"})],
+        [_call("generate_image", {"prompt": "deep snow field"})],
+        [_call("generate_video", {"image_ids": ["image_1", "image_2"], "prompt": "the fox runs through snow fast"})],
+        [_call("generate_video", {"image_ids": ["image_1", "image_2"], "prompt": "the fox runs through snow"})],
         tools=env.REFERENCE_TOOLS,
     )
 
     result = await _run()
 
-    assert "the chosen images' prompts and your video prompt together too" in sent[0][0]["content"]
-    assert _tool_replies(sent[3])[-1].startswith(
-        "Error: the prompts of image_1, image_2 and the generate_video prompt have 7 words together; the limit is 5."
-    )
-    assert result["video_gen"]["submitted"]["prompt"] == "a red fox it runs"
+    assert "Each prompt is at most 5 words. An episode" in sent[0][0]["content"]
+    assert _tool_replies(sent[3])[-1].startswith("Error: the generate_video prompt has 6 words; the limit is 5.")
+    assert result["video_gen"]["submitted"]["prompt"] == "the fox runs through snow"
+
+
+def test_the_asset_tools_ask_for_one_isolated_asset_per_image_and_a_composing_video_prompt():
+    image, video = env.REFERENCE_TOOLS
+
+    assert "isolated on a plain background" in image["function"]["description"]
+    assert "where each asset is" in video["function"]["parameters"]["properties"]["prompt"]["description"]
+    assert env.TOOLS[0]["function"]["description"].startswith("Generate a keyframe image")
 
 
 def test_the_served_directory_links_the_checkpoint_and_names_the_reference_pipeline(tmp_path):

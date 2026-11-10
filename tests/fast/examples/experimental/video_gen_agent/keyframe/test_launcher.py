@@ -153,6 +153,9 @@ def test_reference_mode_serves_vace_through_the_diffusers_backend_from_the_built
     assert (env["AGENT_VIDEO_GEN_VIDEO_MODE"], env["AGENT_VIDEO_GEN_REFERENCE_SCALE"]) == ("reference", "0.5")
     assert env["AGENT_VIDEO_GEN_VIDEO_MODEL"] == "Wan-AI/Wan2.1-VACE-14B-diffusers"
     assert "AGENT_VIDEO_GEN_GUIDANCE_SCALE_2" not in env and env["AGENT_VIDEO_GEN_NUM_INFERENCE_STEPS"] == "4"
+    assert env["AGENT_VIDEO_GEN_MAX_IMAGES"] == "4"
+    assert _agent_env(ScriptArgs(run_id="test"))["AGENT_VIDEO_GEN_MAX_IMAGES"] == "3"
+    assert _agent_env(ScriptArgs(run_id="test", video_mode="reference", max_images=2))["AGENT_VIDEO_GEN_MAX_IMAGES"] == "2"
     scaled = _agent_env(ScriptArgs(run_id="test", video_mode="reference", reference_scale=0.7))
     assert scaled["AGENT_VIDEO_GEN_REFERENCE_SCALE"] == "0.7"
 

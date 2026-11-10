@@ -10,9 +10,10 @@
            no thinking, greedy) → the video model; Phase 0's checkpoint is gone, so this stands in for B1 on new requests
   K0, K    the keyframe agent at its step-0 and final eval: the video request its episode submitted (prompt, negative
            prompt, and in i2v or reference mode the images), read from the run's eval dumps and generated again
-  K-blind  the final agent's first image prompt → the video model, with no image watched; with ``--mode i2v`` or
-           ``reference``, the video is conditioned on the first image the agent made, as its start frame or its
-           reference, so K-blind differs from K only in watching
+  K-blind  the final agent's first image prompt → the video model, with no image watched; with ``--mode i2v``, the
+           video starts from the first image the agent made; with ``--mode reference``, whose images are assets, the
+           prompt is all its image prompts and the references all its images, so K-blind differs from K only in
+           watching
 
 Every arm takes Phase 0's per-request seed and the run's clip shape (832x480, 2 s at 16 fps: 33 frames), so arms
 differ only in what the generator is asked; K0 and K keep the clip and seed their episode made as ``episode_path`` and
@@ -95,7 +96,7 @@ def arm_prompts(
                 answer = answers.get(request)
                 prompts[arm] = planner_prompt(answer) if answer is not None else None
         # Last, so the conditioning below lands on it.
-        prompts["K-blind"] = images[0]["prompt"] if images else None
+        prompts["K-blind"] = _blind_prompt(mode, images)
         rows += [
             {"arm": arm, "request": request, "prompt": prompt, "seed": request_seed(request)}
             for arm, prompt in prompts.items()
@@ -103,7 +104,9 @@ def arm_prompts(
         if mode == "t2v":
             continue
         if prompts["K-blind"] is not None:
-            rows[-1] |= _conditioned(mode, images[0]["path"])
+            # i2v starts from the first image; reference mode's images are assets, all of which K's video used.
+            paths = [image["path"] for image in images] if mode == "reference" else [images[0]["path"]]
+            rows[-1] |= _conditioned(mode, paths)
         rows.append(
             {"arm": ONE_SHOT_ARMS[mode], "request": request, "prompt": request, "image_prompt": request}
             | {"seed": request_seed(request), "mode": mode}
@@ -111,9 +114,17 @@ def arm_prompts(
     return rows
 
 
-def _conditioned(mode: str, image_path: str) -> dict:
-    """A clip request's fields that condition it on one image: the start frame in i2v mode, the reference otherwise."""
-    return {"image_path": image_path} if mode == "i2v" else {"reference_paths": [image_path]}
+def _blind_prompt(mode: str, images: list[dict]) -> str | None:
+    """The agent's first image prompt, or in reference mode, where each image is one asset, all of them."""
+    if not images:
+        return None
+    return " ".join(image["prompt"] for image in images) if mode == "reference" else images[0]["prompt"]
+
+
+def _conditioned(mode: str, image_paths: list[str]) -> dict:
+    """A clip request's conditioning: the first image as the start frame in i2v mode, every image as a reference in
+    reference mode."""
+    return {"image_path": image_paths[0]} if mode == "i2v" else {"reference_paths": image_paths}
 
 
 async def generate(rows: list[dict], generator, image_generator=None, concurrency: int = 8) -> list[dict]:
@@ -135,7 +146,7 @@ async def generate(rows: list[dict], generator, image_generator=None, concurrenc
                         height=SHAPE["height"],
                     )
                 )
-                row = row | _conditioned(row["mode"], image.path)
+                row = row | _conditioned(row["mode"], [image.path])
             clip = await generator.generate(
                 ClipRequest(
                     prompt=row["prompt"],
