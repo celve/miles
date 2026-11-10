@@ -64,6 +64,22 @@ def test_the_i2v_one_shot_arm_conditions_the_video_on_an_image_of_the_raw_reques
         asyncio.run(arms.generate([row], FakeClipGenerator()))
 
 
+def test_in_i2v_mode_k_blind_makes_its_first_image_and_animates_it():
+    final = {"a fox": {"images": [{"prompt": "fox, snow"}, {"prompt": "fox, close"}]}}
+
+    by = {
+        row["arm"]: row
+        for row in arms.arm_prompts(["a fox", "a tv"], {}, final, i2v=True)
+        if row["request"] == "a fox"
+    }
+    tv = [row for row in arms.arm_prompts(["a tv"], {}, {}, i2v=True) if row["arm"] == "K-blind"]
+
+    assert (by["K-blind"]["prompt"], by["K-blind"]["image_prompt"]) == ("fox, snow", "fox, snow")
+    assert "image_prompt" not in by["B0"] and "image_prompt" not in by["B1"]
+    assert tv[0]["prompt"] is None and "image_prompt" not in tv[0]
+    assert "image_prompt" not in next(r for r in arms.arm_prompts(["a fox"], {}, final) if r["arm"] == "K-blind")
+
+
 def test_generate_asks_the_env_generator_for_the_runs_clip_shape(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_VIDEO_GEN_FAKE_DIR", str(tmp_path / "clips"))
     rows = [
@@ -239,6 +255,23 @@ def test_arms_are_paired_by_request_with_a_two_sided_sign_test():
     assert compare.win_bar(compare.compare(missing), None)["frame difference not below B0"] is None
 
 
+def test_in_i2v_mode_the_win_bar_holds_k_to_b0_i2v_and_still_reports_b0():
+    k = {f"r{i}": 1.0 for i in range(10)}
+    rows = (
+        _rows("K", k)
+        + _rows("B0", {f"r{i}": 0.0 for i in range(10)})
+        + _rows("B0-i2v", {f"r{i}": 2.0 for i in range(10)})
+        + _rows("B1", {f"r{i}": 0.0 for i in range(10)})
+    )
+    results = compare.compare(rows)
+
+    bar = compare.win_bar(results, {"A": {"K": 15, "B0-i2v": 5, "tie": 0}}, i2v=True)
+
+    assert set(results) == {"B0", "B0-i2v", "B1"}
+    assert bar["reward beats B0-i2v and B1"] is False and bar["blind: K in >= 15 of 20 decided vs B0-i2v"] is True
+    assert compare.win_bar(results, None)["reward beats B0 and B1"] is True
+
+
 def test_the_blind_page_draws_outside_lin2741s_requests_and_keeps_the_key_apart(tmp_path):
     clips = {}
     for arm in ("K", "B0", "B1"):
@@ -264,6 +297,29 @@ def test_the_blind_page_draws_outside_lin2741s_requests_and_keeps_the_key_apart(
         assert (tmp_path / "blind" / f"{pair['pair']}_{k_side}.mp4").read_text().startswith("K ")
     picks = {pair["pair"]: key[pair["pair"]] if pair["set"] == "A" else "tie" for pair in pairs}
     assert blind.unblind(pairs, key, picks) == {"A": {"K": 20, "B0": 0, "tie": 0}, "B": {"K": 0, "B1": 0, "tie": 20}}
+
+
+def test_in_i2v_mode_blind_set_a_is_k_against_b0_i2v(tmp_path):
+    clips = {}
+    for arm in ("K", "B0-i2v", "B1"):
+        for i in range(25):
+            path = tmp_path / f"{arm}_{i}.mp4"
+            path.write_text(arm)
+            clips.setdefault(arm, {})[f"r{i}"] = str(path)
+
+    pairs, key = blind.make(clips, set(), tmp_path / "blind", i2v=True)
+
+    a_pair = next(pair for pair in pairs if pair["set"] == "A")
+    other = "right" if key[a_pair["pair"]] == "left" else "left"
+    assert (tmp_path / "blind" / f"{a_pair['pair']}_{other}.mp4").read_text() == "B0-i2v"
+    against_k = {"left": "right", "right": "left"}
+    picks = {pair["pair"]: against_k[key[pair["pair"]]] if pair["set"] == "A" else "tie" for pair in pairs}
+    assert blind.unblind(pairs, key, picks) == {
+        "A": {"K": 0, "B0-i2v": 20, "tie": 0},
+        "B": {"K": 0, "B1": 0, "tie": 20},
+    }
+    with pytest.raises(KeyError):
+        blind.draw(clips, set())
 
 
 def test_the_blind_draw_is_fixed():
