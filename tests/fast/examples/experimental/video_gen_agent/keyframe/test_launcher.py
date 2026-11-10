@@ -171,10 +171,14 @@ def test_reference_mode_serves_vace_through_the_diffusers_backend_from_the_built
 )
 def test_the_env_waits_for_the_video_queue_the_layout_holds(monkeypatch, script_args, timeout):
     monkeypatch.delenv("AGENT_VIDEO_GEN_TIMEOUT_S", raising=False)
-    for name, value in _agent_env(ScriptArgs(run_id="test", **script_args)).items():
+    env = _agent_env(ScriptArgs(run_id="test", **script_args))
+    for name, value in env.items():
         monkeypatch.setenv(name, value)
 
     assert KeyframeEnvOptions.from_env().timeout_s == timeout
+    # The timeout leaves the low-noise expert's guidance as the mode sets it.
+    reference = script_args.get("video_mode") == "reference"
+    assert ("AGENT_VIDEO_GEN_GUIDANCE_SCALE_2" in env) != reference
 
 
 def test_prepare_builds_the_reference_directory_with_the_wan21_lightx2v_lora(monkeypatch, tmp_path):

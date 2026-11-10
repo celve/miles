@@ -342,10 +342,10 @@ def _agent_env(args: ScriptArgs) -> dict[str, str]:
     }
     if args.video_mode == "reference":
         env["AGENT_VIDEO_GEN_REFERENCE_SCALE"] = str(args.reference_scale)
-    if (timeout := _generation_timeout(args)) is not None:
-        env["AGENT_VIDEO_GEN_TIMEOUT_S"] = str(timeout)
     else:
         env["AGENT_VIDEO_GEN_GUIDANCE_SCALE_2"] = "1.0"
+    if (timeout := _generation_timeout(args)) is not None:
+        env["AGENT_VIDEO_GEN_TIMEOUT_S"] = str(timeout)
     return env
 
 
