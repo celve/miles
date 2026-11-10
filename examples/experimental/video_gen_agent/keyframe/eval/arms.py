@@ -11,9 +11,10 @@
   K0, K    the keyframe agent at its step-0 and final eval: the video request its episode submitted (prompt, negative
            prompt, and in i2v or reference mode the images), read from the run's eval dumps and generated again
   K-blind  the final agent's first image prompt → the video model, with no image watched; with ``--mode i2v``, the
-           video starts from the first image the agent made; with ``--mode reference``, whose images are assets, the
-           prompt is all its image prompts and the references all its images, so K-blind differs from K only in
-           watching
+           video starts from the first image the agent made, so K-blind differs from K only in watching. With
+           ``--mode reference``, whose images are assets, it is an asset-prompt replay: its prompt is all the agent's
+           image prompts joined and its references all its images in the order made, so it also differs from K in the
+           composing prompt and in which assets, in which order, the video takes
 
 Every arm takes Phase 0's per-request seed and the run's clip shape (832x480, 2 s at 16 fps: 33 frames), so arms
 differ only in what the generator is asked; K0 and K keep the clip and seed their episode made as ``episode_path`` and
@@ -104,7 +105,7 @@ def arm_prompts(
         if mode == "t2v":
             continue
         if prompts["K-blind"] is not None:
-            # i2v starts from the first image; reference mode's images are assets, all of which K's video used.
+            # i2v starts from the first image; reference mode takes every asset the agent made, which K's video may not.
             paths = [image["path"] for image in images] if mode == "reference" else [images[0]["path"]]
             rows[-1] |= _conditioned(mode, paths)
         rows.append(
