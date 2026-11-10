@@ -114,6 +114,22 @@ def test_heldout_reward_counts_each_episode_once_however_many_branches_folding_l
     assert log_dict["eval/heldout"] == 0.5
 
 
+def test_heldout_reward_is_also_logged_per_request_category(recipe_config, monkeypatch):
+    logged = []
+    monkeypatch.setattr(metrics.tracking, "log", lambda args, log_dict, step_key: logged.append(log_dict))
+    samples = [_eval_sample(s, r) for s, r in (("a", 1.0), ("a", 1.0), ("b", 0.0), ("c", 0.5), ("d", 1.0))]
+    for sample, category in zip(samples, ["spatial", "spatial", "spatial", "numeracy", None], strict=True):
+        sample.metadata |= {"category": category} if category else {}
+    data = {"compbench": {"rewards": [s.reward for s in samples], "truncated": [False] * 5, "samples": samples}}
+
+    metrics.log_eval_rollout_data(0, recipe_config, data)
+
+    (log_dict,) = logged
+    assert log_dict["eval/compbench"] == 0.625
+    assert (log_dict["eval/compbench/spatial"], log_dict["eval/compbench/numeracy"]) == (0.5, 0.5)
+    assert not any(key.startswith("eval/compbench/None") for key in log_dict)
+
+
 async def test_no_engine_is_given_the_port_the_generators_broker_binds(recipe_config):
     specs = {
         model.name: _compute_spec_inference_engine(

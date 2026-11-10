@@ -5,7 +5,9 @@
   B0-i2v   the raw request → the image model → image-to-video from that image (``prompts --mode i2v``), the one-shot
            arm an i2v-mode agent is fair against, since B0's text-to-video does not pay image-to-video's stillness
   B0-ref   the same image as the video model's reference (``prompts --mode reference``), for a reference-mode agent
-  B1       Phase 0's trained planner prompt (LIN-2737's ``answer99``) → the video model
+  B1       Phase 0's trained planner prompt (LIN-2737's ``answer99``) → the video model, for VBench's requests only
+  B1-rewrite  the untrained planner's one-turn rewrite of the request (``rewrite``: Phase 0's system prompt, no images,
+           no thinking, greedy) → the video model; Phase 0's checkpoint is gone, so this stands in for B1 on new requests
   K0, K    the keyframe agent at its step-0 and final eval: the video request its episode submitted (prompt, negative
            prompt, and in i2v or reference mode the images), read from the run's eval dumps and generated again
   K-blind  the final agent's first image prompt → the video model, with no image watched; with ``--mode i2v`` or
@@ -14,17 +16,20 @@
 
 Every arm takes Phase 0's per-request seed and the run's clip shape (832x480, 2 s at 16 fps: 33 frames), so arms
 differ only in what the generator is asked; K0 and K keep the clip and seed their episode made as ``episode_path`` and
-``episode_seed``. Generate every arm on one box, since clips differ across GPU types and parallel layouts.
+``episode_seed``. Generate every arm on one box, since clips differ across GPU types and parallel layouts. A held-out
+row's ``metadata["category"]`` is copied onto its rows as ``category``, for ``compare.py --by-category``.
 
+  python -m examples.experimental.video_gen_agent.keyframe.eval.arms rewrite --heldout heldout.jsonl \\
+      --base-url http://localhost:30000 --out rewrites.jsonl
   python -m examples.experimental.video_gen_agent.keyframe.eval.arms prompts --heldout heldout.jsonl \\
-      --phase0 heldout_paired_step0_step99.jsonl --final-dump eval_199.pt --out prompts.jsonl
+      [--phase0 heldout_paired_step0_step99.jsonl] [--b1-rewrite rewrites.jsonl] --final-dump eval_199.pt --out prompts.jsonl
   python -m examples.experimental.video_gen_agent.keyframe.eval.arms from-dump eval_0.pt --arm K0 --heldout heldout.jsonl \
       --out k0.jsonl
   python -m examples.experimental.video_gen_agent.keyframe.eval.arms generate prompts.jsonl k0.jsonl k.jsonl --out clips.jsonl
 
 ``generate`` makes clips with the env's generator, so ``AGENT_VIDEO_GEN_GENERATOR`` and its options pick the router
 (or a fake) exactly as in training; a row with an ``image_prompt`` first gets its image from
-``AGENT_VIDEO_GEN_IMAGE_GENERATOR``. B0 and B1 are text-to-video and the mode's one-shot arm is not, so generate them
+``AGENT_VIDEO_GEN_IMAGE_GENERATOR``. B0, B1 and B1-rewrite are text-to-video and the mode's one-shot arm is not, so generate them
 in separate calls, each against its own video engines (with ``--mode i2v`` or ``reference``, K-blind goes with the
 one-shot arm).
 """
@@ -35,19 +40,29 @@ import json
 import os
 from pathlib import Path
 
+import httpx
 import torch
 
 from examples.experimental.video_gen_agent.generator import ClipRequest, ImageRequest
 from examples.experimental.video_gen_agent.keyframe.eval.compare import ONE_SHOT_ARMS
+from examples.experimental.video_gen_agent.phase0.make_planner_data import SYSTEM_PROMPT
 from examples.experimental.video_gen_agent.phase0.reward import planner_prompt, request_seed
 from miles.utils.function_registry import load_function
 
-GENERATED_ARMS = ("B0", "B1", "K-blind")
 SHAPE = {"seconds": 2.0, "width": 832, "height": 480, "fps": 16}
 
 
 def heldout_requests(path: Path) -> list[str]:
     return [json.loads(line)["messages"][-1]["content"] for line in path.read_text().splitlines()]
+
+
+def heldout_categories(path: Path) -> dict[str, str]:
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    return {
+        row["messages"][-1]["content"]: row["metadata"]["category"]
+        for row in rows
+        if "category" in (row.get("metadata") or {})
+    }
 
 
 def episodes(dump: Path) -> dict[str, dict]:
@@ -61,22 +76,29 @@ def episodes(dump: Path) -> dict[str, dict]:
 
 
 def arm_prompts(
-    requests: list[str], phase0: dict[str, str], final: dict[str, dict], *, mode: str = "t2v"
+    requests: list[str],
+    phase0: dict[str, str] | None,
+    final: dict[str, dict],
+    *,
+    mode: str = "t2v",
+    rewrites: dict[str, str] | None = None,
 ) -> list[dict]:
-    """B0, B1 and K-blind's prompt per request, and in i2v or reference mode the mode's one-shot arm, with K-blind
-    conditioned on the agent's first image as well; a request an arm has no prompt for gets prompt None."""
+    """B0 and K-blind's prompt per request, B1's with Phase 0's answers and B1-rewrite's with the untrained rewrites,
+    and in i2v or reference mode the mode's one-shot arm, with K-blind conditioned on the agent's first image as well;
+    a request an arm has no prompt for gets prompt None."""
     rows = []
     for request in requests:
         images = (final.get(request) or {}).get("images") or []
-        answer = phase0.get(request)
-        prompts = {
-            "B0": request,
-            "B1": planner_prompt(answer) if answer is not None else None,
-            "K-blind": images[0]["prompt"] if images else None,
-        }
+        prompts = {"B0": request}
+        for arm, answers in (("B1", phase0), ("B1-rewrite", rewrites)):
+            if answers is not None:
+                answer = answers.get(request)
+                prompts[arm] = planner_prompt(answer) if answer is not None else None
+        # Last, so the conditioning below lands on it.
+        prompts["K-blind"] = images[0]["prompt"] if images else None
         rows += [
-            {"arm": arm, "request": request, "prompt": prompts[arm], "seed": request_seed(request)}
-            for arm in GENERATED_ARMS
+            {"arm": arm, "request": request, "prompt": prompt, "seed": request_seed(request)}
+            for arm, prompt in prompts.items()
         ]
         if mode == "t2v":
             continue
@@ -155,6 +177,37 @@ def from_dump(dump: Path, arm: str, requests: list[str]) -> list[dict]:
     return rows
 
 
+async def rewrite(requests: list[str], base_url: str, concurrency: int = 16) -> list[dict]:
+    """B1-rewrite's answers: the served planner's one-turn rewrite of each request under Phase 0's system prompt, with
+    thinking off as Phase 0 trained it, and greedy as eval decodes."""
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def one(client: httpx.AsyncClient, request: str) -> dict:
+        payload = {
+            "model": "default",
+            "messages": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": request}],
+            "temperature": 0,
+            "max_tokens": 2048,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+        async with semaphore:
+            response = await client.post(f"{base_url}/v1/chat/completions", json=payload)
+        response.raise_for_status()
+        return {"request": request, "answer": response.json()["choices"][0]["message"]["content"]}
+
+    async with httpx.AsyncClient(timeout=600) as client:
+        return list(await asyncio.gather(*(one(client, request) for request in requests)))
+
+
+def _with_categories(rows: list[dict], heldout: Path) -> list[dict]:
+    categories = heldout_categories(heldout)
+    return [row | ({"category": categories[row["request"]]} if row["request"] in categories else {}) for row in rows]
+
+
+def _answers(path: Path | None, key: str) -> dict[str, str] | None:
+    return None if path is None else {r["request"]: r[key] for r in map(json.loads, path.read_text().splitlines())}
+
+
 def _write(path: Path, rows: list[dict]) -> None:
     path.write_text("".join(json.dumps(row) + "\n" for row in rows))
 
@@ -164,7 +217,10 @@ def main(argv: list[str] | None = None) -> None:
     commands = parser.add_subparsers(dest="command", required=True)
     prompts = commands.add_parser("prompts")
     prompts.add_argument("--heldout", type=Path, required=True)
-    prompts.add_argument("--phase0", type=Path, required=True, help="LIN-2737's heldout_paired_step0_step99.jsonl")
+    prompts.add_argument(
+        "--phase0", type=Path, help="LIN-2737's heldout_paired_step0_step99.jsonl, for B1 on VBench's requests"
+    )
+    prompts.add_argument("--b1-rewrite", type=Path, help="rewrite's output, for B1-rewrite")
     prompts.add_argument("--final-dump", type=Path, required=True, help="the final eval's eval_<step>.pt")
     prompts.add_argument("--out", type=Path, required=True)
     prompts.add_argument(
@@ -176,6 +232,10 @@ def main(argv: list[str] | None = None) -> None:
     generated = commands.add_parser("generate")
     generated.add_argument("prompts", type=Path, nargs="+")
     generated.add_argument("--out", type=Path, required=True)
+    rewritten = commands.add_parser("rewrite")
+    rewritten.add_argument("--heldout", type=Path, required=True)
+    rewritten.add_argument("--base-url", required=True, help="an OpenAI-compatible server of the untrained planner")
+    rewritten.add_argument("--out", type=Path, required=True)
     dumped = commands.add_parser("from-dump")
     dumped.add_argument("dump", type=Path)
     dumped.add_argument("--arm", choices=("K0", "K"), required=True)
@@ -184,10 +244,16 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     if args.command == "prompts":
-        phase0 = {r["request"]: r["answer99"] for r in map(json.loads, args.phase0.read_text().splitlines())}
-        _write(
-            args.out, arm_prompts(heldout_requests(args.heldout), phase0, episodes(args.final_dump), mode=args.mode)
+        rows = arm_prompts(
+            heldout_requests(args.heldout),
+            _answers(args.phase0, "answer99"),
+            episodes(args.final_dump),
+            mode=args.mode,
+            rewrites=_answers(args.b1_rewrite, "answer"),
         )
+        _write(args.out, _with_categories(rows, args.heldout))
+    elif args.command == "rewrite":
+        _write(args.out, asyncio.run(rewrite(heldout_requests(args.heldout), args.base_url)))
     elif args.command == "generate":
         generator = load_function(os.environ["AGENT_VIDEO_GEN_GENERATOR"])()
         image_path = os.environ.get("AGENT_VIDEO_GEN_IMAGE_GENERATOR")
@@ -195,7 +261,9 @@ def main(argv: list[str] | None = None) -> None:
         rows = [json.loads(line) for path in args.prompts for line in path.read_text().splitlines()]
         _write(args.out, asyncio.run(generate(rows, generator, image_generator)))
     else:
-        _write(args.out, from_dump(args.dump, args.arm, heldout_requests(args.heldout)))
+        _write(
+            args.out, _with_categories(from_dump(args.dump, args.arm, heldout_requests(args.heldout)), args.heldout)
+        )
 
 
 if __name__ == "__main__":

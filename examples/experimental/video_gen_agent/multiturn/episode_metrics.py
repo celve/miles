@@ -18,7 +18,8 @@ Miles' own ``rollout/episode_raw_reward``.
 ``--custom-eval-rollout-log-function-path examples.experimental.video_gen_agent.multiturn.episode_metrics.log_eval_episodes``
 keeps one row per episode in each eval dataset before Miles' own eval metrics run, so ``eval/<dataset>`` is the
 mean episode reward: a K that folds more would otherwise weigh its episodes by their branch count. Per-sample eval
-statistics then describe each episode's first branch.
+statistics then describe each episode's first branch. A dataset whose requests carry ``metadata["category"]`` (such as
+``make_compbench_requests.py``'s) is also logged per category, as ``eval/<dataset>/<category>``.
 """
 
 import numpy as np
@@ -37,10 +38,13 @@ def log_episodes(rollout_id, args, samples, rollout_extra_metrics, rollout_time)
 
 
 def log_eval_episodes(rollout_id, args, data, extra_metrics) -> bool:
-    for name, dataset in data.items():
+    for name, dataset in list(data.items()):
         if dataset.get("samples") is not None:
             # Replaces the dataset in the dict Miles logs next; nothing reads eval data after logging.
             data[name] = _keep_eval_rows(dataset, keep=_first_of_each_episode(dataset["samples"]))
+            categories = [sample.metadata.get("category") for sample in data[name]["samples"]]
+            for category in sorted({c for c in categories if c is not None}):
+                data[f"{name}/{category}"] = _keep_eval_rows(data[name], keep=[c == category for c in categories])
     return False
 
 
