@@ -1,5 +1,6 @@
-"""Keyframe planner RL: a Qwen3.5-9B planner makes up to three keyframe images with a frozen Z-Image-Turbo, sees
-each, then makes one video from the image it picks with a frozen Wan2.2-A14B and the lightx2v 4-step LoRAs.
+"""Keyframe planner RL: a Qwen3.5-9B (or Qwen3.8-27B) planner makes up to three keyframe images with a frozen
+Z-Image-Turbo, sees each, then makes one video from the image it picks with a frozen Wan2.2-A14B and the lightx2v
+4-step LoRAs.
 A Qwen3-VL judge scores that video against the request.
 
 One node, not colocated (frozen generators cannot share GPUs with training): the trainer (Qwen3.5 plugin model
@@ -10,8 +11,11 @@ The env is ``examples.experimental.video_gen_agent.keyframe.env`` under session 
 the planner as an ``image_url`` part in token space.
 
 Args:
-    --num-gpus-per-node: 4 or 8 picks the recipe's layout (4: 1/1/1/1/0, 8: 1/1/2/3/1 for trainer, planner, image,
-        video and eval); --train-gpus, --policy-gpus, --image-gpus, --video-gpus, --eval-gpus override it.
+    --planner: ``qwen3.5-9b`` (default) or ``qwen3.8-27b``, the planner's checkpoint, TITO family and layouts.
+    --num-gpus-per-node: picks the planner's layout of trainer, planner, image, video and eval GPUs (9B: 4 is
+        1/1/1/1/0, 8 is 1/1/2/3/1; 27B: 8 is 4/1/1/2/0, its trainer at TP4); --train-gpus, --policy-gpus, --image-gpus,
+        --video-gpus, --eval-gpus override it. The trainer's GPUs are its tensor-parallel group.
+    --optimizer-cpu-offload: keep Adam's state in host memory (default: the planner's recipe, on for the 27B).
     --video-mode: ``preview`` (default) makes the video from text, the chosen image's prompt plus the motion prompt,
         with Wan2.2-T2V-A14B; ``i2v`` makes it from the image with Wan2.2-I2V-A14B, whose clips LIN-2809 measured
         moving far less. Each takes its own lightx2v LoRAs.
@@ -25,6 +29,7 @@ Example:
     python examples/experimental/video_gen_agent/keyframe/run_qwen35_9b_keyframe.py --num-gpus-per-node 4
     python examples/experimental/video_gen_agent/keyframe/run_qwen35_9b_keyframe.py --num-rollout 2 --rollout-batch-size 4
     python examples/experimental/video_gen_agent/keyframe/run_qwen35_9b_keyframe.py --image-model Qwen/Qwen-Image-2.1-Turbo
+    python examples/experimental/video_gen_agent/keyframe/run_qwen35_9b_keyframe.py --planner qwen3.8-27b
 """
 
 from dataclasses import dataclass
@@ -32,20 +37,39 @@ from dataclasses import dataclass
 import typer
 import yaml
 
-from examples.experimental.video_gen_agent.multiturn.run_qwen35_9b_fastwan import (
-    _REASONING_PARSER,
-    _TOOL_CALL_PARSER,
-    AGENT,
-    JUDGE,
-    PLANNER,
-    VBENCH,
-)
+from examples.experimental.video_gen_agent.multiturn.run_qwen35_9b_fastwan import AGENT, JUDGE, VBENCH
+from miles.utils.chat_template_utils import resolve_reasoning_and_tool_call_parser
 from miles.utils.external_utils import command_utils
 
 LIGHTX2V = "lightx2v/Wan2.2-Distill-Loras"
 
-# Trainer, planner, image, video and eval GPUs of the recipe's layouts, by GPUs per node.
-_LAYOUTS = {4: (1, 1, 1, 1, 0), 8: (1, 1, 2, 3, 1)}
+
+@dataclass(frozen=True)
+class _PlannerRecipe:
+    repo: str
+    megatron_model_type: str
+    tito_model: str
+    # Trainer, planner, image, video and eval GPUs, by GPUs per node.
+    layouts: dict[int, tuple[int, int, int, int, int]]
+    optimizer_cpu_offload: bool = False
+
+
+_PLANNERS = {
+    "qwen3.5-9b": _PlannerRecipe(
+        repo="Qwen/Qwen3.5-9B",
+        megatron_model_type="qwen3.5-9B",
+        tito_model="qwen35",
+        layouts={4: (1, 1, 1, 1, 0), 8: (1, 1, 2, 3, 1)},
+    ),
+    # LIN-2699 trained Qwen3.8-27B at TP4; with four trainer GPUs, eval shares the planner's engine.
+    "qwen3.8-27b": _PlannerRecipe(
+        repo="Qwen/Qwen3.8-27B",
+        megatron_model_type="qwen3.8-27B",
+        tito_model="qwen38small",
+        layouts={8: (4, 1, 1, 2, 0)},
+        optimizer_cpu_offload=True,
+    ),
+}
 
 
 # Denoising steps and CFG scale of each known image model at 832x480 (LIN-2809).
@@ -76,12 +100,14 @@ _VIDEO_RECIPES = {
 @dataclass
 class ScriptArgs(command_utils.ExecuteTrainConfig):
     run_id: str = command_utils.create_run_id()
+    planner: str = "qwen3.5-9b"
     num_gpus_per_node: int = 8
     train_gpus: int | None = None
     policy_gpus: int | None = None
     image_gpus: int | None = None
     video_gpus: int | None = None
     eval_gpus: int | None = None
+    optimizer_cpu_offload: bool | None = None
     video_mode: str = "preview"
     image_model: str = "Tongyi-MAI/Z-Image-Turbo"
     image_steps: int | None = None
@@ -103,6 +129,9 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
 
     def __post_init__(self):
         assert self.num_nodes == 1, "the recipe places its trainer, engines and judge on one node"
+        assert self.planner in _PLANNERS, f"--planner is one of {sorted(_PLANNERS)}"
+        if self.optimizer_cpu_offload is None:
+            self.optimizer_cpu_offload = self.recipe.optimizer_cpu_offload
         assert self.video_mode in _VIDEO_RECIPES, f"--video-mode is one of {sorted(_VIDEO_RECIPES)}"
         if self.image_steps is None or self.image_guidance_scale is None:
             recipe = _IMAGE_RECIPES.get(self.image_model)
@@ -113,8 +142,10 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
             self.image_guidance_scale = recipe[1] if self.image_guidance_scale is None else self.image_guidance_scale
         split = (self.train_gpus, self.policy_gpus, self.image_gpus, self.video_gpus, self.eval_gpus)
         if None in split:
-            layout = _LAYOUTS.get(self.num_gpus_per_node)
-            assert layout is not None, f"no layout for {self.num_gpus_per_node} GPUs, so set all five GPU counts"
+            layout = self.recipe.layouts.get(self.num_gpus_per_node)
+            assert (
+                layout is not None
+            ), f"{self.planner} has no layout for {self.num_gpus_per_node} GPUs, so set all five GPU counts"
             split = tuple(
                 layout_gpus if gpus is None else gpus for gpus, layout_gpus in zip(split, layout, strict=True)
             )
@@ -122,6 +153,10 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
         assert (
             sum(split) == self.num_gpus_per_node
         ), f"the GPU split adds up to {sum(split)}, not {self.num_gpus_per_node}"
+
+    @property
+    def recipe(self) -> _PlannerRecipe:
+        return _PLANNERS[self.planner]
 
     @property
     def video(self) -> _VideoRecipe:
@@ -147,18 +182,18 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
 def prepare(args: ScriptArgs):
     U = args.create_backend()
     U.exec_command_cpu(f"mkdir -p {args.model_dir} {args.data_dir}")
-    for repo in (PLANNER, JUDGE, args.image_model, args.video.model):
+    for repo in (args.recipe.repo, JUDGE, args.image_model, args.video.model):
         U.exec_command_cpu(f"hf download {repo} --local-dir {args.local(repo)}")
     U.exec_command_cpu(
         f"hf download {LIGHTX2V} {args.video.high_noise_lora} {args.video.low_noise_lora} "
         f"--local-dir {args.local(LIGHTX2V)}"
     )
     U.convert_checkpoint(
-        model_name=PLANNER.split("/")[1],
-        megatron_model_type="qwen3.5-9B",
+        model_name=args.recipe.repo.split("/")[1],
+        megatron_model_type=args.recipe.megatron_model_type,
         num_gpus_per_node=args.num_gpus_per_node,
         dir_dst=args.model_dir,
-        hf_checkpoint=args.local(PLANNER),
+        hf_checkpoint=args.local(args.recipe.repo),
         megatron_path=args.megatron_path,
     )
     U.exec_command_cpu(f"[ -d {args.data_dir}/VBench ] || git clone --depth 1 {VBENCH} {args.data_dir}/VBench")
@@ -174,7 +209,7 @@ def execute(args: ScriptArgs):
     U.execute_train(
         train_args=_train_args(args),
         num_gpus_per_node=args.num_gpus_per_node,
-        megatron_model_type="qwen3.5-9B",
+        megatron_model_type=args.recipe.megatron_model_type,
         megatron_path=args.megatron_path,
         extra_env_vars={"PYTHONPATH": args.megatron_path, **_agent_env(args)},
     )
@@ -206,7 +241,8 @@ def _agent_env(args: ScriptArgs) -> dict[str, str]:
 
 
 def _train_args(args: ScriptArgs) -> str:
-    planner_path = args.local(PLANNER)
+    planner_path = args.local(args.recipe.repo)
+    reasoning_parser, tool_call_parser = resolve_reasoning_and_tool_call_parser(args.recipe.tito_model)
 
     # A fresh --load directory starts the run from the --ref-load weights at rollout 0.
     ckpt_args = (
@@ -235,8 +271,8 @@ def _train_args(args: ScriptArgs) -> str:
         f"--custom-generate-function-path {AGENT}.keyframe.generate.generate "
         f"--custom-agent-function-path {AGENT}.keyframe.env.run_agent "
         "--use-session-server v2 "
-        "--tito-model qwen35 "
-        f"--sglang-reasoning-parser {_REASONING_PARSER} --sglang-tool-call-parser {_TOOL_CALL_PARSER} "
+        f"--tito-model {args.recipe.tito_model} "
+        f"--sglang-reasoning-parser {reasoning_parser} --sglang-tool-call-parser {tool_call_parser} "
         "--router miles "
         # Generation dominates an episode, so every episode of a round is in flight at once (LIN-2634).
         f"--sglang-server-concurrency {args.rollout_batch_size * args.n_samples_per_prompt} "
@@ -289,6 +325,8 @@ def _train_args(args: ScriptArgs) -> str:
     optimizer_args = (
         "--optimizer adam --lr 1e-6 --lr-decay-style constant --weight-decay 0.0 --adam-beta1 0.9 --adam-beta2 0.999 "
     )
+    if args.optimizer_cpu_offload:
+        optimizer_args += "--optimizer-cpu-offload --overlap-cpu-optimizer-d2h-h2d --use-precision-aware-optimizer "
 
     sglang_args = (
         f"--sglang-config {command_utils.encode_pseudo_file(yaml.safe_dump(_sglang_config(args)))} "

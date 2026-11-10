@@ -24,6 +24,8 @@ from miles.rollout.session import image_expansion
 from miles.rollout.session.config import compute_session_server_config
 from miles.rollout.session.samples.codec import COMPUTED_FIELDS_V2, decode_samples_and_merge_input_sample
 from miles.rollout.session.server import SessionServer
+from miles.utils.chat_template_utils import resolve_fixed_chat_template
+from miles.utils.chat_template_utils.tito_tokenizer import TITOTokenizerType
 from miles.utils.http_utils import find_available_port
 from miles.utils.media_refs import collect_media_refs, release_run_media
 from miles.utils.processing_utils import load_processor, load_tokenizer
@@ -33,17 +35,33 @@ from miles.utils.types import Sample
 register_cpu_ci(est_time=50, suite="stage-b-cpu", labels=["rollout"])
 
 CHECKPOINT = "Qwen/Qwen3-VL-2B-Instruct"
+QWEN38 = "Qwen/Qwen3.8-27B"
+# The fixed template Miles' argument resolution installs for --tito-model qwen38small.
+QWEN38_ARGS = {
+    "hf_checkpoint": QWEN38,
+    "tito_model": "qwen38small",
+    "chat_template_path": resolve_fixed_chat_template(TITOTokenizerType.QWEN38_SMALL)[0],
+}
+
+
+def _vlm(checkpoint: str) -> SimpleNamespace:
+    processor = load_processor(checkpoint, trust_remote_code=True)
+    if processor is None:
+        pytest.skip(f"{checkpoint} processor unavailable")
+    tokenizer = load_tokenizer(checkpoint, trust_remote_code=True)
+    return SimpleNamespace(
+        processor=processor, tokenizer=tokenizer, pad_id=tokenizer.convert_tokens_to_ids(processor.image_token)
+    )
 
 
 @pytest.fixture(scope="module")
 def vlm():
-    processor = load_processor(CHECKPOINT, trust_remote_code=True)
-    if processor is None:
-        pytest.skip(f"{CHECKPOINT} processor unavailable")
-    tokenizer = load_tokenizer(CHECKPOINT, trust_remote_code=True)
-    return SimpleNamespace(
-        processor=processor, tokenizer=tokenizer, pad_id=tokenizer.convert_tokens_to_ids(processor.image_token)
-    )
+    return _vlm(CHECKPOINT)
+
+
+@pytest.fixture(scope="module")
+def vlm38():
+    return _vlm(QWEN38)
 
 
 def png(width: int, height: int, color: tuple[int, int, int]) -> bytes:
@@ -155,6 +173,7 @@ def server_args(shared_media_dir: Path, **extra) -> dict[str, Any]:
         "shared_media_dir": str(shared_media_dir),
         "run_uuid": "run0",
         "session_message_matcher": "strict",
+        "allow_stop_token_replace": False,
         "session_server_instance_id": uuid.uuid4().hex,
         "pause_generation_mode": "retract",
         "session_sample_picker_path": "miles.rollout.session.v2.picker_hub.drop_same_prompt_retries",
@@ -274,6 +293,19 @@ class TestEngineExpansionCheck:
             session_id = _create_session(env.url)
             assert chat(env, session_id, [user_turn(SHOT1, "one")]).status_code == 200
         assert ran == expected
+
+    @pytest.mark.parametrize("call", [0, 1])
+    def test_qwen38_counts_its_images(self, vlm38, tmp_path, call):
+        with session_server(vlm38, tmp_path, count_bias_on_call={call: 1}, **QWEN38_ARGS) as env:
+            session_id = _create_session(env.url)
+            first = [user_turn(SHOT1, "one")]
+            response = chat(env, session_id, first)
+            if call == 1:
+                assert response.status_code == 200, response.content
+                second = first + [response.json()["choices"][0]["message"], user_turn(SHOT2, "two")]
+                response = chat(env, session_id, second)
+            assert response.status_code == 502
+            assert b"expanded prompt differs" in response.content
 
     def test_an_engine_that_returns_no_prompt_fails_the_counted_check(self, vlm, tmp_path):
         with session_server(vlm, tmp_path, return_prompt=False) as env:
