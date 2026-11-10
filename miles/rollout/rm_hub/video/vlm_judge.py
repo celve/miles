@@ -69,7 +69,7 @@ class VlmJudgeScorer:
 
     @torch.no_grad()
     def _score(self, clip: Clip, request: str) -> float:
-        frames, metadata = self._sample(clip)
+        frames, metadata = sample_frames(clip, self.num_frames, self.max_pixels_per_frame)
         axes = list(self.axis_weights)
         texts = [
             self.processor.apply_chat_template(
@@ -101,20 +101,22 @@ class VlmJudgeScorer:
         total = sum(self.axis_weights.values())
         return sum(self.axis_weights[axis] * score for axis, score in zip(axes, axis_scores, strict=True)) / total
 
-    def _sample(self, clip: Clip) -> tuple[torch.Tensor, VideoMetadata]:
-        indices = sample_frame_indices(len(clip.frames), self.num_frames)
-        frames = clip.frames[indices]
-        height, width = frames.shape[-2:]
-        if (scale := math.sqrt(self.max_pixels_per_frame / (height * width))) < 1:
-            size = (round(height * scale), round(width * scale))
-            frames = torch.nn.functional.interpolate(frames.float(), size=size, mode="bilinear", antialias=True)
-            frames = frames.round().clamp(0, 255).to(torch.uint8)
-        metadata = VideoMetadata(
-            total_num_frames=len(clip.frames),
-            fps=clip.fps,
-            frames_indices=indices,
-            width=frames.shape[-1],
-            height=frames.shape[-2],
-            duration=len(clip.frames) / clip.fps,
-        )
-        return frames, metadata
+
+def sample_frames(clip: Clip, num_frames: int, max_pixels_per_frame: int) -> tuple[torch.Tensor, VideoMetadata]:
+    """`num_frames` evenly spaced frames, each scaled down to at most `max_pixels_per_frame`, with their metadata."""
+    indices = sample_frame_indices(len(clip.frames), num_frames)
+    frames = clip.frames[indices]
+    height, width = frames.shape[-2:]
+    if (scale := math.sqrt(max_pixels_per_frame / (height * width))) < 1:
+        size = (round(height * scale), round(width * scale))
+        frames = torch.nn.functional.interpolate(frames.float(), size=size, mode="bilinear", antialias=True)
+        frames = frames.round().clamp(0, 255).to(torch.uint8)
+    metadata = VideoMetadata(
+        total_num_frames=len(clip.frames),
+        fps=clip.fps,
+        frames_indices=indices,
+        width=frames.shape[-1],
+        height=frames.shape[-2],
+        duration=len(clip.frames) / clip.fps,
+    )
+    return frames, metadata

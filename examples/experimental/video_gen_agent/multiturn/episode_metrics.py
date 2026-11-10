@@ -10,6 +10,8 @@ Miles' own ``rollout/episode_raw_reward``.
   episode/turn_seconds            wall time of a policy call
   episode/folded_clips, episode/recalls, episode/shots_submitted, episode/samples
   episode/images                  images per episode, in the keyframe env
+  reward/<gate>_fired             under ``gated_reward``, the share of submitted episodes each gate fired on
+  reward/score_<pool>, reward/term_<pool>  its mean pool scores and gated terms over submitted episodes
 
 ``--custom-eval-rollout-log-function-path examples.experimental.video_gen_agent.multiturn.episode_metrics.log_eval_episodes``
 keeps one row per episode in each eval dataset before Miles' own eval metrics run, so ``eval/<dataset>`` is the
@@ -19,6 +21,7 @@ statistics then describe each episode's first branch.
 
 import numpy as np
 
+from examples.experimental.video_gen_agent.gated_reward import GATES, RECORD_KEY
 from examples.experimental.video_gen_agent.multiturn.feature_cache import prune_feature_cache
 from miles.ray.rollout.metrics import _keep_eval_rows
 
@@ -51,6 +54,7 @@ def _first_of_each_episode(samples) -> list[bool]:
 
 def episode_metrics(samples) -> dict[str, float]:
     episodes: dict[str, dict] = {}
+    rewards: dict[str, dict] = {}
     branches: dict[str, int] = {}
     for sample in samples:
         record = sample.metadata.get("video_gen")
@@ -58,6 +62,8 @@ def episode_metrics(samples) -> dict[str, float]:
             continue
         session_id = sample.metadata["session_id"]
         episodes[session_id] = record
+        if (reward := sample.metadata.get(RECORD_KEY)) is not None:
+            rewards[session_id] = reward
         branches[session_id] = branches.get(session_id, 0) + 1
     if not episodes:
         return {}
@@ -81,4 +87,16 @@ def episode_metrics(samples) -> dict[str, float]:
         metrics["episode/peak_prompt_tokens"] = np.mean([max(episode) for episode in tokens]).item()
     if submitted:
         metrics["episode/shots_submitted"] = np.mean([len(s.get("shots", [s["clip_id"]])) for s in submitted]).item()
+    return metrics | _reward_metrics([r for r in rewards.values() if r["submitted"] and r["reward"] is not None])
+
+
+def _reward_metrics(records: list[dict]) -> dict[str, float]:
+    if not records:
+        return {}
+    metrics = {f"reward/{gate}_fired": np.mean([r["fired"][gate] for r in records]).item() for gate in GATES}
+    for part in ("scores", "terms"):
+        for name in records[0][part]:
+            metrics[f"reward/{part[:-1]}_{name.removeprefix('signal:')}"] = np.mean(
+                [r[part][name] for r in records]
+            ).item()
     return metrics

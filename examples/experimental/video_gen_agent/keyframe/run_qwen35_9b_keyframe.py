@@ -1,6 +1,9 @@
 """Keyframe planner RL: a Qwen3.5-9B planner makes up to three keyframe images with a frozen Z-Image-Turbo, sees
 each, then makes one video from the image it picks with a frozen Wan2.2-A14B and the lightx2v 4-step LoRAs.
-A Qwen3-VL judge scores that video against the request.
+The video is scored against the request by phase 1's gated reward (``video_gen_agent.gated_reward``): by default
+HPSv3 on its frames plus VQAScore on the request, each standardized within the group and summed, zeroed when
+the Qwen3-VL judge's motion axis says the video barely moves and halved when OCR finds text the request did not ask
+for. Its reward pools share the rollout GPUs, one pool per GPU from the planner's on; OCR runs on the CPU.
 
 One node, not colocated (frozen generators cannot share GPUs with training): the trainer (Qwen3.5 plugin model
 under raw Megatron, vision tower frozen), the planner's engine with the judge's reward pool beside it, the image
@@ -19,6 +22,9 @@ Args:
         9 steps without CFG; Qwen/Qwen-Image-2.1-Turbo gets 8 steps at CFG 1; the video model follows --video-mode).
     --num-rollout, --rollout-batch-size, --n-samples-per-prompt: GRPO steps, requests per step, episodes per request.
     --max-images, --max-turns, --seconds: the episode's budgets and the video's length.
+    --max-prompt-words: a longer generate_image or generate_video prompt gets an error reply (default 120).
+    --reward: the signal terms, ``hpsv3+vqascore`` (default), ``hpsv3+unifiedreward``, ``hpsv3`` or ``pickscore``;
+        --adherence-gate adds the judge's prompt-adherence gate, off by default.
     --model-dir, --data-dir: where models and the requests live; checkpoints, images and clips go under --output-dir.
 
 Example:
@@ -31,7 +37,6 @@ from dataclasses import dataclass
 
 import typer
 import yaml
-
 from examples.experimental.video_gen_agent.multiturn.run_qwen35_9b_fastwan import (
     _REASONING_PARSER,
     _TOOL_CALL_PARSER,
@@ -40,9 +45,16 @@ from examples.experimental.video_gen_agent.multiturn.run_qwen35_9b_fastwan impor
     PLANNER,
     VBENCH,
 )
+from scripts.run_sd35_medium_flow_grpo_ocr import OCR_DEPS_INSTALL
+
 from miles.utils.external_utils import command_utils
 
 LIGHTX2V = "lightx2v/Wan2.2-Distill-Loras"
+HPSV3 = "MizzenAI/HPSv3"
+HPSV3_BASE = "Qwen/Qwen2-VL-7B-Instruct"
+UNIFIED_REWARD = "CodeGoat24/UnifiedReward-2.0-qwen3vl-8b"
+PICKSCORE = "yuvalkirstain/PickScore_v1"
+PICKSCORE_PROCESSOR = "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"
 
 # Trainer, planner, image, video and eval GPUs of the recipe's layouts, by GPUs per node.
 _LAYOUTS = {4: (1, 1, 1, 1, 0), 8: (1, 1, 2, 3, 1)}
@@ -73,6 +85,26 @@ _VIDEO_RECIPES = {
 }
 
 
+# Each signal's scores that map to 0 and 1: its lowest and highest score over LIN-2736's 300 calibration
+# (request, clip) items, scored on one H200 (LIN-2821).
+_SIGNAL_RANGES = {
+    "hpsv3": (-10.227, 11.531),
+    "vqascore": (0.0, 1.0),
+    "unifiedreward": (0.248, 3.229),
+    "pickscore": (0.604, 0.910),
+}
+# hpsv3+unifiedreward is the survey's pick; UnifiedReward-2.0 failed LIN-2736's overlay and mismatch pairs on its
+# own (0.62, 0.29), so the survey's fallback, VQAScore on the request, takes its place by default (LIN-2821).
+_REWARDS = {
+    "hpsv3+vqascore": ("hpsv3", "vqascore"),
+    "hpsv3+unifiedreward": ("hpsv3", "unifiedreward"),
+    "hpsv3": ("hpsv3",),
+    "pickscore": ("pickscore",),
+}
+# The adherence gate's threshold, set between the scores of LIN-2736's 24 mismatch pairs' two sides (LIN-2821).
+_ADHERENCE_THRESHOLD = 0.016
+
+
 @dataclass
 class ScriptArgs(command_utils.ExecuteTrainConfig):
     run_id: str = command_utils.create_run_id()
@@ -92,7 +124,10 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     n_samples_per_prompt: int = 8
     max_images: int = 3
     max_turns: int = 6
+    max_prompt_words: int = 120
     seconds: float = 2.0
+    reward: str = "hpsv3+vqascore"
+    adherence_gate: bool = False
     eval_interval: int = 10
     heldout_percent: int = 10
     feature_cache: bool = True
@@ -104,6 +139,7 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     def __post_init__(self):
         assert self.num_nodes == 1, "the recipe places its trainer, engines and judge on one node"
         assert self.video_mode in _VIDEO_RECIPES, f"--video-mode is one of {sorted(_VIDEO_RECIPES)}"
+        assert self.reward in _REWARDS, f"--reward is one of {sorted(_REWARDS)}"
         if self.image_steps is None or self.image_guidance_scale is None:
             recipe = _IMAGE_RECIPES.get(self.image_model)
             assert (
@@ -147,8 +183,14 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
 def prepare(args: ScriptArgs):
     U = args.create_backend()
     U.exec_command_cpu(f"mkdir -p {args.model_dir} {args.data_dir}")
-    for repo in (PLANNER, JUDGE, args.image_model, args.video.model):
+    for repo in (PLANNER, JUDGE, args.image_model, args.video.model, *_reward_models(args)):
         U.exec_command_cpu(f"hf download {repo} --local-dir {args.local(repo)}")
+    U.exec_command_cpu(OCR_DEPS_INSTALL)
+    # Fetch PaddleOCR's models once; the OCR pool's workers would each download them and race on a cold cache.
+    U.exec_command_cpu(
+        f"PYTHONPATH={command_utils.repo_base_dir} python -c "
+        "'from miles.diffusion.rollout.ocr import OcrScorer; OcrScorer()'"
+    )
     U.exec_command_cpu(
         f"hf download {LIGHTX2V} {args.video.high_noise_lora} {args.video.low_noise_lora} "
         f"--local-dir {args.local(LIGHTX2V)}"
@@ -189,6 +231,7 @@ def _agent_env(args: ScriptArgs) -> dict[str, str]:
         "AGENT_VIDEO_GEN_SUBMITTED_DIR": f"{args.run_dir}/submitted",
         "AGENT_VIDEO_GEN_MAX_IMAGES": str(args.max_images),
         "AGENT_VIDEO_GEN_MAX_TURNS": str(args.max_turns),
+        "AGENT_VIDEO_GEN_MAX_PROMPT_WORDS": str(args.max_prompt_words),
         "AGENT_VIDEO_GEN_SECONDS": str(args.seconds),
         "AGENT_VIDEO_GEN_WIDTH": "832",
         "AGENT_VIDEO_GEN_HEIGHT": "480",
@@ -258,12 +301,19 @@ def _train_args(args: ScriptArgs) -> str:
             f"--sglang-token-space-preprocess-cache-dir {args.run_dir}/feature_cache "
         )
 
-    # No --group-rm: the env reward scores episodes sample by sample, and eval refuses it.
+    # No --group-rm, which eval refuses: the post-process standardizes each term over a prompt's episodes instead.
+    signals = _REWARDS[args.reward]
     reward_args = (
-        f"--custom-rm-path {AGENT}.reward.reward_func "
+        f"--custom-rm-path {AGENT}.gated_reward.reward_func "
+        f"--custom-reward-post-process-path {AGENT}.gated_reward.group_normalized_rewards "
         f"--reward-pool-config {command_utils.encode_pseudo_file(yaml.safe_dump(_reward_pools(args)))} "
-        "--video-reward-pool judge "
+        f"--video-reward-signal-pools {' '.join(signals)} "
+        f"--video-reward-signal-ranges {' '.join(str(v) for s in signals for v in _SIGNAL_RANGES[s])} "
     )
+    if args.adherence_gate:
+        reward_args += (
+            f"--video-reward-adherence-pool adherence --video-reward-adherence-threshold {_ADHERENCE_THRESHOLD} "
+        )
 
     eval_args = (
         f"--eval-interval {args.eval_interval} "
@@ -358,18 +408,52 @@ def _sglang_config(args: ScriptArgs) -> dict:
     return {"sglang": models}
 
 
+def _reward_models(args: ScriptArgs) -> list[str]:
+    repos = {
+        "hpsv3": [HPSV3, HPSV3_BASE],
+        "vqascore": [],
+        "unifiedreward": [UNIFIED_REWARD],
+        "pickscore": [PICKSCORE, PICKSCORE_PROCESSOR],
+    }
+    return [repo for signal in _REWARDS[args.reward] for repo in repos[signal]]
+
+
 def _reward_pools(args: ScriptArgs) -> list[dict]:
-    return [
+    """The motion judge, each signal and the optional adherence judge, colocated on consecutive rollout GPUs from the
+    planner's, then the OCR pool on the CPU."""
+    judge = "miles.rollout.rm_hub.video.vlm_judge.VlmJudgeScorer"
+    scorers = {
+        "motion": (judge, {"model_path": args.local(JUDGE), "axis_weights": {"motion": 1.0}}),
+        "hpsv3": (
+            "miles.rollout.rm_hub.video.hpsv3.VideoHpsv3Scorer",
+            {"checkpoint_path": f"{args.local(HPSV3)}/HPSv3.safetensors", "base_model_path": args.local(HPSV3_BASE)},
+        ),
+        "vqascore": ("miles.rollout.rm_hub.video.vqascore.VideoVqaScorer", {"model_path": args.local(JUDGE)}),
+        "unifiedreward": (
+            "miles.rollout.rm_hub.video.unified_reward.UnifiedRewardScorer",
+            {"model_path": args.local(UNIFIED_REWARD)},
+        ),
+        "pickscore": (
+            "miles.rollout.rm_hub.video.pickscore.VideoPickScoreScorer",
+            {"processor_path": args.local(PICKSCORE_PROCESSOR), "model_path": args.local(PICKSCORE)},
+        ),
+        "adherence": (judge, {"model_path": args.local(JUDGE), "axis_weights": {"prompt_adherence": 1.0}}),
+    }
+    names = ["motion", *_REWARDS[args.reward], *(["adherence"] if args.adherence_gate else [])]
+    pools = [
         {
-            "name": "judge",
-            "scorer_path": "miles.rollout.rm_hub.video.vlm_judge.VlmJudgeScorer",
-            "scorer_kwargs": {"model_path": args.local(JUDGE)},
+            "name": name,
+            "scorer_path": scorers[name][0],
+            "scorer_kwargs": scorers[name][1],
             "num_workers": 1,
             "uses_gpu": True,
             "colocated": True,
             "batch_size": 4,
         }
+        for name in names
     ]
+    ocr = {"name": "ocr", "scorer_path": "miles.rollout.rm_hub.video.ocr.VideoOcrScorer", "num_workers": 4}
+    return pools + [ocr | {"uses_gpu": False, "batch_size": 4}]
 
 
 def _eval_config(args: ScriptArgs) -> dict:

@@ -19,6 +19,7 @@ Run-wide options come from ``AGENT_VIDEO_GEN_*`` env vars, which worker and sand
   AGENT_VIDEO_GEN_SUBMITTED_DIR    a durable dir submitted clips are copied to (required)
   AGENT_VIDEO_GEN_MAX_IMAGES       images per episode, at most 3 (default 3)
   AGENT_VIDEO_GEN_MAX_TURNS        policy turns per episode (default 6)
+  AGENT_VIDEO_GEN_MAX_PROMPT_WORDS a longer generate_image or generate_video prompt gets an error reply (default 120)
   AGENT_VIDEO_GEN_SECONDS          the video's length (default 2)
   AGENT_VIDEO_GEN_WIDTH / _HEIGHT / _FPS  every image's and the video's shape (default 832x480 at 16 fps)
   AGENT_VIDEO_GEN_TIMEOUT_S        a generation slower than this is an outage (default 600)
@@ -99,6 +100,7 @@ class KeyframeEnvOptions:
     submitted_dir: str = ""
     max_images: int = 3
     max_turns: int = 6
+    max_prompt_words: int = 120
     seconds: float = 2.0
     width: int = 832
     height: int = 480
@@ -112,7 +114,7 @@ class KeyframeEnvOptions:
         for name in ("generator", "image_generator", "submitted_dir"):
             if not getattr(self, name):  # config-access-exempt: iterates the options dataclass's own fields
                 raise ValueError(f"{_ENV_PREFIX}{name.upper()} is required")
-        for name in ("max_images", "max_turns", "seconds", "width", "height", "fps", "timeout_s"):
+        for name in ("max_images", "max_turns", "max_prompt_words", "seconds", "width", "height", "fps", "timeout_s"):
             if getattr(self, name) <= 0:  # config-access-exempt: iterates the options dataclass's own fields
                 raise ValueError(
                     f"{_ENV_PREFIX}{name.upper()} must be positive, got {getattr(self, name)}"
@@ -234,7 +236,8 @@ def _system_prompt(options: KeyframeEnvOptions) -> str:
         f"id of the image the video should come from and a prompt: {video}. That clip is your answer, and the "
         f"episode ends. Images and the video are {options.width}x{options.height}; the video is "
         f"{options.seconds:g} seconds at {options.fps} fps. You have {options.max_images} images, 1 video and "
-        f"{options.max_turns} turns. An episode that ends without a video fails."
+        f"{options.max_turns} turns. Each prompt is at most {options.max_prompt_words} words. An episode that ends "
+        "without a video fails."
     )
 
 
@@ -254,7 +257,9 @@ async def _generate_image(episode: _Episode, arguments: dict) -> str | list[dict
         return (
             f"Error: no images left. Call generate_video with one of {', '.join(episode.images)}. {episode.budget()}"
         )
-    prompted, error = _prompted(arguments, tool="generate_image", default_seed=len(episode.images))
+    prompted, error = _prompted(
+        arguments, tool="generate_image", default_seed=len(episode.images), max_words=episode.options.max_prompt_words
+    )
     if error:
         return f"Error: {error}. {episode.budget()}"
     options = episode.options
@@ -276,7 +281,9 @@ async def _generate_video(episode: _Episode, arguments: dict) -> str:
         return (
             f"Error: you have not seen {image.image_id} yet; look at it, then call generate_video. {episode.budget()}"
         )
-    prompted, error = _prompted(arguments, tool="generate_video", default_seed=0)
+    prompted, error = _prompted(
+        arguments, tool="generate_video", default_seed=0, max_words=episode.options.max_prompt_words
+    )
     if error:
         return f"Error: {error}. {episode.budget()}"
     options = episode.options
@@ -313,13 +320,15 @@ async def _generated(episode: _Episode, generation):
         episode.generation_time += time.monotonic() - started
 
 
-def _prompted(arguments: dict, *, tool: str, default_seed: int) -> tuple[dict | None, str | None]:
+def _prompted(arguments: dict, *, tool: str, default_seed: int, max_words: int) -> tuple[dict | None, str | None]:
     """The prompt, negative prompt and seed of a call, or what is wrong with them."""
     prompt = arguments.get("prompt")
     negative_prompt = arguments.get("negative_prompt") or ""
     seed = arguments.get("seed", default_seed)
     if not isinstance(prompt, str) or not prompt.strip():
         return None, f"{tool} needs a non-empty prompt"
+    if (words := len(prompt.split())) > max_words:
+        return None, f"the {tool} prompt has {words} words; the limit is {max_words}"
     if not isinstance(negative_prompt, str):
         return None, "negative_prompt must be a string"
     if not isinstance(seed, int) or isinstance(seed, bool):
