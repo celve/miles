@@ -116,9 +116,9 @@ async function choose(pair, value) {
   try { await db.doc("picks/" + pair).set({ choice: value, at: new Date().toISOString() }); tag.textContent = "Saved"; }
   catch (e) { tag.textContent = "Not saved: " + (e && e.code || "error"); }
 }
-for (const t of document.querySelectorAll(".tab")) t.addEventListener("click", () => {
+for (const t of document.querySelectorAll(".tab[data-set]")) t.addEventListener("click", () => {
   current = t.dataset.set;
-  for (const o of document.querySelectorAll(".tab")) o.setAttribute("aria-selected", String(o === t));
+  for (const o of document.querySelectorAll(".tab[data-set]")) o.setAttribute("aria-selected", String(o === t));
   render();
 });
 document.getElementById("export").addEventListener("click", () => {

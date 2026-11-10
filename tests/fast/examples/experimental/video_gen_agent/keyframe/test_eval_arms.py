@@ -70,7 +70,15 @@ def test_k_arms_replay_their_episodes_video_request_on_the_common_seed(tmp_path,
                 "video": {"prompt": "fox, snow it runs", "seed": 0, "image_path": None},
                 "submitted": {"path": "/kept/f.mp4"},
             },
-            "a red car": {"video": {"prompt": "it drives", "seed": 5, "image_path": "/img/car.png"}, "submitted": {}},
+            "a red car": {
+                "video": {
+                    "prompt": "it drives",
+                    "negative_prompt": "blur, watermark",
+                    "seed": 5,
+                    "image_path": "/img/car.png",
+                },
+                "submitted": {},
+            },
             "a tv": {"video": None, "submitted": None},
         },
     )
@@ -81,6 +89,7 @@ def test_k_arms_replay_their_episodes_video_request_on_the_common_seed(tmp_path,
         "arm": "K0",
         "request": "a fox",
         "prompt": "fox, snow it runs",
+        "negative_prompt": "",
         "seed": request_seed("a fox"),
         "image_path": None,
         "episode_path": "/kept/f.mp4",
@@ -90,10 +99,11 @@ def test_k_arms_replay_their_episodes_video_request_on_the_common_seed(tmp_path,
     monkeypatch.setenv("AGENT_VIDEO_GEN_FAKE_DIR", str(tmp_path / "clips"))
     fox, car, tv = asyncio.run(arms.generate(rows, FakeClipGenerator()))
     asked = json.loads(open(car["path"]).read())
-    assert (asked["seed"], asked["image_path"], asked["prompt"]) == (
+    assert (asked["seed"], asked["image_path"], asked["prompt"], asked["negative_prompt"]) == (
         request_seed("a red car"),
         "/img/car.png",
         "it drives",
+        "blur, watermark",
     )
     assert json.loads(open(fox["path"]).read())["seed"] == request_seed("a fox") and tv["path"] is None
 
@@ -230,6 +240,8 @@ def test_the_blind_page_draws_outside_lin2741s_requests_and_keeps_the_key_apart(
     assert f"const PAIRS = {json.dumps(pairs)};" in page and "__PAIRS__" not in page
     assert "_key.json" not in page and '"left"' not in json.dumps(pairs)
     assert 'src: p.pair + "_" + side + ".mp4"' in page and "picks.json" in page
+    # The export button is styled as a tab but must not switch sets, which would empty the list.
+    assert 'querySelectorAll(".tab[data-set]")' in page and 'querySelectorAll(".tab")' not in page
     for pair in pairs:
         k_side = key[pair["pair"]]
         assert (tmp_path / "blind" / f"{pair['pair']}_{k_side}.mp4").read_text().startswith("K ")

@@ -3,8 +3,8 @@
 
   B0       the raw request → the video model
   B1       Phase 0's trained planner prompt (LIN-2737's ``answer99``) → the video model
-  K0, K    the keyframe agent at its step-0 and final eval: the generator prompt (and in i2v mode the image) its episode
-           submitted, read from the run's eval dumps and generated again
+  K0, K    the keyframe agent at its step-0 and final eval: the video request its episode submitted (prompt, negative
+           prompt, and in i2v mode the image), read from the run's eval dumps and generated again
   K-blind  the final agent's first image prompt → the video model, with no image watched
 
 Every arm takes Phase 0's per-request seed and the run's clip shape (832x480, 2 s at 16 fps: 33 frames), so arms
@@ -79,7 +79,7 @@ async def generate(rows: list[dict], generator, concurrency: int = 8) -> list[di
             clip = await generator.generate(
                 ClipRequest(
                     prompt=row["prompt"],
-                    negative_prompt="",
+                    negative_prompt=row.get("negative_prompt") or "",
                     seed=row["seed"],
                     image_path=row.get("image_path"),
                     **SHAPE,
@@ -103,6 +103,7 @@ def from_dump(dump: Path, arm: str, requests: list[str]) -> list[dict]:
                 "arm": arm,
                 "request": request,
                 "prompt": video.get("prompt"),
+                "negative_prompt": video.get("negative_prompt") or "",
                 "seed": request_seed(request),
                 "image_path": video.get("image_path"),
                 "episode_path": (record.get("submitted") or {}).get("path"),
