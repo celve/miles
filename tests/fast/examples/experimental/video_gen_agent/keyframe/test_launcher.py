@@ -61,9 +61,40 @@ def test_each_layout_parses_with_two_frozen_generators_on_gpus_of_their_own(
     assert (hook.config.video_generator_model, hook.config.image_generator_model) == ("video", "image")
     assert config.custom_agent_function_path.path.endswith("keyframe.env.run_agent")
     assert config.rollout_max_response_len == 2048 and config.max_seq_len == 16384
-    assert config.custom_rm_path.config.video_reward_pool == "judge"
-    (judge,) = config.reward_pools
-    assert judge.colocated and config.reward_scaling.pools["judge"].gpu_offset == 0
+    assert config.custom_rm_path.path.endswith("gated_reward.reward_func")
+    assert config.custom_reward_post_process_path.path.endswith("gated_reward.group_normalized_rewards")
+    reward = config.custom_rm_path.config
+    assert reward.video_reward_signal_pools == ["hpsv3", "vqascore"]
+    assert len(reward.video_reward_signal_ranges) == 4 and reward.video_reward_adherence_pool is None
+    assert (reward.video_reward_motion_pool, reward.video_reward_motion_threshold) == ("motion", 0.4)
+    assert (reward.video_reward_ocr_pool, reward.video_reward_ocr_factor) == ("ocr", 0.5)
+    pools = {pool.name: pool for pool in config.reward_pools}
+    # One colocated pool per rollout GPU, from the planner's: the motion judge, HPSv3, VQAScore.
+    assert [config.reward_scaling.pools[n].gpu_offset for n in ("motion", "hpsv3", "vqascore")] == [0, 1, 2]
+    assert all(pools[n].colocated and pools[n].uses_gpu for n in ("motion", "hpsv3", "vqascore"))
+    assert pools["vqascore"].scorer_kwargs == {"model_path": f"{tmp_path}/Qwen3-VL-8B-Instruct"}
+    assert pools["motion"].scorer_kwargs["axis_weights"] == {"motion": 1.0}
+    assert pools["hpsv3"].scorer_kwargs["top_fraction"] == 0.3
+    assert not pools["ocr"].uses_gpu and pools["ocr"].scorer_path.endswith("ocr.VideoOcrScorer")
+
+
+@pytest.mark.parametrize(
+    "reward, adherence_gate, signals, pools",
+    [
+        ("pickscore", False, ["pickscore"], {"motion", "pickscore", "ocr"}),
+        ("hpsv3", True, ["hpsv3"], {"motion", "hpsv3", "adherence", "ocr"}),
+        ("hpsv3+unifiedreward", False, ["hpsv3", "unifiedreward"], {"motion", "hpsv3", "unifiedreward", "ocr"}),
+    ],
+)
+def test_the_reward_is_a_flag(monkeypatch, tmp_path, reward, adherence_gate, signals, pools):
+    config = _config(monkeypatch, tmp_path, num_gpus_per_node=8, reward=reward, adherence_gate=adherence_gate)
+
+    hook = config.custom_rm_path.config
+    assert hook.video_reward_signal_pools == signals and {pool.name for pool in config.reward_pools} == pools
+    if adherence_gate:
+        assert hook.video_reward_adherence_pool == "adherence" and hook.video_reward_adherence_threshold > 0
+        adherence = next(pool for pool in config.reward_pools if pool.name == "adherence")
+        assert adherence.scorer_kwargs["axis_weights"] == {"prompt_adherence": 1.0}
 
 
 def test_the_27b_planner_trains_at_tp4_with_its_own_template_and_eval_on_the_planner_engine(monkeypatch, tmp_path):
@@ -151,6 +182,8 @@ def test_the_env_gets_the_recipes_clip_and_both_generators():
         "3",
         "6",
     )
+    assert env["AGENT_VIDEO_GEN_MAX_PROMPT_WORDS"] == "0"
+    assert _agent_env(ScriptArgs(run_id="test", max_prompt_words=120))["AGENT_VIDEO_GEN_MAX_PROMPT_WORDS"] == "120"
     assert env["AGENT_VIDEO_GEN_NUM_INFERENCE_STEPS"] == "4" and env["AGENT_VIDEO_GEN_GUIDANCE_SCALE_2"] == "1.0"
     assert env["AGENT_VIDEO_GEN_VIDEO_MODE"] == "preview"
     assert env["AGENT_VIDEO_GEN_IMAGE_DIR"] == "/root/shared_data/test/images"
@@ -168,8 +201,16 @@ def test_prepare_downloads_the_defaults_models_and_only_the_modes_lightx2v_loras
     commands = _recorded(monkeypatch, tmp_path, "prepare")
 
     downloads = [command for command in commands if "hf download" in command]
-    for repo in ("Qwen/Qwen3.5-9B", "Qwen/Qwen3-VL-8B-Instruct", "Tongyi-MAI/Z-Image-Turbo"):
+    for repo in (
+        "Qwen/Qwen3.5-9B",
+        "Qwen/Qwen3-VL-8B-Instruct",
+        "Tongyi-MAI/Z-Image-Turbo",
+        "MizzenAI/HPSv3",
+        "Qwen/Qwen2-VL-7B-Instruct",
+    ):
         assert any(f"hf download {repo} " in command for command in downloads)
+    assert not any("PickScore" in command or "UnifiedReward" in command for command in downloads)
+    assert any("pip install paddleocr==2.9.1" in command for command in commands)
     assert any("Wan-AI/Wan2.2-T2V-A14B-Diffusers" in command for command in downloads)
     (loras,) = [command for command in downloads if LIGHTX2V in command]
     assert loras.count("t2v_A14b") == 2 and "i2v" not in loras
@@ -202,6 +243,7 @@ def test_execute_submits_the_run_with_the_keyframe_env(monkeypatch, tmp_path):
         (dict(planner="qwen3.6-27b"), "--planner is one of"),
         (dict(video_mode="t2v"), "--video-mode is one of"),
         (dict(image_model="org/Image"), "has no recipe"),
+        (dict(reward="judge"), "--reward is one of"),
     ],
 )
 def test_a_bad_layout_or_mode_is_refused(script_args, message):

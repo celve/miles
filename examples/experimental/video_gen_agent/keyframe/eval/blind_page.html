@@ -1,0 +1,142 @@
+<!-- The blind look's page (LIN-2741's, for phase 1): blind.py make fills in the pairs and writes it beside the clips. Picks save to
+     the page's database when published as an Artifact with one, else to this browser; "Download picks.json" feeds blind.py unblind. -->
+<title>Blind Clip Pairs</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,650&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a reading column of numbered pairs, two clips side by side, a three-way verdict under each; stacks at phone width. */
+:root {
+  --bg: #f6f6f2; --surface: #ffffff; --fg: #1d2121; --muted: #5d6766; --line: #d9ddd8;
+  --accent: #1f6f6b; --accent-soft: #e2efed; --picked: #1f6f6b; --picked-fg: #ffffff;
+  --display: "Fraunces", Georgia, serif; --body: "IBM Plex Sans", system-ui, sans-serif; --mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #121615; --surface: #1a1f1e; --fg: #e6ebe9; --muted: #9aa5a3; --line: #2c3432;
+  --accent: #6fc2bb; --accent-soft: #1d2e2c; --picked: #6fc2bb; --picked-fg: #0e1312; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #121615; --surface: #1a1f1e; --fg: #e6ebe9; --muted: #9aa5a3; --line: #2c3432;
+  --accent: #6fc2bb; --accent-soft: #1d2e2c; --picked: #6fc2bb; --picked-fg: #0e1312; color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font-family: var(--body); font-size: 15px; line-height: 1.55; }
+.wrap { max-width: 980px; margin: 0 auto; padding: 32px 16px 64px; display: grid; gap: 28px; }
+header { display: grid; gap: 10px; }
+h1 { font-family: var(--display); font-weight: 650; font-size: clamp(28px, 5vw, 40px); line-height: 1.1; margin: 0; text-wrap: balance; }
+.lede { max-width: 68ch; color: var(--muted); margin: 0; }
+.status { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; font-family: var(--mono); font-size: 13px; color: var(--muted); }
+.status strong { color: var(--fg); font-variant-numeric: tabular-nums; }
+.tabs { display: flex; gap: 8px; flex-wrap: wrap; }
+.tab { font: 500 14px var(--body); border: 1px solid var(--line); background: var(--surface); color: var(--fg); padding: 8px 14px; border-radius: 999px; cursor: pointer; }
+.tab[aria-selected="true"] { background: var(--accent); border-color: var(--accent); color: var(--picked-fg); }
+.tab:focus-visible, .pick:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.setnote { color: var(--muted); margin: 0; max-width: 68ch; }
+.pairs { display: grid; gap: 22px; }
+.pair { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px; display: grid; gap: 12px; }
+.pair-head { display: flex; gap: 12px; align-items: baseline; min-width: 0; }
+.pair-id { font-family: var(--mono); font-size: 12px; color: var(--muted); letter-spacing: .04em; flex: none; }
+.request { font-family: var(--display); font-weight: 500; font-size: 18px; margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.clips { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 640px) { .clips { grid-template-columns: 1fr; } }
+figure { margin: 0; display: grid; gap: 6px; min-width: 0; }
+figcaption { font-family: var(--mono); font-size: 12px; color: var(--muted); letter-spacing: .06em; text-transform: uppercase; }
+video { width: 100%; max-width: 100%; aspect-ratio: 832 / 480; background: #000; border-radius: 6px; display: block; }
+.verdict { display: flex; gap: 8px; flex-wrap: wrap; }
+.pick { font: 500 14px var(--body); padding: 8px 14px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); cursor: pointer; }
+.pick[aria-pressed="true"] { background: var(--picked); border-color: var(--picked); color: var(--picked-fg); }
+.saved { font-family: var(--mono); font-size: 12px; color: var(--muted); align-self: center; }
+.note { font-size: 13px; color: var(--muted); }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+<div class="wrap">
+  <header>
+    <h1>Blind clip pairs</h1>
+    <p class="lede">Each pair shows two 2-second clips made for the same request and seed, by the same frozen Wan2.2-T2V-A14B with the lightx2v LoRAs. Pick the clip that better fulfils the request, or call it even. Which side is which arm is shuffled per pair, and the key is kept elsewhere until you are done.</p>
+    <div class="status"><span>Set A <strong id="countA">0/20</strong></span><span>Set B <strong id="countB">0/20</strong></span><span id="store">Connecting…</span><button class="tab" id="export">Download picks.json</button></div>
+  </header>
+  <div class="tabs" role="tablist">
+    <button class="tab" role="tab" id="tabA" aria-selected="true" data-set="A">Set A</button>
+    <button class="tab" role="tab" id="tabB" aria-selected="false" data-set="B">Set B</button>
+  </div>
+  <p class="setnote" id="setnote"></p>
+  <div class="pairs" id="pairs"></div>
+  <p class="note">832×480, 33 frames at 16 fps, 4 sampling steps. Requests are 20 held-out VBench requests outside LIN-2741's blind look, drawn at random with a fixed seed.</p>
+</div>
+<script>
+const PAIRS = __PAIRS__;
+const NOTES = {
+  A: "Set A: the trained keyframe agent against the raw request.",
+  B: "Set B: the trained keyframe agent against Phase 0's trained single-turn planner."
+};
+const picks = {};
+let db = null, current = "A";
+function el(tag, attrs, text) { const e = document.createElement(tag); for (const [k, v] of Object.entries(attrs || {})) e.setAttribute(k, v); if (text != null) e.textContent = text; return e; }
+function counts() { for (const s of ["A", "B"]) { const n = PAIRS.filter(p => p.set === s && picks[p.pair]).length; document.getElementById("count" + s).textContent = n + "/20"; } }
+function render() {
+  document.getElementById("setnote").textContent = NOTES[current];
+  const root = document.getElementById("pairs"); root.replaceChildren();
+  PAIRS.filter(p => p.set === current).forEach(p => {
+    const card = el("article", { class: "pair", id: p.pair });
+    const head = el("div", { class: "pair-head" });
+    head.append(el("span", { class: "pair-id" }, p.pair), el("p", { class: "request" }, p.request));
+    const clips = el("div", { class: "clips" });
+    for (const [side, label] of [["left", "Clip 1"], ["right", "Clip 2"]]) {
+      const fig = el("figure");
+      const v = el("video", { src: p.pair + "_" + side + ".mp4", controls: "", loop: "", muted: "", playsinline: "", preload: "metadata" });
+      v.muted = true;
+      fig.append(v, el("figcaption", {}, label));
+      clips.append(fig);
+    }
+    const verdict = el("div", { class: "verdict" });
+    for (const [value, label] of [["left", "Clip 1 is better"], ["tie", "About even"], ["right", "Clip 2 is better"]]) {
+      const b = el("button", { class: "pick", "aria-pressed": String(picks[p.pair] === value), id: "pick-" + p.pair + "-" + value }, label);
+      b.addEventListener("click", () => choose(p.pair, value));
+      verdict.append(b);
+    }
+    verdict.append(el("span", { class: "saved", id: "saved-" + p.pair }, picks[p.pair] ? "Saved" : ""));
+    card.append(head, clips, verdict);
+    root.append(card);
+  });
+  counts();
+}
+function refresh() {
+  for (const p of PAIRS.filter(q => q.set === current)) {
+    for (const value of ["left", "tie", "right"]) {
+      const b = document.getElementById("pick-" + p.pair + "-" + value);
+      if (b) b.setAttribute("aria-pressed", String(picks[p.pair] === value));
+    }
+    const tag = document.getElementById("saved-" + p.pair);
+    if (tag && picks[p.pair] && !tag.textContent) tag.textContent = "Saved";
+  }
+  counts();
+}
+async function choose(pair, value) {
+  if (picks[pair] === value) return;
+  picks[pair] = value; refresh();
+  const tag = document.getElementById("saved-" + pair);
+  if (!db) { try { localStorage.setItem("picks", JSON.stringify(picks)); } catch (e) {} tag.textContent = "Kept in this browser only"; return; }
+  tag.textContent = "Saving…";
+  try { await db.doc("picks/" + pair).set({ choice: value, at: new Date().toISOString() }); tag.textContent = "Saved"; }
+  catch (e) { tag.textContent = "Not saved: " + (e && e.code || "error"); }
+}
+for (const t of document.querySelectorAll(".tab[data-set]")) t.addEventListener("click", () => {
+  current = t.dataset.set;
+  for (const o of document.querySelectorAll(".tab[data-set]")) o.setAttribute("aria-selected", String(o === t));
+  render();
+});
+document.getElementById("export").addEventListener("click", () => {
+  const a = el("a", { href: URL.createObjectURL(new Blob([JSON.stringify(picks, null, 1)], { type: "application/json" })), download: "picks.json" });
+  a.click();
+});
+try { Object.assign(picks, JSON.parse(localStorage.getItem("picks") || "{}")); } catch (e) {}
+render();
+(async () => {
+  const store = document.getElementById("store");
+  db = await (window.claude?.use?.("db") ?? Promise.resolve(null)).catch(() => null);
+  if (!db) { store.textContent = "Picks stay in this browser: sign in to save them"; return; }
+  store.textContent = "Picks are saved to this page";
+  const timer = setTimeout(() => { store.textContent = "Saved picks are slow to load"; }, 10000);
+  db.collection("picks").onSnapshot(snap => {
+    clearTimeout(timer);
+    for (const d of snap.docs) { const c = d.data()?.choice; if (c) picks[d.id] = c; }
+    refresh();
+  }, () => { clearTimeout(timer); store.textContent = "Could not load saved picks"; });
+})();
+</script>
