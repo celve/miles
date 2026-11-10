@@ -339,3 +339,16 @@ def test_the_blind_draw_is_fixed():
     assert blind.draw(clips, set()) == blind.draw(clips, set())
     with pytest.raises(AssertionError, match="only 19 requests"):
         blind.draw(clips, {f"r{i}" for i in range(11)})
+
+
+def test_k_arms_replay_a_reference_mode_episodes_images(tmp_path, monkeypatch):
+    video = {"prompt": "a corgi a park it runs", "seed": 0, "image_path": None, "reference_paths": ["/i/a.png", "/i/b.png"]}
+    dump = _dump(tmp_path, "eval_0.pt", {"a fox": {"video": video, "submitted": {"path": "/kept/f.mp4"}}})
+
+    (row, *_) = arms.from_dump(dump, "K", REQUESTS)
+    monkeypatch.setenv("AGENT_VIDEO_GEN_FAKE_DIR", str(tmp_path / "clips"))
+    (made,) = asyncio.run(arms.generate([row], FakeClipGenerator()))
+
+    asked = json.loads(open(made["path"]).read())
+    assert row["reference_paths"] == ["/i/a.png", "/i/b.png"] and asked["reference_paths"] == ["/i/a.png", "/i/b.png"]
+    assert (asked["prompt"], asked["image_path"], asked["seed"]) == ("a corgi a park it runs", None, request_seed("a fox"))
