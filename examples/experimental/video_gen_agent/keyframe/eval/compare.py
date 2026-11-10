@@ -70,12 +70,14 @@ def win_bar(results: dict, picks: dict | None) -> dict[str, bool | None]:
         result = results.get(other, {}).get(metric)
         return None if result is None else result["wins"] > result["losses"] and result["p"] < 0.05
 
-    frame = results.get("B0", {}).get("frame_diff")
+    frame = results.get("B0", {}).get("frame_diff") or {}
+    # No paired request has both arms' clips, so neither mean exists: the check is pending, not failed.
+    frame_check = None if frame.get("ours_mean") is None else frame["ours_mean"] >= frame["theirs_mean"]
     return {
         "reward beats B0 and B1": _all(beats("B0", "reward"), beats("B1", "reward")),
         "PickScore beats B0 and B1": _all(beats("B0", "pickscore"), beats("B1", "pickscore")),
         "blind: K in >= 15 of 20 decided vs B0": None if picks is None else picks["A"]["K"] >= 15,
-        "frame difference not below B0": None if frame is None else frame["ours_mean"] >= frame["theirs_mean"],
+        "frame difference not below B0": frame_check,
     }
 
 

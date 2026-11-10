@@ -26,7 +26,8 @@ Args:
         9 steps without CFG; Qwen/Qwen-Image-2.1-Turbo gets 8 steps at CFG 1; the video model follows --video-mode).
     --num-rollout, --rollout-batch-size, --n-samples-per-prompt: GRPO steps, requests per step, episodes per request.
     --max-images, --max-turns, --seconds: the episode's budgets and the video's length.
-    --max-prompt-words: a longer generate_image or generate_video prompt gets an error reply (default 120).
+    --max-prompt-words: a longer generator prompt gets an error reply (default 0, no cap: Linyu, 2026-11-10, "more
+        detailed prompt might generate better video"); 120 is the survey's cap.
     --reward: the signal terms, ``hpsv3+vqascore`` (default), ``hpsv3+unifiedreward``, ``hpsv3`` or ``pickscore``;
         --adherence-gate adds the judge's prompt-adherence gate, off by default.
     --model-dir, --data-dir: where models and the requests live; checkpoints, images and clips go under --output-dir.
@@ -42,9 +43,9 @@ from dataclasses import dataclass
 
 import typer
 import yaml
+from examples.experimental.video_gen_agent.multiturn.run_qwen35_9b_fastwan import AGENT, JUDGE, VBENCH
 from scripts.run_sd35_medium_flow_grpo_ocr import OCR_DEPS_INSTALL
 
-from examples.experimental.video_gen_agent.multiturn.run_qwen35_9b_fastwan import AGENT, JUDGE, VBENCH
 from miles.utils.chat_template_utils import resolve_reasoning_and_tool_call_parser
 from miles.utils.external_utils import command_utils
 
@@ -112,7 +113,7 @@ _VIDEO_RECIPES = {
 # Each signal's scores that map to 0 and 1: its lowest and highest score over LIN-2736's 300 calibration
 # (request, clip) items, scored on one H200 (LIN-2821).
 _SIGNAL_RANGES = {
-    "hpsv3": (-10.227, 11.531),
+    "hpsv3": (-10.213, 11.652),
     "vqascore": (0.0, 1.0),
     "unifiedreward": (0.248, 3.229),
     "pickscore": (0.604, 0.910),
@@ -150,7 +151,7 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     n_samples_per_prompt: int = 8
     max_images: int = 3
     max_turns: int = 6
-    max_prompt_words: int = 120
+    max_prompt_words: int = 0
     seconds: float = 2.0
     reward: str = "hpsv3+vqascore"
     adherence_gate: bool = False
@@ -338,18 +339,14 @@ def _train_args(args: ScriptArgs) -> str:
         )
 
     # No --group-rm, which eval refuses: the post-process standardizes each term over a prompt's episodes instead.
-    signals = _REWARDS[args.reward]
     reward_args = (
         f"--custom-rm-path {AGENT}.gated_reward.reward_func "
         f"--custom-reward-post-process-path {AGENT}.gated_reward.group_normalized_rewards "
         f"--reward-pool-config {command_utils.encode_pseudo_file(yaml.safe_dump(_reward_pools(args)))} "
-        f"--video-reward-signal-pools {' '.join(signals)} "
-        f"--video-reward-signal-ranges {' '.join(str(v) for s in signals for v in _SIGNAL_RANGES[s])} "
     )
-    if args.adherence_gate:
-        reward_args += (
-            f"--video-reward-adherence-pool adherence --video-reward-adherence-threshold {_ADHERENCE_THRESHOLD} "
-        )
+    for name, value in _reward_settings(args).items():
+        values = " ".join(map(str, value)) if isinstance(value, list) else value
+        reward_args += f"--{name.replace('_', '-')} {values} "
 
     eval_args = (
         f"--eval-interval {args.eval_interval} "
@@ -446,6 +443,21 @@ def _sglang_config(args: ScriptArgs) -> dict:
     return {"sglang": models}
 
 
+def _reward_settings(args: ScriptArgs) -> dict:
+    """The gated reward's config beyond its defaults; the eval arms score with the same settings."""
+    signals = _REWARDS[args.reward]
+    settings = {
+        "video_reward_signal_pools": list(signals),
+        "video_reward_signal_ranges": [value for signal in signals for value in _SIGNAL_RANGES[signal]],
+    }
+    if args.adherence_gate:
+        settings |= {
+            "video_reward_adherence_pool": "adherence",
+            "video_reward_adherence_threshold": _ADHERENCE_THRESHOLD,
+        }
+    return settings
+
+
 def _reward_models(args: ScriptArgs) -> list[str]:
     repos = {
         "hpsv3": [HPSV3, HPSV3_BASE],
@@ -464,7 +476,12 @@ def _reward_pools(args: ScriptArgs) -> list[dict]:
         "motion": (judge, {"model_path": args.local(JUDGE), "axis_weights": {"motion": 1.0}}),
         "hpsv3": (
             "miles.rollout.rm_hub.video.hpsv3.VideoHpsv3Scorer",
-            {"checkpoint_path": f"{args.local(HPSV3)}/HPSv3.safetensors", "base_model_path": args.local(HPSV3_BASE)},
+            {
+                "checkpoint_path": f"{args.local(HPSV3)}/HPSv3.safetensors",
+                "base_model_path": args.local(HPSV3_BASE),
+                # The survey's reduction, after Flash-GRPO: the mean of the top 30% of the frames' scores.
+                "top_fraction": 0.3,
+            },
         ),
         "vqascore": ("miles.rollout.rm_hub.video.vqascore.VideoVqaScorer", {"model_path": args.local(JUDGE)}),
         "unifiedreward": (

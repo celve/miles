@@ -1,9 +1,11 @@
 """HPSv3 (MizzenAI/HPSv3) of a clip: a Qwen2-VL-7B image preference model whose ranknet head reads one special
-token, scored on evenly spaced frames and averaged, as the PickScore scorer does.
+token, scored on evenly spaced frames and reduced to the mean of the best `top_fraction` of them (all by default).
 
 Ported from the repo's `inference.py`, which pins transformers 4.45: the forward keeps theirs, including plain 1D
 positions in place of Qwen2-VL's 3D rope ones, and the score is the head's mean (mu), not its sigma.
 """
+
+import math
 
 import torch
 from PIL import Image
@@ -58,7 +60,10 @@ class VideoHpsv3Scorer:
         base_model_path: str,
         num_frames: int | None = 8,
         frames_per_forward: int = 8,
+        top_fraction: float = 1.0,
     ) -> None:
+        assert 0 < top_fraction <= 1, f"top_fraction is in (0, 1], got {top_fraction}"
+        self.top_fraction = top_fraction
         self.device = device
         self.num_frames = num_frames
         self.frames_per_forward = frames_per_forward
@@ -101,7 +106,7 @@ class VideoHpsv3Scorer:
         scores = []
         for start in range(0, len(images), self.frames_per_forward):
             scores.extend(self.score_images(images[start : start + self.frames_per_forward], request))
-        return sum(scores) / len(scores)
+        return top_mean(scores, self.top_fraction)
 
     @torch.no_grad()
     def score_images(self, images: list[Image.Image], request: str) -> list[float]:
@@ -128,6 +133,12 @@ class VideoHpsv3Scorer:
         hidden = self.model.language_model(inputs_embeds=embeds, attention_mask=inputs["attention_mask"])
         logits = self.rm_head(hidden.last_hidden_state[input_ids == self.special_token_id].float())
         return logits[:, 0].tolist()
+
+
+def top_mean(scores: list[float], fraction: float) -> float:
+    """The mean of the highest `fraction` of `scores`, at least one, rounding the count up."""
+    best = sorted(scores, reverse=True)[: max(1, math.ceil(fraction * len(scores)))]
+    return sum(best) / len(best)
 
 
 def _renamed_state_dict(checkpoint: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:

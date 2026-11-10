@@ -61,13 +61,17 @@ def test_generate_asks_the_env_generator_for_the_runs_clip_shape(tmp_path, monke
     assert skipped["path"] is None
 
 
-def test_k_arms_come_from_the_eval_dump_and_a_missing_submission_has_no_clip(tmp_path):
+def test_k_arms_replay_their_episodes_video_request_on_the_common_seed(tmp_path, monkeypatch):
     dump = _dump(
         tmp_path,
         "eval_0.pt",
         {
-            "a fox": {"video": {"prompt": "fox, snow it runs", "seed": 3}, "submitted": {"path": "/kept/f.mp4"}},
-            "a red car": {"video": None, "submitted": None},
+            "a fox": {
+                "video": {"prompt": "fox, snow it runs", "seed": 0, "image_path": None},
+                "submitted": {"path": "/kept/f.mp4"},
+            },
+            "a red car": {"video": {"prompt": "it drives", "seed": 5, "image_path": "/img/car.png"}, "submitted": {}},
+            "a tv": {"video": None, "submitted": None},
         },
     )
 
@@ -77,10 +81,21 @@ def test_k_arms_come_from_the_eval_dump_and_a_missing_submission_has_no_clip(tmp
         "arm": "K0",
         "request": "a fox",
         "prompt": "fox, snow it runs",
-        "seed": 3,
-        "path": "/kept/f.mp4",
+        "seed": request_seed("a fox"),
+        "image_path": None,
+        "episode_path": "/kept/f.mp4",
+        "episode_seed": 0,
     }
-    assert [row["path"] for row in rows[1:]] == [None, None]
+    assert rows[2]["prompt"] is None
+    monkeypatch.setenv("AGENT_VIDEO_GEN_FAKE_DIR", str(tmp_path / "clips"))
+    fox, car, tv = asyncio.run(arms.generate(rows, FakeClipGenerator()))
+    asked = json.loads(open(car["path"]).read())
+    assert (asked["seed"], asked["image_path"], asked["prompt"]) == (
+        request_seed("a red car"),
+        "/img/car.png",
+        "it drives",
+    )
+    assert json.loads(open(fox["path"]).read())["seed"] == request_seed("a fox") and tv["path"] is None
 
 
 def _write_clip(path, values):
@@ -131,8 +146,19 @@ def test_scoring_gives_the_training_reward_its_gates_and_the_hack_monitors(tmp_p
     assert (blind_row["reward"], blind_row["frame_diff"], blind_row["prompt_words"]) == (0.0, None, None)
 
 
-def test_scoring_uses_the_runs_pools_plus_the_outside_checks():
+def test_scoring_uses_the_runs_pools_and_reward_settings_plus_the_outside_checks(monkeypatch):
     specs = score.scorer_specs(ScriptArgs(run_id="test", model_dir="/m"))
+    gated = score.reward_config(ScriptArgs(run_id="test", adherence_gate=True))
+    assert gated.video_reward_signal_pools == ["hpsv3", "vqascore"]
+    assert (gated.video_reward_adherence_pool, gated.video_reward_adherence_threshold) == ("adherence", 0.016)
+    assert specs["hpsv3"][1]["top_fraction"] == 0.3
+
+    def stop(run):
+        raise SystemExit(run.reward)
+
+    monkeypatch.setattr(score, "scorer_specs", stop)
+    with pytest.raises(SystemExit, match="^hpsv3\\+vqascore$"):
+        score.main(["--out", "/dev/null", "/dev/null"])
 
     assert list(specs) == ["motion", "hpsv3", "vqascore", "ocr", "judge", "pickscore"]
     assert specs["judge"][1] == {"model_path": "/m/Qwen3-VL-8B-Instruct"}
@@ -182,6 +208,8 @@ def test_arms_are_paired_by_request_with_a_two_sided_sign_test():
         "frame difference not below B0": True,
     }
     assert compare.win_bar(results, None)["blind: K in >= 15 of 20 decided vs B0"] is None
+    missing = [row | {"frame_diff": None} for row in _rows("K", k)] + _rows("B0", {"r0": 0.0})
+    assert compare.win_bar(compare.compare(missing), None)["frame difference not below B0"] is None
 
 
 def test_the_blind_page_draws_outside_lin2741s_requests_and_keeps_the_key_apart(tmp_path):
@@ -198,7 +226,10 @@ def test_the_blind_page_draws_outside_lin2741s_requests_and_keeps_the_key_apart(
     requests = [pair["request"] for pair in pairs]
     assert len(pairs) == 40 and requests[:20] == requests[20:] and not set(requests) & excluded
     assert json.loads((tmp_path / "blind_key.json").read_text()) == key
-    assert "key" not in (tmp_path / "blind" / "pairs.json").read_text()
+    page = (tmp_path / "blind" / "index.html").read_text()
+    assert f"const PAIRS = {json.dumps(pairs)};" in page and "__PAIRS__" not in page
+    assert "_key.json" not in page and '"left"' not in json.dumps(pairs)
+    assert 'src: p.pair + "_" + side + ".mp4"' in page and "picks.json" in page
     for pair in pairs:
         k_side = key[pair["pair"]]
         assert (tmp_path / "blind" / f"{pair['pair']}_{k_side}.mp4").read_text().startswith("K ")

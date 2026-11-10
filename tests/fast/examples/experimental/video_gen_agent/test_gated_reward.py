@@ -203,7 +203,8 @@ def test_episode_metrics_report_how_often_each_gate_fires():
             "fired": {"motion": motion, "ocr": ocr, "adherence": False},
             "reward": 0.0 if motion else 0.4,
         }
-        video_gen = {"turn_stats": [], "submitted": {"clip_id": "video_1"}}
+        video_gen = {"turn_stats": [], "submitted": {"clip_id": "video_1", "prompt": "a fox runs"}}
+        video_gen["images"] = [{"prompt": "a fox"}, {"prompt": "a red fox in snow"}]
         return Sample(metadata={"session_id": session, "video_gen": video_gen, RECORD_KEY: record})
 
     unsubmitted = Sample(metadata={"session_id": "d", "video_gen": {"turn_stats": [], "submitted": None}})
@@ -215,3 +216,4 @@ def test_episode_metrics_report_how_often_each_gate_fires():
     assert metrics["reward/motion_fired"] == pytest.approx(1 / 3)
     assert metrics["reward/ocr_fired"] == pytest.approx(1 / 3) and metrics["reward/adherence_fired"] == 0
     assert metrics["reward/score_hps"] == 4.0 and metrics["reward/term_hps"] == pytest.approx(0.8 / 3)
+    assert (metrics["episode/video_prompt_words"], metrics["episode/image_prompt_words"]) == (3.0, 3.5)

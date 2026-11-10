@@ -104,6 +104,7 @@ async def test_images_are_shown_then_the_video_from_the_chosen_image_is_submitte
         "clip_id": "video_1",
         "path": str(kept),
         "prompt": "the fox runs left, camera pans",
+        "prompt_words": 6,
         "image_id": "image_1",
         "image_prompt": "fox, wide shot",
     }
@@ -332,40 +333,58 @@ async def test_an_env_fault_aborts_the_group_rather_than_scoring_0(options, vari
     assert aborted.value.exit_status == "EnvError"
 
 
+async def test_no_prompt_is_capped_by_default(options):
+    sent = _script(
+        options,
+        [_call("generate_image", {"prompt": " ".join(["fox"] * 300)})],
+        [_call("generate_video", {"image_id": "image_1", "prompt": " ".join(["runs"] * 300)})],
+    )
+
+    result = await _run()
+
+    assert "words" not in sent[0][0]["content"]
+    assert result["video_gen"]["submitted"]["prompt_words"] == 600
+
+
 async def test_a_prompt_over_the_word_cap_gets_an_error_reply_and_spends_a_turn_but_no_generation(options):
+    options.setenv("AGENT_VIDEO_GEN_MAX_PROMPT_WORDS", "120")
     words = lambda n: " ".join(["fox"] * n)  # noqa: E731
     sent = _script(
         options,
         [_call("generate_image", {"prompt": words(121)})],
-        [_call("generate_image", {"prompt": words(120)})],
-        [_call("generate_video", {"image_id": "image_1", "prompt": words(121)})],
+        [_call("generate_image", {"prompt": words(119)})],
+        [_call("generate_video", {"image_id": "image_1", "prompt": "runs fast"})],
         [_call("generate_video", {"image_id": "image_1", "prompt": "runs"})],
     )
 
     result = await _run()
 
-    assert "Each prompt is at most 120 words." in sent[0][0]["content"]
+    assert "Each prompt is at most 120 words, and the chosen image's prompt and your video" in sent[0][0]["content"]
     assert _tool_replies(sent[1]) == [
         "Error: the generate_image prompt has 121 words; the limit is 120. Images left: 3. Turns left: 5."
     ]
+    # In preview mode the generator reads the image's prompt and the video prompt together.
     assert _tool_replies(sent[3])[-1] == (
-        "Error: the generate_video prompt has 121 words; the limit is 120. Images left: 2. Turns left: 3."
+        "Error: image_1's prompt and the generate_video prompt have 121 words together; the limit is 120. "
+        "Images left: 2. Turns left: 3."
     )
     record = result["video_gen"]
-    assert len(record["images"]) == 1 and record["submitted"]["prompt"] == f"{words(120)} runs"
-    assert record["turns"] == 4
+    assert len(record["images"]) == 1 and record["submitted"]["prompt"] == f"{words(119)} runs"
+    assert len(_clip_request(record["video"]["path"])["prompt"].split()) == 120 and record["turns"] == 4
 
 
-async def test_the_word_cap_is_an_option(options):
+async def test_in_i2v_mode_the_cap_is_on_the_video_prompt_alone_and_is_an_option(options):
+    options.setenv("AGENT_VIDEO_GEN_VIDEO_MODE", "i2v")
     options.setenv("AGENT_VIDEO_GEN_MAX_PROMPT_WORDS", "3")
     sent = _script(
         options,
-        [_call("generate_image", {"prompt": "a red fox runs"})],
         [_call("generate_image", {"prompt": "a red fox"})],
-        [_call("generate_video", {"image_id": "image_1", "prompt": "runs"})],
+        [_call("generate_video", {"image_id": "image_1", "prompt": "it runs very fast"})],
+        [_call("generate_video", {"image_id": "image_1", "prompt": "it runs fast"})],
     )
 
-    await _run()
+    result = await _run()
 
-    assert _tool_replies(sent[1])[0].startswith("Error: the generate_image prompt has 4 words; the limit is 3.")
-    assert "Each prompt is at most 3 words." in sent[0][0]["content"]
+    assert "Each prompt is at most 3 words. An episode" in sent[0][0]["content"]
+    assert _tool_replies(sent[2])[-1].startswith("Error: the generate_video prompt has 4 words; the limit is 3.")
+    assert result["video_gen"]["submitted"]["prompt"] == "it runs fast"

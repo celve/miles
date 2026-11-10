@@ -74,6 +74,7 @@ def test_each_layout_parses_with_two_frozen_generators_on_gpus_of_their_own(
     assert all(pools[n].colocated and pools[n].uses_gpu for n in ("motion", "hpsv3", "vqascore"))
     assert pools["vqascore"].scorer_kwargs == {"model_path": f"{tmp_path}/Qwen3-VL-8B-Instruct"}
     assert pools["motion"].scorer_kwargs["axis_weights"] == {"motion": 1.0}
+    assert pools["hpsv3"].scorer_kwargs["top_fraction"] == 0.3
     assert not pools["ocr"].uses_gpu and pools["ocr"].scorer_path.endswith("ocr.VideoOcrScorer")
 
 
@@ -181,8 +182,8 @@ def test_the_env_gets_the_recipes_clip_and_both_generators():
         "3",
         "6",
     )
-    assert env["AGENT_VIDEO_GEN_MAX_PROMPT_WORDS"] == "120"
-    assert _agent_env(ScriptArgs(run_id="test", max_prompt_words=80))["AGENT_VIDEO_GEN_MAX_PROMPT_WORDS"] == "80"
+    assert env["AGENT_VIDEO_GEN_MAX_PROMPT_WORDS"] == "0"
+    assert _agent_env(ScriptArgs(run_id="test", max_prompt_words=120))["AGENT_VIDEO_GEN_MAX_PROMPT_WORDS"] == "120"
     assert env["AGENT_VIDEO_GEN_NUM_INFERENCE_STEPS"] == "4" and env["AGENT_VIDEO_GEN_GUIDANCE_SCALE_2"] == "1.0"
     assert env["AGENT_VIDEO_GEN_VIDEO_MODE"] == "preview"
     assert env["AGENT_VIDEO_GEN_IMAGE_DIR"] == "/root/shared_data/test/images"

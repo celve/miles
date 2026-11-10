@@ -19,7 +19,8 @@ Run-wide options come from ``AGENT_VIDEO_GEN_*`` env vars, which worker and sand
   AGENT_VIDEO_GEN_SUBMITTED_DIR    a durable dir submitted clips are copied to (required)
   AGENT_VIDEO_GEN_MAX_IMAGES       images per episode, at most 3 (default 3)
   AGENT_VIDEO_GEN_MAX_TURNS        policy turns per episode (default 6)
-  AGENT_VIDEO_GEN_MAX_PROMPT_WORDS a longer generate_image or generate_video prompt gets an error reply (default 120)
+  AGENT_VIDEO_GEN_MAX_PROMPT_WORDS a longer generator prompt gets an error reply; 0, the default, sets no cap. In
+                                   preview mode the video's prompt is the image's and the planner's together
   AGENT_VIDEO_GEN_SECONDS          the video's length (default 2)
   AGENT_VIDEO_GEN_WIDTH / _HEIGHT / _FPS  every image's and the video's shape (default 832x480 at 16 fps)
   AGENT_VIDEO_GEN_TIMEOUT_S        a generation slower than this is an outage (default 600)
@@ -100,7 +101,7 @@ class KeyframeEnvOptions:
     submitted_dir: str = ""
     max_images: int = 3
     max_turns: int = 6
-    max_prompt_words: int = 120
+    max_prompt_words: int = 0
     seconds: float = 2.0
     width: int = 832
     height: int = 480
@@ -114,11 +115,13 @@ class KeyframeEnvOptions:
         for name in ("generator", "image_generator", "submitted_dir"):
             if not getattr(self, name):  # config-access-exempt: iterates the options dataclass's own fields
                 raise ValueError(f"{_ENV_PREFIX}{name.upper()} is required")
-        for name in ("max_images", "max_turns", "max_prompt_words", "seconds", "width", "height", "fps", "timeout_s"):
+        for name in ("max_images", "max_turns", "seconds", "width", "height", "fps", "timeout_s"):
             if getattr(self, name) <= 0:  # config-access-exempt: iterates the options dataclass's own fields
                 raise ValueError(
                     f"{_ENV_PREFIX}{name.upper()} must be positive, got {getattr(self, name)}"
                 )  # config-access-exempt: iterates the options dataclass's own fields
+        if self.max_prompt_words < 0:
+            raise ValueError(f"{_ENV_PREFIX}MAX_PROMPT_WORDS is 0 (no cap) or more, got {self.max_prompt_words}")
         if self.max_images > _IMAGES_LIMIT:
             raise ValueError(f"{_ENV_PREFIX}MAX_IMAGES is at most {_IMAGES_LIMIT}, got {self.max_images}")
         if self.video_mode not in _VIDEO_MODES:
@@ -236,8 +239,18 @@ def _system_prompt(options: KeyframeEnvOptions) -> str:
         f"id of the image the video should come from and a prompt: {video}. That clip is your answer, and the "
         f"episode ends. Images and the video are {options.width}x{options.height}; the video is "
         f"{options.seconds:g} seconds at {options.fps} fps. You have {options.max_images} images, 1 video and "
-        f"{options.max_turns} turns. Each prompt is at most {options.max_prompt_words} words. An episode that ends "
-        "without a video fails."
+        f"{options.max_turns} turns. {_prompt_cap(options)}An episode that ends without a video fails."
+    )
+
+
+def _prompt_cap(options: KeyframeEnvOptions) -> str:
+    if not options.max_prompt_words:
+        return ""
+    if options.video_mode == "i2v":
+        return f"Each prompt is at most {options.max_prompt_words} words. "
+    return (
+        f"Each prompt is at most {options.max_prompt_words} words, and the chosen image's prompt and your video "
+        "prompt together too. "
     )
 
 
@@ -298,12 +311,19 @@ async def _generate_video(episode: _Episode, arguments: dict) -> str:
         request = ClipRequest(**(asdict(request) | {"image_path": image.path}))
     else:
         request = ClipRequest(**(asdict(request) | {"prompt": f"{image.request.prompt} {request.prompt}"}))
+        # The cap bounds what the generator reads, here the chosen image's prompt and this one together.
+        if options.max_prompt_words and (words := len(request.prompt.split())) > options.max_prompt_words:
+            return (
+                f"Error: {image.image_id}'s prompt and the generate_video prompt have {words} words together; the "
+                f"limit is {options.max_prompt_words}. {episode.budget()}"
+            )
     clip = await _generated(episode, episode.video_generator.generate(request))
     episode.video = {"clip_id": _VIDEO_ID, "path": clip.path, "image_id": image.image_id, **asdict(request)}
     episode.submitted = {
         "clip_id": _VIDEO_ID,
         "path": _keep(clip.path, options.submitted_dir),
         "prompt": request.prompt,
+        "prompt_words": len(request.prompt.split()),
         "image_id": image.image_id,
         "image_prompt": image.request.prompt,
     }
@@ -327,7 +347,7 @@ def _prompted(arguments: dict, *, tool: str, default_seed: int, max_words: int) 
     seed = arguments.get("seed", default_seed)
     if not isinstance(prompt, str) or not prompt.strip():
         return None, f"{tool} needs a non-empty prompt"
-    if (words := len(prompt.split())) > max_words:
+    if max_words and (words := len(prompt.split())) > max_words:
         return None, f"the {tool} prompt has {words} words; the limit is {max_words}"
     if not isinstance(negative_prompt, str):
         return None, "negative_prompt must be a string"

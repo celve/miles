@@ -1,12 +1,12 @@
 """Score eval-arm clips with the training reward and the outside checks, on one GPU.
 
   python -m examples.experimental.video_gen_agent.keyframe.eval.score clips.jsonl... --out scored.jsonl \\
-      [--model-dir /root/models] [--reward hpsv3+unifiedreward] [--adherence-gate]
+      [--model-dir /root/models] [--reward <the launcher's --reward>] [--adherence-gate]
 
 Each row gains ``scores`` (every training pool's score, the three-axis Qwen3-VL ``judge`` and ``pickscore``),
 ``reward`` (the training reward's gated mean, as eval reports it), ``fired`` (its gates), ``frame_diff`` (mean absolute
 difference of consecutive grayscale frames, 0-255), ``ocr_lines`` and ``prompt_words``. The pools and the reward's
-ranges come from the launcher's ``ScriptArgs``, so they are the run's. A row without a clip scores reward 0.
+settings come from the launcher, so they are the run's. A row without a clip scores reward 0.
 """
 
 import argparse
@@ -18,26 +18,19 @@ import numpy as np
 import torch
 from examples.experimental.video_gen_agent.gated_reward import GatedVideoRewardConfig, clip_record
 from examples.experimental.video_gen_agent.keyframe.run_qwen35_9b_keyframe import (
-    _REWARDS,
-    _SIGNAL_RANGES,
     JUDGE,
     PICKSCORE,
     PICKSCORE_PROCESSOR,
     ScriptArgs,
     _reward_pools,
+    _reward_settings,
 )
 
 from miles.utils.function_registry import load_function
 
 
 def reward_config(args: ScriptArgs) -> GatedVideoRewardConfig:
-    signals = _REWARDS[args.reward]
-    adherence = {"video_reward_adherence_pool": "adherence"} if args.adherence_gate else {}
-    return GatedVideoRewardConfig(
-        video_reward_signal_pools=list(signals),
-        video_reward_signal_ranges=[value for signal in signals for value in _SIGNAL_RANGES[signal]],
-        **adherence,
-    )
+    return GatedVideoRewardConfig(**_reward_settings(args))
 
 
 def scorer_specs(args: ScriptArgs) -> dict[str, tuple[str, dict]]:
@@ -99,7 +92,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("clips", type=Path, nargs="+")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--model-dir", default="/root/models")
-    parser.add_argument("--reward", default="hpsv3+unifiedreward")
+    parser.add_argument("--reward", default=ScriptArgs.reward, help="as the launcher's --reward, and its default")
     parser.add_argument("--adherence-gate", action="store_true")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args(argv)

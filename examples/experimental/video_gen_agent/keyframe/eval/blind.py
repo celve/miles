@@ -6,8 +6,10 @@ sides are shuffled, and the key goes to a separate file to apply only once the p
       --out blind/
   python -m examples.experimental.video_gen_agent.keyframe.eval.blind unblind blind/pairs.json blind_key.json picks.json
 
-``make`` writes ``<out>/pairs.json`` and the clips as ``<out>/<pair>_<left|right>.mp4``, and the key beside ``<out>``
-as ``<out>_key.json``. ``picks.json`` maps a pair to ``left``, ``right`` or ``tie``.
+``make`` writes the page, ``<out>/index.html`` (``blind_page.html``, LIN-2741's page), with ``<out>/pairs.json`` and the
+clips as ``<out>/<pair>_<left|right>.mp4``, and the key beside ``<out>`` as ``<out>_key.json``, which the page never
+reads. Publish ``<out>`` as an Artifact with a database, or open it locally; the page saves each pick as it is made and
+downloads them as ``picks.json``, which maps a pair to ``left``, ``right`` or ``tie``.
 """
 
 import argparse
@@ -16,6 +18,7 @@ import random
 import shutil
 from pathlib import Path
 
+_PAGE = Path(__file__).with_name("blind_page.html")
 SEED = 2821
 PAIRS = 20
 SETS = {"A": "B0", "B": "B1"}
@@ -43,6 +46,7 @@ def make(clips: dict[str, dict[str, str]], exclude: set[str], out: Path) -> tupl
             pairs.append({"pair": pair, "set": set_name, "request": request})
             key[pair] = "left" if k_left else "right"
     (out / "pairs.json").write_text(json.dumps(pairs, indent=1))
+    (out / "index.html").write_text(_PAGE.read_text().replace("__PAIRS__", json.dumps(pairs)))
     (out.parent / f"{out.name}_key.json").write_text(json.dumps(key, indent=1))
     return pairs, key
 

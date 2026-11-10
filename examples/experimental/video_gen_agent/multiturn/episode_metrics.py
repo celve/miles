@@ -10,6 +10,8 @@ Miles' own ``rollout/episode_raw_reward``.
   episode/turn_seconds            wall time of a policy call
   episode/folded_clips, episode/recalls, episode/shots_submitted, episode/samples
   episode/images                  images per episode, in the keyframe env
+  episode/video_prompt_words      words in the submitted video's generator prompt
+  episode/image_prompt_words      words per image prompt, in the keyframe env
   reward/<gate>_fired             under ``gated_reward``, the share of submitted episodes each gate fired on
   reward/score_<pool>, reward/term_<pool>  its mean pool scores and gated terms over submitted episodes
 
@@ -82,6 +84,10 @@ def episode_metrics(samples) -> dict[str, float]:
             metrics[f"episode/{key}"] = np.mean(counts).item()
     if images := [len(e["images"]) for e in episodes.values() if "images" in e]:
         metrics["episode/images"] = np.mean(images).item()
+    if image_words := [len(i["prompt"].split()) for e in episodes.values() for i in e.get("images", [])]:
+        metrics["episode/image_prompt_words"] = np.mean(image_words).item()
+    if video_words := [len(s["prompt"].split()) for s in submitted if s.get("prompt")]:
+        metrics["episode/video_prompt_words"] = np.mean(video_words).item()
     if tokens:
         metrics["episode/prompt_tokens_per_turn"] = np.mean([np.mean(episode) for episode in tokens]).item()
         metrics["episode/peak_prompt_tokens"] = np.mean([max(episode) for episode in tokens]).item()

@@ -126,3 +126,15 @@ def test_vqascore_counts_a_lower_case_yes(tmp_path):
     scorer.yes_ids = [scorer.processor.tokenizer.encode(yes, add_special_tokens=False)[0] for yes in vqascore._YES]
 
     assert scorer.score_batch([str(tmp_path / "clip.mp4")], ["a fox"]) == [pytest.approx(0.5)]
+
+
+def test_hpsv3_reduces_frames_to_the_mean_of_the_best_30_percent(tmp_path):
+    _write_clip(tmp_path / "clip.mp4", num_frames=12)
+    scorer = object.__new__(hpsv3.VideoHpsv3Scorer)
+    scorer.num_frames, scorer.frames_per_forward, scorer.top_fraction = 8, 3, 0.3
+    scorer.score_images = lambda images, request: [float(i) for i in range(len(images))]
+
+    # Frames come in batches of 3, scored 0, 1, 2 / 0, 1, 2 / 0, 1: the best 3 of 8 are 2, 2 and 1.
+    assert scorer.score_batch([str(tmp_path / "clip.mp4")], ["a fox"]) == [pytest.approx(5 / 3)]
+    assert hpsv3.top_mean([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], 1.0) == 4.5
+    assert hpsv3.top_mean([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], 0.3) == 7.0

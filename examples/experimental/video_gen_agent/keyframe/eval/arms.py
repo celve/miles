@@ -3,17 +3,19 @@
 
   B0       the raw request → the video model
   B1       Phase 0's trained planner prompt (LIN-2737's ``answer99``) → the video model
-  K0, K    the keyframe agent's submitted clip at its step-0 and final eval, read from the run's eval dumps
+  K0, K    the keyframe agent at its step-0 and final eval: the generator prompt (and in i2v mode the image) its episode
+           submitted, read from the run's eval dumps and generated again
   K-blind  the final agent's first image prompt → the video model, with no image watched
 
-B0, B1 and K-blind take Phase 0's per-request seed and the run's clip shape (832x480, 2 s at 16 fps: 33 frames); K0
-and K keep the clip and seed their episode chose. Generate every arm on the box that ran the agent's evals, since
-clips differ across GPU types and parallel layouts.
+Every arm takes Phase 0's per-request seed and the run's clip shape (832x480, 2 s at 16 fps: 33 frames), so arms
+differ only in what the generator is asked; K0 and K keep the clip and seed their episode made as ``episode_path`` and
+``episode_seed``. Generate every arm on one box, since clips differ across GPU types and parallel layouts.
 
   python -m examples.experimental.video_gen_agent.keyframe.eval.arms prompts --heldout heldout.jsonl \\
       --phase0 heldout_paired_step0_step99.jsonl --final-dump eval_199.pt --out prompts.jsonl
-  python -m examples.experimental.video_gen_agent.keyframe.eval.arms generate prompts.jsonl --out clips.jsonl
-  python -m examples.experimental.video_gen_agent.keyframe.eval.arms from-dump eval_0.pt --arm K0 --out k0.jsonl
+  python -m examples.experimental.video_gen_agent.keyframe.eval.arms from-dump eval_0.pt --arm K0 --heldout heldout.jsonl \
+      --out k0.jsonl
+  python -m examples.experimental.video_gen_agent.keyframe.eval.arms generate prompts.jsonl k0.jsonl k.jsonl --out clips.jsonl
 
 ``generate`` makes clips with the env's generator, so ``AGENT_VIDEO_GEN_GENERATOR`` and its options pick the router
 (or a fake) exactly as in training.
@@ -75,7 +77,13 @@ async def generate(rows: list[dict], generator, concurrency: int = 8) -> list[di
             return row | {"path": None}
         async with semaphore:
             clip = await generator.generate(
-                ClipRequest(prompt=row["prompt"], negative_prompt="", seed=row["seed"], **SHAPE)
+                ClipRequest(
+                    prompt=row["prompt"],
+                    negative_prompt="",
+                    seed=row["seed"],
+                    image_path=row.get("image_path"),
+                    **SHAPE,
+                )
             )
         return row | {"path": clip.path}
 
@@ -83,19 +91,22 @@ async def generate(rows: list[dict], generator, concurrency: int = 8) -> list[di
 
 
 def from_dump(dump: Path, arm: str, requests: list[str]) -> list[dict]:
-    """The agent's submitted clip per request; an episode that submitted none has path None."""
+    """The agent's video request per held-out request, to generate again on the common seed; an episode that
+    submitted no video has prompt None."""
     recorded = episodes(dump)
     rows = []
     for request in requests:
-        video = (recorded.get(request) or {}).get("video") or {}
-        submitted = (recorded.get(request) or {}).get("submitted") or {}
+        record = recorded.get(request) or {}
+        video = record.get("video") or {}
         rows.append(
             {
                 "arm": arm,
                 "request": request,
                 "prompt": video.get("prompt"),
-                "seed": video.get("seed"),
-                "path": submitted.get("path"),
+                "seed": request_seed(request),
+                "image_path": video.get("image_path"),
+                "episode_path": (record.get("submitted") or {}).get("path"),
+                "episode_seed": video.get("seed"),
             }
         )
     return rows
@@ -114,7 +125,7 @@ def main(argv: list[str] | None = None) -> None:
     prompts.add_argument("--final-dump", type=Path, required=True, help="the final eval's eval_<step>.pt")
     prompts.add_argument("--out", type=Path, required=True)
     generated = commands.add_parser("generate")
-    generated.add_argument("prompts", type=Path)
+    generated.add_argument("prompts", type=Path, nargs="+")
     generated.add_argument("--out", type=Path, required=True)
     dumped = commands.add_parser("from-dump")
     dumped.add_argument("dump", type=Path)
@@ -128,7 +139,7 @@ def main(argv: list[str] | None = None) -> None:
         _write(args.out, arm_prompts(heldout_requests(args.heldout), phase0, episodes(args.final_dump)))
     elif args.command == "generate":
         generator = load_function(os.environ["AGENT_VIDEO_GEN_GENERATOR"])()
-        rows = [json.loads(line) for line in args.prompts.read_text().splitlines()]
+        rows = [json.loads(line) for path in args.prompts for line in path.read_text().splitlines()]
         _write(args.out, asyncio.run(generate(rows, generator)))
     else:
         _write(args.out, from_dump(args.dump, args.arm, heldout_requests(args.heldout)))
