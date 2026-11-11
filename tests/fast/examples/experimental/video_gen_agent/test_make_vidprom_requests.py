@@ -171,7 +171,8 @@ def test_the_build_filters_dedups_and_splits_real_requests(spacy_model, tmp_path
     train, heldout, movie = (_rows(out / f) for f in ("train.jsonl", "heldout.jsonl", "moviegen_heldout.jsonl"))
     assert (len(train), len(heldout), len(movie)) == (40, 10, 6)
     requests = [row["messages"][0]["content"] for row in train + heldout]
-    assert len(set(requests)) == 50 and set(requests) <= set(good)
+    assert len(set(requests)) == 50 and set(requests) <= set(good) | {bad["duplicate"]}
+    assert not {good[3], bad["duplicate"]} <= set(requests)
     assert {row["metadata"]["source"] for row in train + heldout} == {"vidprom"}
     first = heldout[0]["metadata"]
     assert set(first) == {"source", "id", "subjects", "setting", "actions", "suggested_seconds", "splits"}
