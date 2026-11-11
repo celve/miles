@@ -69,6 +69,9 @@ def test_clean_strips_pika_flags_entities_and_a_prompt_prefix():
         "quick cuts of cities. Use more white and light blue.4k"
     )
     assert clean("a mermaid girl plays in the ocean, 16:9, motion 2") == "a mermaid girl plays in the ocean, 16:9"
+    assert clean("Crazy original,Photography Kodak,Amidst a busy city, a robot stands") == (
+        "Amidst a busy city, a robot stands"
+    )
     assert clean("an old-style tram with a t-shirt vendor in slow motion") == (
         "an old-style tram with a t-shirt vendor in slow motion"
     )
@@ -110,9 +113,10 @@ def test_near_duplicates_are_refused_and_rewordings_kept():
 
 
 def test_splits_bucket_length_subjects_and_setting():
-    tags = {"seconds": 8, "subjects": ["a dog", "a cat", "a boy"], "setting": None}
-    assert splits(tags) == {"seconds": "8-11s", "subjects": "3+", "setting": "no"}
-    assert splits(tags | {"seconds": 4, "subjects": ["a dog"], "setting": "a park"})["seconds"] == "4-7s"
+    tags = {"suggested_seconds": 8, "subjects": ["a dog", "a cat", "a boy"], "setting": None}
+    assert splits(tags) == {"heuristic_seconds": "8-11s", "heuristic_subjects": "3+", "heuristic_setting": "no"}
+    short = tags | {"suggested_seconds": 4, "subjects": ["a dog"], "setting": "a park"}
+    assert splits(short) == {"heuristic_seconds": "4-7s", "heuristic_subjects": "1", "heuristic_setting": "yes"}
 
 
 @pytest.fixture
@@ -135,7 +139,7 @@ def test_tags_name_the_subjects_setting_actions_and_a_length(spacy_model):
     assert tags["subjects"] == ["A red fox", "a white rabbit", "an owl"]
     assert tags["setting"] == "a snowy forest"
     assert tags["actions"] == ["chase", "swoop"]
-    assert tags["seconds"] == 8 and is_rich(tags)
+    assert tags["suggested_seconds"] == 8 and is_rich(tags)
     lone = tag(spacy_model("A cinematic shot of a lonely lighthouse, ultra detailed, 4k, beautiful lighting"))
     assert not is_rich(lone)
 
@@ -167,8 +171,9 @@ def test_the_build_filters_dedups_and_splits_real_requests(spacy_model, tmp_path
     assert len(set(requests)) == 50 and set(requests) <= set(good)
     assert {row["metadata"]["source"] for row in train + heldout} == {"vidprom"}
     first = heldout[0]["metadata"]
-    assert set(first) == {"source", "id", "subjects", "setting", "actions", "seconds", "splits"}
-    assert len(first["subjects"]) >= 2 and 4 <= first["seconds"] <= 15 and first["splits"]["setting"] in ("yes", "no")
+    assert set(first) == {"source", "id", "subjects", "setting", "actions", "suggested_seconds", "splits"}
+    assert len(first["subjects"]) >= 2 and 4 <= first["suggested_seconds"] <= 15
+    assert first["splits"]["heuristic_setting"] == ("yes" if first["setting"] else "no")
     assert {row["metadata"]["category"] for row in movie} <= {"animal", "human - activity"}
     assert all(row["metadata"]["source"] == "moviegenbench" for row in movie)
     funnel = json.loads((out / "funnel.json").read_text())["vidprom"]

@@ -5,8 +5,8 @@ VidProM (Wang & Yang, NeurIPS 2024) holds 1.04M semantically distinct prompts th
 motion (``MovieGenVideoBenchWithTag.csv``, CC-BY-NC-4.0). Both are fetched at prepare time, for non-commercial research
 only, and never copied into this repository. A VidProM request is kept when it is rich enough for a 4-15 s clip:
 
-- after Pika's flags (``-gs 12 -motion 2 -neg ...``) and HTML entities are stripped, 25 to 120 words of English prose
-  on one paragraph, with no markup, links or keyword list (most comma-separated parts a few words long);
+- after Pika's flags (``-gs 12 -motion 2 -neg ...``), leading packed tags and HTML entities are stripped, 25 to 120
+  words of English prose on one paragraph, with no markup, links or keyword list (most comma-separated parts a few words long);
 - below 0.1 on every Detoxify score VidProM ships, and free of the sexual and gore words in ``NSFW_WORDS``;
 - naming no person, by spaCy's named-entity tagger, by a multi-word name it tagged elsewhere in the pool, written in
   any case, or by a capitalized proper noun WordNet knows as a particular person (this drops fictional names too);
@@ -23,14 +23,15 @@ and their ``motion_level``. Rows are ``make_requests.py``'s, plus metadata:
 
   {"messages": [{"role": "user", "content": <request>}],
    "metadata": {"source": "vidprom" | "moviegenbench", "id": <uuid> | "moviegen/<line>", "subjects": [...],
-                "setting": <phrase> | null, "actions": [...], "seconds": 4-15,
-                "splits": {"seconds": "4-7s" | "8-11s" | "12-15s", "subjects": "1" | "2" | "3+",
-                           "setting": "yes" | "no"}}}
+                "setting": <phrase> | null, "actions": [...], "suggested_seconds": 4-15,
+                "splits": {"heuristic_seconds": "4-7s" | "8-11s" | "12-15s", "heuristic_subjects": "1" | "2" | "3+",
+                           "heuristic_setting": "yes" | "no"}}}
 
 Tagging needs spaCy's ``en_core_web_md`` and NLTK's WordNet (under ``NLTK_DATA``), which the keyframe launcher's
-``prepare`` installs. ``seconds`` suggests a clip length from the request's actions, sequence words and length;
-``subjects``, ``setting`` and ``seconds`` are a heuristic reading, and ``splits`` buckets them for
-``episode_metrics.log_eval_episodes``.
+``prepare`` installs. ``suggested_seconds`` suggests a clip length from the request's actions, sequence words and
+length, for splitting eval only: nothing reads it to set a clip's length, which stays a run setting. ``subjects``,
+``setting`` and ``suggested_seconds`` are a heuristic reading, not checked by hand, and ``splits`` buckets them, named
+as heuristic, for ``episode_metrics.log_eval_episodes``.
 
   python examples/experimental/video_gen_agent/make_vidprom_requests.py \\
       /root/datasets/VidProM/VidProM_semantic_unique.csv /root/datasets/MovieGenBench/benchmark/MovieGenVideoBenchWithTag.csv /root/datasets/video_gen_requests_vidprom
@@ -64,10 +65,13 @@ MAX_JACCARD = 0.5
 # glued to the word before it when it has two dashes ("peace--camera") or a number ("4k-gs 40").
 _FLAG_NAMES = r"(?:neg|gs|ar|motion|camera|fps|seed|size|hide|style|v)\b"
 _FLAGS = re.compile(
-    rf"(?:(?:^|(?<=[\s.,;:]))-{{1,2}}\s?{_FLAG_NAMES}|--{_FLAG_NAMES}|-(?:gs|motion|fps|seed|ar)\s*\d|[\s,]+motion\s*\d+\s*$).*",
+    rf"(?:(?:^|(?<=[\s.,;:]))-{{1,2}}\s?{_FLAG_NAMES}|--{_FLAG_NAMES}|-(?:gs|motion|fps|seed|ar)\s*\d"
+    r"|[\s,]+motion\s*\d+\s*$).*",
     re.I | re.S,
 )
 _LEAD = re.compile(r"^\s*(?:prompt\s*:\s*)+", re.I)
+# Leading tags packed between commas with no space after them ("Crazy original,Photography Kodak,Amidst a city ...").
+_LEAD_TAGS = re.compile(r"^(?:[^,.]{1,40},(?=\S))+")
 _MARKUP = re.compile(r"<[a-z/!]|https?://|www\.|[{}\[\]|`#@]|\\n", re.I)
 _WORD = re.compile(r"[a-z0-9']+")
 _ENGLISH = frozenset(
@@ -118,8 +122,9 @@ _NOT_VIDEO_OPENINGS = frozenset("write compose tell explain list summarize trans
 
 
 def clean(text: str) -> str | None:
-    """The request with Pika's flags, a leading ``prompt:`` and runs of spaces removed, or None if it has markup."""
-    text = _LEAD.sub("", _FLAGS.sub("", html.unescape(html.unescape(text))))
+    """The request with Pika's flags, a leading ``prompt:`` or packed tags and runs of spaces removed, or None if it
+    has markup."""
+    text = _LEAD_TAGS.sub("", _LEAD.sub("", _FLAGS.sub("", html.unescape(html.unescape(text)))))
     if _MARKUP.search(text) or re.search(r"\n\s*\n", text):
         return None
     text = " ".join(text.split()).strip(" ,;")
@@ -218,7 +223,12 @@ def tag(doc) -> dict:
     )
     sequence = sum(t.lower_ in _SEQUENCE_WORDS for t in doc)
     seconds = 2 + 2 * len(actions) + 2 * sequence + (len(doc.text.split()) - MIN_WORDS) // 25
-    return {"subjects": subjects, "setting": setting, "actions": actions, "seconds": max(4, min(15, seconds))}
+    return {
+        "subjects": subjects,
+        "setting": setting,
+        "actions": actions,
+        "suggested_seconds": max(4, min(15, seconds)),
+    }
 
 
 def is_rich(tags: dict) -> bool:
@@ -226,12 +236,12 @@ def is_rich(tags: dict) -> bool:
 
 
 def splits(tags: dict) -> dict[str, str]:
-    seconds = tags["seconds"]
+    seconds = tags["suggested_seconds"]
     n = len(tags["subjects"])
     return {
-        "seconds": "4-7s" if seconds <= 7 else "8-11s" if seconds <= 11 else "12-15s",
-        "subjects": "3+" if n >= 3 else str(n),
-        "setting": "yes" if tags["setting"] else "no",
+        "heuristic_seconds": "4-7s" if seconds <= 7 else "8-11s" if seconds <= 11 else "12-15s",
+        "heuristic_subjects": "3+" if n >= 3 else str(n),
+        "heuristic_setting": "yes" if tags["setting"] else "no",
     }
 
 
@@ -351,7 +361,7 @@ def _write(path: Path, rows: list[dict], source: str) -> None:
     with path.open("w") as f:
         for row in rows:
             metadata = {"source": source, "id": row["id"]}
-            metadata |= {key: row[key] for key in ("subjects", "setting", "actions", "seconds")}
+            metadata |= {key: row[key] for key in ("subjects", "setting", "actions", "suggested_seconds")}
             metadata |= {key: row[key] for key in ("category", "motion_level") if key in row}
             metadata["splits"] = splits(row)
             message = {"role": "user", "content": row["request"]}

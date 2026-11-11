@@ -43,10 +43,11 @@ Args:
         seven categories, LIN-2834). With ``t2v-compbench`` eval runs both held-out sets: ``compbench_heldout``, logged
         per category too, and VBench's as ``heldout``, so ``eval/heldout`` stays comparable with VBench runs; or
         ``vidprom`` (LIN-2859: --vidprom-train real user requests from VidProM rich enough for a 4-15 s clip,
-        tagged with subjects, setting and a suggested length by ``make_vidprom_requests.py``). With ``vidprom`` eval runs
-        --vidprom-heldout more of them as ``vidprom_heldout``, --moviegen-heldout MovieGenBench prompts as
-        ``moviegen_heldout``, each also logged per split, and CompBench's and VBench's held-out sets for continuity
-        at the rollouts --continuity-eval-steps names (default ``0,final``; ``every`` runs them at every eval).
+        tagged with subjects, setting and a suggested length by ``make_vidprom_requests.py``). With ``vidprom``
+        eval runs --vidprom-heldout more of them as ``vidprom_heldout``, --moviegen-heldout MovieGenBench prompts as
+        ``moviegen_heldout``, each also logged per heuristic split, and CompBench's and VBench's held-out sets for
+        continuity at the rollouts --continuity-eval-steps names (default ``0,final``; ``every`` runs them at every
+        eval). The suggested length only splits eval: --seconds sets every clip's length.
         VidProM and MovieGenBench are CC-BY-NC-4.0: prepare fetches them at pinned revisions and nothing copies them.
     --model-dir, --data-dir: where models and the requests live; checkpoints, images and clips go under --output-dir.
 

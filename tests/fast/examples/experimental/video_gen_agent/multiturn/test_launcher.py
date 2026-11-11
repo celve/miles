@@ -134,7 +134,8 @@ def test_heldout_reward_is_also_logged_per_value_of_each_request_split(recipe_co
     logged = []
     monkeypatch.setattr(metrics.tracking, "log", lambda args, log_dict, step_key: logged.append(log_dict))
     samples = [_eval_sample(s, r) for s, r in (("a", 1.0), ("a", 1.0), ("b", 0.0), ("c", 0.5), ("d", 1.0))]
-    splits = [{"seconds": "4-7s", "setting": "yes"}] * 3 + [{"seconds": "12-15s", "setting": "yes"}, None]
+    splits = [{"heuristic_seconds": "4-7s", "heuristic_setting": "yes"}] * 3
+    splits += [{"heuristic_seconds": "12-15s", "heuristic_setting": "yes"}, None]
     for sample, split in zip(samples, splits, strict=True):
         sample.metadata |= {"splits": split} if split else {}
     data = {"vidprom": {"rewards": [s.reward for s in samples], "truncated": [False] * 5, "samples": samples}}
@@ -143,9 +144,9 @@ def test_heldout_reward_is_also_logged_per_value_of_each_request_split(recipe_co
 
     (log_dict,) = logged
     assert log_dict["eval/vidprom"] == 0.625
-    assert log_dict["eval/vidprom/seconds=4-7s"] == 0.5
-    assert log_dict["eval/vidprom/seconds=12-15s"] == 0.5
-    assert log_dict["eval/vidprom/setting=yes"] == 0.5
+    assert log_dict["eval/vidprom/heuristic_seconds=4-7s"] == 0.5
+    assert log_dict["eval/vidprom/heuristic_seconds=12-15s"] == 0.5
+    assert log_dict["eval/vidprom/heuristic_setting=yes"] == 0.5
     assert not any("None" in key for key in log_dict)
 
 
