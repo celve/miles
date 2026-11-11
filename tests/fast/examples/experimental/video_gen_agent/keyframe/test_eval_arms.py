@@ -11,6 +11,7 @@ from examples.experimental.video_gen_agent.generator import FakeClipGenerator, F
 from examples.experimental.video_gen_agent.keyframe.eval import arms, blind, compare, score
 from examples.experimental.video_gen_agent.keyframe.run_qwen35_9b_keyframe import ScriptArgs
 from examples.experimental.video_gen_agent.phase0.reward import request_seed
+from miles.rollout.rm_hub.video.pairwise import anchor_name
 from PIL import Image
 
 av = pytest.importorskip("av")
@@ -237,6 +238,29 @@ def test_scoring_uses_the_runs_pools_and_reward_settings_plus_the_outside_checks
 
     assert list(specs) == ["motion", "hpsv3", "vqascore", "ocr", "judge", "pickscore"]
     assert specs["judge"][1] == {"model_path": "/m/Qwen3-VL-8B-Instruct"}
+
+
+def test_scoring_the_pairwise_reward_needs_no_motion_pool_and_takes_the_anchor_dir(tmp_path, monkeypatch):
+    run = ScriptArgs(run_id="test", model_dir="/m", reward="pairwise", anchor_dir="/anchors")
+    specs = score.scorer_specs(run)
+    assert list(specs) == ["pairwise", "ocr", "judge", "pickscore"]
+    assert specs["pairwise"][1]["anchor_dir"] == "/anchors"
+    config = score.reward_config(run)
+    clip = tmp_path / "still.mp4"
+    _write_clip(clip, [100] * 4)
+    pools = {name: _Table({str(clip): value}) for name, value in (("pairwise", 0.8), ("ocr", 1.0))}
+
+    (row,) = score.score_rows([{"path": str(clip), "request": "a fox", "prompt": "a fox"}], pools, config)
+
+    assert config.video_reward_motion_pool is None
+    assert row["reward"] == pytest.approx(0.4) and row["fired"]["ocr"] and not row["fired"]["motion"]
+
+    def stop(run):
+        raise SystemExit(run.anchor_dir)
+
+    monkeypatch.setattr(score, "scorer_specs", stop)
+    with pytest.raises(SystemExit, match="^/anchors$"):
+        score.main(["--out", "/dev/null", "--reward", "pairwise", "--anchor-dir", "/anchors", "/dev/null"])
 
 
 def _rows(arm: str, values: dict[str, float]) -> list[dict]:
@@ -513,3 +537,23 @@ def test_the_win_bar_can_hold_k_to_b1_rewrite_and_compare_splits_by_category(tmp
     printed = capsys.readouterr().out
     assert "- reward beats B0-ref and B1-rewrite: pass" in printed
     assert "## numeracy" in printed and "| B1-rewrite | reward | 5 | 1.0000 | 0.0000 | 5 | 0 | 0 |" in printed
+
+
+def test_anchors_are_each_requests_one_shot_clip_placed_by_request_and_checked(tmp_path, monkeypatch, capsys):
+    heldout = _heldout(tmp_path)
+    arms.main(["anchor-prompts", str(heldout), str(heldout), "--mode", "reference", "--out", str(tmp_path / "a.jsonl")])
+    rows = [json.loads(line) for line in (tmp_path / "a.jsonl").read_text().splitlines()]
+    assert rows == [arms.one_shot_row(request, "reference") for request in REQUESTS]
+    assert rows[0] == arms.arm_prompts(["a fox"], {}, {}, mode="reference")[-1]
+    monkeypatch.setenv("AGENT_VIDEO_GEN_FAKE_DIR", str(tmp_path / "made"))
+    made = asyncio.run(arms.generate(rows[:2], FakeClipGenerator(), FakeImageGenerator())) + [rows[2] | {"path": None}]
+    (tmp_path / "made.jsonl").write_text("".join(json.dumps(row) + "\n" for row in made))
+    anchors = tmp_path / "anchors"
+
+    arms.main(["place-anchors", str(tmp_path / "made.jsonl"), "--anchor-dir", str(anchors)])
+
+    assert (anchors / anchor_name("a red car")).read_bytes() == open(made[1]["path"], "rb").read()
+    with pytest.raises(SystemExit, match="1 requests have no anchor clip .* 'a tv'"):
+        arms.main(["check-anchors", str(heldout), "--anchor-dir", str(anchors)])
+    (anchors / anchor_name("a tv")).write_bytes(b"clip")
+    arms.main(["check-anchors", str(heldout), "--anchor-dir", str(anchors)])
