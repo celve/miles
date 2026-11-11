@@ -36,8 +36,11 @@ Args:
         one asset per subject or object; 3 otherwise).
     --max-prompt-words: a longer generator prompt gets an error reply (default 0, no cap: Linyu, 2026-11-10, "more
         detailed prompt might generate better video"); 120 is the survey's cap.
-    --reward: the signal terms, ``hpsv3+vqascore`` (default), ``hpsv3+unifiedreward``, ``hpsv3`` or ``pickscore``;
-        --adherence-gate adds the judge's prompt-adherence gate, off by default.
+    --reward: the signal terms, ``hpsv3+vqascore`` (default), ``hpsv3+unifiedreward``, ``hpsv3``, ``pickscore`` or
+        ``pairwise``; --adherence-gate adds the judge's prompt-adherence gate, off by default. ``pairwise`` is the
+        Qwen3-VL judge's probability that the clip beats its request's one-shot clip (B0-ref in reference mode), shown
+        both in both orders, with the OCR gate and no motion gate (LIN-2858); its anchors must be in --anchor-dir
+        (default ``{data-dir}/video_gen_anchors_{video-mode}``) before the run, made by ``keyframe.eval.arms``.
     --requests: the training requests, ``vbench`` (default; VBench's prompts, 10% held out by hash) or
         ``t2v-compbench`` (T2V-CompBench's 1,400 compositional prompts, --compbench-heldout of them held out across its
         seven categories, LIN-2834). With ``t2v-compbench`` eval runs both held-out sets: ``compbench_heldout``, logged
@@ -159,6 +162,7 @@ _SIGNAL_RANGES = {
     "vqascore": (0.0, 1.0),
     "unifiedreward": (0.248, 3.229),
     "pickscore": (0.604, 0.910),
+    "pairwise": (0.0, 1.0),
 }
 # hpsv3+unifiedreward is the survey's pick; UnifiedReward-2.0 failed LIN-2736's overlay and mismatch pairs on its
 # own (0.62, 0.29), so the survey's fallback, VQAScore on the request, takes its place by default (LIN-2821).
@@ -167,7 +171,11 @@ _REWARDS = {
     "hpsv3+unifiedreward": ("hpsv3", "unifiedreward"),
     "hpsv3": ("hpsv3",),
     "pickscore": ("pickscore",),
+    "pairwise": ("pairwise",),
 }
+# The pairwise judge ranks a frozen clip below a moving one on all 36 static pairs without the motion gate, whose
+# all-or-nothing step carried most of phase 1's VBench reward gain (LIN-2858).
+_WITHOUT_MOTION_GATE = {"pairwise"}
 # The adherence gate's threshold, set between the scores of LIN-2736's 24 mismatch pairs' two sides (LIN-2821).
 _ADHERENCE_THRESHOLD = 0.016
 
@@ -199,6 +207,7 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     seconds: float = 2.0
     reward: str = "hpsv3+vqascore"
     adherence_gate: bool = False
+    anchor_dir: str | None = None
     eval_interval: int = 10
     heldout_percent: int = 10
     requests: str = "vbench"
@@ -225,6 +234,10 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
             assert self.reference_scale is None, "--reference-scale applies to --video-mode reference only"
         assert self.generation_timeout is None or self.generation_timeout > 0, "--generation-timeout must be positive"
         assert self.reward in _REWARDS, f"--reward is one of {sorted(_REWARDS)}"
+        if "pairwise" in _REWARDS[self.reward]:
+            self.anchor_dir = self.anchor_dir or f"{self.data_dir}/video_gen_anchors_{self.video_mode}"
+        else:
+            assert self.anchor_dir is None, "--anchor-dir applies to --reward pairwise only"
         assert self.requests in ("vbench", "t2v-compbench"), "--requests is vbench or t2v-compbench"
         if self.image_steps is None or self.image_guidance_scale is None:
             recipe = _IMAGE_RECIPES.get(self.image_model)
@@ -332,6 +345,15 @@ def prepare(args: ScriptArgs):
         U.exec_command_cpu(
             f"cd {command_utils.repo_base_dir} && python -m {AGENT}.make_compbench_requests {compbench} "
             f"{args.requests_dir} --heldout {args.compbench_heldout}"
+        )
+    if args.anchor_dir is not None:
+        # The anchors take the run's generators, which prepare does not serve, so a missing one stops the run here.
+        files = dict.fromkeys(
+            [f"{args.requests_dir}/train.jsonl", f"{args.requests_dir}/heldout.jsonl", f"{args.vbench_requests_dir}/heldout.jsonl"]
+        )
+        U.exec_command_cpu(
+            f"cd {command_utils.repo_base_dir} && python -m {AGENT}.keyframe.eval.arms check-anchors "
+            f"{' '.join(files)} --anchor-dir {args.anchor_dir}"
         )
 
 
@@ -559,6 +581,8 @@ def _reward_settings(args: ScriptArgs) -> dict:
         "video_reward_signal_pools": list(signals),
         "video_reward_signal_ranges": [value for signal in signals for value in _SIGNAL_RANGES[signal]],
     }
+    if args.reward not in _WITHOUT_MOTION_GATE:
+        settings["video_reward_motion_pool"] = "motion"
     if args.adherence_gate:
         settings |= {
             "video_reward_adherence_pool": "adherence",
@@ -573,13 +597,14 @@ def _reward_models(args: ScriptArgs) -> list[str]:
         "vqascore": [],
         "unifiedreward": [UNIFIED_REWARD],
         "pickscore": [PICKSCORE, PICKSCORE_PROCESSOR],
+        "pairwise": [],
     }
     return [repo for signal in _REWARDS[args.reward] for repo in repos[signal]]
 
 
 def _reward_pools(args: ScriptArgs) -> list[dict]:
-    """The motion judge, each signal and the optional adherence judge, colocated on consecutive rollout GPUs from the
-    planner's, then the OCR pool on the CPU."""
+    """The motion judge unless the reward drops its gate, each signal and the optional adherence judge, colocated on
+    consecutive rollout GPUs from the planner's, then the OCR pool on the CPU."""
     judge = "miles.rollout.rm_hub.video.vlm_judge.VlmJudgeScorer"
     scorers = {
         "motion": (judge, {"model_path": args.local(JUDGE), "axis_weights": {"motion": 1.0}}),
@@ -601,9 +626,14 @@ def _reward_pools(args: ScriptArgs) -> list[dict]:
             "miles.rollout.rm_hub.video.pickscore.VideoPickScoreScorer",
             {"processor_path": args.local(PICKSCORE_PROCESSOR), "model_path": args.local(PICKSCORE)},
         ),
+        "pairwise": (
+            "miles.rollout.rm_hub.video.pairwise.VideoPairwiseScorer",
+            {"model_path": args.local(JUDGE), "anchor_dir": args.anchor_dir},
+        ),
         "adherence": (judge, {"model_path": args.local(JUDGE), "axis_weights": {"prompt_adherence": 1.0}}),
     }
-    names = ["motion", *_REWARDS[args.reward], *(["adherence"] if args.adherence_gate else [])]
+    motion = [] if args.reward in _WITHOUT_MOTION_GATE else ["motion"]
+    names = [*motion, *_REWARDS[args.reward], *(["adherence"] if args.adherence_gate else [])]
     pools = [
         {
             "name": name,
