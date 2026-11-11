@@ -433,7 +433,8 @@ def test_prepare_builds_h3s_overlay_with_sglang_and_fetches_no_loras(monkeypatch
 @pytest.mark.parametrize(
     "script_args, message",
     [
-        (dict(video_mode="h3-ref", seconds=2), "H3 makes 4 to 15 second clips, not --seconds 2"),
+        (dict(video_mode="h3-ref", seconds=2), "H3 makes 4 to 15 whole-second clips, not --seconds 2"),
+        (dict(video_mode="h3-ref", seconds=4.5), "H3 makes 4 to 15 whole-second clips, not --seconds 4.5"),
         (
             dict(video_mode="h3-ref", num_gpus_per_node=4, video_gpus_per_engine=2),
             "1 video GPUs do not split into engines of 2",

@@ -259,7 +259,8 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
         if self.seconds is None:
             self.seconds = self.video.seconds
         if self.video_mode == "h3-ref":
-            assert 4 <= self.seconds <= 15, f"H3 makes 4 to 15 second clips, not --seconds {self.seconds:g}"
+            # sglang's video request takes whole seconds.
+            assert self.seconds in range(4, 16), f"H3 makes 4 to 15 whole-second clips, not --seconds {self.seconds:g}"
         if self.video_gpus_per_engine is None:
             self.video_gpus_per_engine = self.video.gpus_per_engine
         if self.video_mode == "reference":

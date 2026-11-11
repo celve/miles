@@ -123,7 +123,8 @@ async def test_a_clip_is_one_ref2va_job_with_the_assets_written_where_the_traine
     clip = await H3ClipGenerator().generate(_request())
 
     (_, body), (_, deleted, job) = seen
-    assert (body["task"], body["seed"], body["seconds"], body["output_path"]) == ("ref2va", 7, 4.0, str(tmp_path))
+    assert (body["task"], body["seed"], body["seconds"], body["output_path"]) == ("ref2va", 7, 4, str(tmp_path))
+    assert isinstance(body["seconds"], int)
     assert body["conditions"] == [
         {"type": "image", "role": "reference", "uri": "file:///assets/corgi.png"},
         {"type": "image", "role": "reference", "uri": "file:///assets/ball.png"},
@@ -194,7 +195,8 @@ async def test_a_refused_job_says_why(h3):
     "fields, message",
     [
         (dict(reference_paths=()), "needs at least one reference image"),
-        (dict(seconds=2.0), "4 to 15 second clips, not 2"),
+        (dict(seconds=2.0), "4 to 15 whole-second clips, not 2"),
+        (dict(seconds=4.5), "4 to 15 whole-second clips, not 4.5"),
     ],
 )
 async def test_a_request_h3_cannot_make_is_refused_before_any_engine_sees_it(h3, fields, message):

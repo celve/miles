@@ -30,7 +30,8 @@ STEPS_ENV = "AGENT_VIDEO_GEN_NUM_INFERENCE_STEPS"
 
 # H3's canvases (sglang's MINIMAX_H3_FINITE_ASPECT_RATIOS); a request takes the one nearest its width over height.
 ASPECT_RATIOS = ("21:9", "16:9", "4:3", "1:1", "3:4", "9:16")
-SECONDS_RANGE = (4.0, 15.0)
+# sglang's video request takes whole seconds.
+SECONDS_RANGE = (4, 15)
 # A queued clip waits for every clip ahead of it, so a slow poll costs an episode at most this much and no throughput.
 POLL_S = 2.0
 
@@ -64,8 +65,8 @@ class H3ClipGenerator:
         if not request.reference_paths:
             raise ValueError("H3's ref2va needs at least one reference image")
         low, high = SECONDS_RANGE
-        if not low <= request.seconds <= high:
-            raise ValueError(f"H3 makes {low:g} to {high:g} second clips, not {request.seconds:g}")
+        if request.seconds not in range(low, high + 1):
+            raise ValueError(f"H3 makes {low} to {high} whole-second clips, not {request.seconds:g}")
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
                 return await self._generate_on(client, await self._least_queued(client), request)
@@ -109,7 +110,7 @@ class H3ClipGenerator:
                 "aspect_ratio": aspect_ratio(request.width, request.height),
                 "duration_seconds": float(request.seconds),
             },
-            "seconds": request.seconds,
+            "seconds": int(request.seconds),
             "seed": request.seed % 2**32,
             "num_outputs_per_prompt": 1,
             # FastH3 Omni's default upscales each reference to a 2048 short edge, about 10 s of 2xB300 per reference
