@@ -86,7 +86,9 @@ class H3ClipGenerator:
         """The engine's jobs not yet completed or failed; finished jobs are deleted, so few pages are live ones."""
         count, after = 0, None
         while True:
-            response = await client.get(f"{engine}/v1/videos", params={"limit": 100} | ({"after": after} if after else {}))
+            response = await client.get(
+                f"{engine}/v1/videos", params={"limit": 100} | ({"after": after} if after else {})
+            )
             response.raise_for_status()
             page = response.json()
             count += sum(job["status"] not in ("completed", "failed") for job in page["data"])
@@ -98,7 +100,9 @@ class H3ClipGenerator:
         body = {
             "prompt": h3_prompt(request.prompt, len(request.reference_paths)),
             "task": "ref2va",
-            "conditions": [{"type": "image", "role": "reference", "uri": f"file://{path}"} for path in request.reference_paths],
+            "conditions": [
+                {"type": "image", "role": "reference", "uri": f"file://{path}"} for path in request.reference_paths
+            ],
             "target": {
                 "short_edge": min(request.width, request.height),
                 "aspect_ratio": aspect_ratio(request.width, request.height),

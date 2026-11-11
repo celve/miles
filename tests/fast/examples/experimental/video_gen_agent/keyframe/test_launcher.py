@@ -155,7 +155,10 @@ def test_reference_mode_serves_vace_through_the_diffusers_backend_from_the_built
     assert "AGENT_VIDEO_GEN_GUIDANCE_SCALE_2" not in env and env["AGENT_VIDEO_GEN_NUM_INFERENCE_STEPS"] == "4"
     assert env["AGENT_VIDEO_GEN_MAX_IMAGES"] == "4"
     assert _agent_env(ScriptArgs(run_id="test"))["AGENT_VIDEO_GEN_MAX_IMAGES"] == "3"
-    assert _agent_env(ScriptArgs(run_id="test", video_mode="reference", max_images=2))["AGENT_VIDEO_GEN_MAX_IMAGES"] == "2"
+    assert (
+        _agent_env(ScriptArgs(run_id="test", video_mode="reference", max_images=2))["AGENT_VIDEO_GEN_MAX_IMAGES"]
+        == "2"
+    )
     scaled = _agent_env(ScriptArgs(run_id="test", video_mode="reference", reference_scale=0.7))
     assert scaled["AGENT_VIDEO_GEN_REFERENCE_SCALE"] == "0.7"
 
@@ -431,7 +434,10 @@ def test_prepare_builds_h3s_overlay_with_sglang_and_fetches_no_loras(monkeypatch
     "script_args, message",
     [
         (dict(video_mode="h3-ref", seconds=2), "H3 makes 4 to 15 second clips, not --seconds 2"),
-        (dict(video_mode="h3-ref", num_gpus_per_node=4, video_gpus_per_engine=2), "1 video GPUs do not split into engines of 2"),
+        (
+            dict(video_mode="h3-ref", num_gpus_per_node=4, video_gpus_per_engine=2),
+            "1 video GPUs do not split into engines of 2",
+        ),
         (dict(video_mode="h3-ref", reference_scale=0.5), "--reference-scale applies to --video-mode reference only"),
     ],
 )

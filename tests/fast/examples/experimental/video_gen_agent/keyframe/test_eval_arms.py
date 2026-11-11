@@ -67,7 +67,10 @@ def test_the_i2v_one_shot_arm_conditions_the_video_on_an_image_of_the_raw_reques
 def test_in_reference_mode_both_image_arms_condition_the_video_on_a_reference(tmp_path, monkeypatch):
     final = {
         "a fox": {
-            "images": [{"prompt": "a fox, isolated", "path": "/img/fox.png"}, {"prompt": "snow", "path": "/img/snow.png"}]
+            "images": [
+                {"prompt": "a fox, isolated", "path": "/img/fox.png"},
+                {"prompt": "snow", "path": "/img/snow.png"},
+            ]
         }
     }
     by = {row["arm"]: row for row in arms.arm_prompts(["a fox"], {}, final, mode="reference")}
@@ -127,7 +130,9 @@ def test_generate_asks_the_env_generator_for_the_runs_clip_shape(tmp_path, monke
 
 
 def test_an_h3_runs_arms_take_its_clip_length_and_frame_rate(tmp_path, monkeypatch):
-    monkeypatch.setenv("AGENT_VIDEO_GEN_GENERATOR", "examples.experimental.video_gen_agent.generator.FakeClipGenerator")
+    monkeypatch.setenv(
+        "AGENT_VIDEO_GEN_GENERATOR", "examples.experimental.video_gen_agent.generator.FakeClipGenerator"
+    )
     monkeypatch.setenv("AGENT_VIDEO_GEN_FAKE_DIR", str(tmp_path / "clips"))
     monkeypatch.delenv("AGENT_VIDEO_GEN_IMAGE_GENERATOR", raising=False)
     prompts = tmp_path / "prompts.jsonl"

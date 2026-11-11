@@ -27,8 +27,9 @@ Args:
         directory ``prepare`` builds beside the checkpoint (``keyframe/reference_model.py``). ``h3-ref`` makes it from
         the same assets with MiniMax-H3's 8-step FastH3 Omni (ref2va), which LIN-2860 measured holding the assets
         better than VACE at about its GPU time; its clips are 4 to 15 s at 24 fps (default 4 s), with an audio track the
-        reward ignores. sglang loads it by repo id through its model overlay, so HF_HOME must be writable, and the env
-        reaches its engines through ``keyframe/h3_generator.py`` rather than the router.
+        reward ignores. sglang serves it through a model overlay that ``prepare`` builds from the H3 components it
+        fetches into the HF cache, so HF_HOME must be writable; the env reaches its engines through
+        ``keyframe/h3_generator.py`` rather than the router.
     --reference-scale: how strongly a reference-mode clip holds its images, VACE's conditioning scale (default 0.5,
         LIN-2830's pick; 1.0 copies the image as a near-still frame).
     --video-gpus-per-engine: GPUs per video engine (default 1). H3 splits an engine's GPUs by Ulysses sequence

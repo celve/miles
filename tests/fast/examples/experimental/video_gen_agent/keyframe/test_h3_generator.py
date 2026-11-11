@@ -83,7 +83,9 @@ def h3(monkeypatch, tmp_path):
         )
         for index, options in enumerate(engines):
             server = UvicornThreadServer(
-                _fake_h3_engine(f"e{index}", seen, **options), host="127.0.0.1", port=find_available_port(37100 + 50 * index)
+                _fake_h3_engine(f"e{index}", seen, **options),
+                host="127.0.0.1",
+                port=find_available_port(37100 + 50 * index),
             )
             server.start()
             servers.append(server)
@@ -102,7 +104,9 @@ def h3(monkeypatch, tmp_path):
 
 
 def _request(**fields) -> ClipRequest:
-    defaults = dict(prompt="a corgi chases a ball", negative_prompt="", seed=7, seconds=4.0, width=832, height=480, fps=24)
+    defaults = dict(
+        prompt="a corgi chases a ball", negative_prompt="", seed=7, seconds=4.0, width=832, height=480, fps=24
+    )
     return ClipRequest(**(defaults | {"reference_paths": ("/assets/corgi.png", "/assets/ball.png")} | fields))
 
 
