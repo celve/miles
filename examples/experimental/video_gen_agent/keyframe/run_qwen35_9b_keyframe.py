@@ -32,8 +32,9 @@ Args:
         ``keyframe/h3_generator.py`` rather than the router.
     --reference-scale: how strongly a reference-mode clip holds its images, VACE's conditioning scale (default 0.5,
         LIN-2830's pick; 1.0 copies the image as a near-still frame).
-    --video-gpus-per-engine: GPUs per video engine (default 1). H3 splits an engine's GPUs by Ulysses sequence
-        parallelism, which LIN-2860 measured cutting a clip's time but not its GPU-seconds.
+    --video-gpus-per-engine: GPUs per video engine (default 1; 2 in h3-ref mode, since on H200 one GPU cannot hold
+        FastH3 Omni beside the reward pool colocated there; 1 fits a B300 and serves 12% more clips per GPU). H3 splits
+        an engine's GPUs by Ulysses sequence parallelism.
     --generation-timeout: seconds after which a generation counts as an outage, which drops its group (default: the
         env's 600; in reference and h3-ref modes, long enough for the queue on an engine, which renders one clip at a
         time).
@@ -174,7 +175,8 @@ _VIDEO_RECIPES = {
         seconds_per_clip=20.0,
     ),
     # MiniMax-H3's 8-step FastH3 Omni, reference-to-video from the same assets (LIN-2860). Its clips are 4 to 15 s at
-    # 24 fps with audio. One H200 holds it (125 GB peak) and renders a 4 s clip in 14.3 s; two take 8.1 s.
+    # 24 fps with audio. Two H200s render a 4 s clip in 8.1 s at 101 GB each; one takes 14.3 s at 125 GB, which leaves
+    # no room on H200 for the reward pool colocated on the first video GPU (a B300 has it).
     "h3-ref": _VideoRecipe(
         model=H3_OMNI,
         env_mode="reference",
@@ -183,6 +185,7 @@ _VIDEO_RECIPES = {
         fps=24,
         num_inference_steps=None,
         guidance_scale=None,
+        gpus_per_engine=2,
         seconds_per_clip=30.0,
         overlay=True,
     ),

@@ -404,11 +404,11 @@ def test_h3_mode_gives_the_env_assets_and_the_h3_generator_at_its_clip_shape():
 @pytest.mark.parametrize(
     "script_args, timeout",
     [
-        # Four 1-GPU engines share a step's 128 episodes and as many eval episodes, 30 GPU-s a 4 s clip.
+        # Two 2-GPU engines share a step's 128 episodes and as many eval episodes, 30 GPU-s a 4 s clip.
         (dict(), 1920.0),
         (dict(seconds=8), 3840.0),
-        (dict(video_gpus_per_engine=2), 1920.0),
-        (dict(num_gpus_per_node=4), 7680.0),
+        (dict(video_gpus_per_engine=1), 1920.0),
+        (dict(num_gpus_per_node=4, video_gpus_per_engine=1), 7680.0),
         (dict(rollout_batch_size=2, n_samples_per_prompt=2), 600.0),
     ],
 )
@@ -436,7 +436,7 @@ def test_prepare_builds_h3s_overlay_with_sglang_and_fetches_no_loras(monkeypatch
         (dict(video_mode="h3-ref", seconds=2), "H3 makes 4 to 15 whole-second clips, not --seconds 2"),
         (dict(video_mode="h3-ref", seconds=4.5), "H3 makes 4 to 15 whole-second clips, not --seconds 4.5"),
         (
-            dict(video_mode="h3-ref", num_gpus_per_node=4, video_gpus_per_engine=2),
+            dict(video_mode="h3-ref", num_gpus_per_node=4),
             "1 video GPUs do not split into engines of 2",
         ),
         (dict(video_mode="h3-ref", reference_scale=0.5), "--reference-scale applies to --video-mode reference only"),
@@ -447,7 +447,7 @@ def test_an_h3_run_h3_cannot_serve_is_refused(script_args, message):
         ScriptArgs(run_id="test", **script_args)
 
 
-def test_h3_mode_on_four_gpus_takes_one_gpu_engines():
-    args = ScriptArgs(run_id="test", video_mode="h3-ref", num_gpus_per_node=4)
+def test_h3_mode_on_four_gpus_takes_one_gpu_engines_by_flag():
+    args = ScriptArgs(run_id="test", video_mode="h3-ref", num_gpus_per_node=4, video_gpus_per_engine=1)
 
     assert (args.train_gpus, args.policy_gpus, args.image_gpus, args.video_gpus, args.eval_gpus) == (1, 1, 1, 1, 0)
