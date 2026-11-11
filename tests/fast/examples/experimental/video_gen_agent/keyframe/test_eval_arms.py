@@ -68,7 +68,10 @@ def test_the_i2v_one_shot_arm_conditions_the_video_on_an_image_of_the_raw_reques
 def test_in_reference_mode_both_image_arms_condition_the_video_on_a_reference(tmp_path, monkeypatch):
     final = {
         "a fox": {
-            "images": [{"prompt": "a fox, isolated", "path": "/img/fox.png"}, {"prompt": "snow", "path": "/img/snow.png"}]
+            "images": [
+                {"prompt": "a fox, isolated", "path": "/img/fox.png"},
+                {"prompt": "snow", "path": "/img/snow.png"},
+            ]
         }
     }
     by = {row["arm"]: row for row in arms.arm_prompts(["a fox"], {}, final, mode="reference")}
@@ -125,6 +128,24 @@ def test_generate_asks_the_env_generator_for_the_runs_clip_shape(tmp_path, monke
     asked = json.loads(open(made["path"]).read())
     assert (asked["width"], asked["height"], asked["fps"], asked["seconds"], asked["seed"]) == (832, 480, 16, 2.0, 7)
     assert skipped["path"] is None
+
+
+def test_an_h3_runs_arms_take_its_clip_length_and_frame_rate(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "AGENT_VIDEO_GEN_GENERATOR", "examples.experimental.video_gen_agent.generator.FakeClipGenerator"
+    )
+    monkeypatch.setenv("AGENT_VIDEO_GEN_FAKE_DIR", str(tmp_path / "clips"))
+    monkeypatch.delenv("AGENT_VIDEO_GEN_IMAGE_GENERATOR", raising=False)
+    prompts = tmp_path / "prompts.jsonl"
+    row = {"arm": "K-blind", "request": "a fox", "prompt": "a fox", "seed": 7, "reference_paths": ["/img/fox.png"]}
+    prompts.write_text(json.dumps(row) + "\n")
+
+    arms.main(["generate", str(prompts), "--out", str(tmp_path / "clips.jsonl"), "--seconds", "4", "--fps", "24"])
+
+    (made,) = map(json.loads, (tmp_path / "clips.jsonl").read_text().splitlines())
+    asked = json.loads(open(made["path"]).read())
+    assert (asked["seconds"], asked["fps"], asked["width"], asked["height"]) == (4.0, 24, 832, 480)
+    assert asked["reference_paths"] == ["/img/fox.png"]
 
 
 def test_k_arms_replay_their_episodes_video_request_on_the_common_seed(tmp_path, monkeypatch):

@@ -427,6 +427,65 @@ def test_an_unknown_request_set_is_refused():
         ScriptArgs(run_id="test", requests="moviegen")
 
 
+@pytest.mark.parametrize("gpus_per_engine", [1, 2])
+def test_h3_mode_serves_fasth3_omni_on_ulysses_engines_of_the_flags_size(monkeypatch, tmp_path, gpus_per_engine):
+    config = _config(monkeypatch, tmp_path, video_mode="h3-ref", video_gpus_per_engine=gpus_per_engine)
+
+    models = {model.name: model for model in config.sglang.models}
+    video = models["video"]
+    (group,) = video.server_groups
+    assert video.model_path == f"{tmp_path}/FastVideo-FastH3-Omni-8-Step-V1" and not video.update_weights
+    assert (group.num_gpus_per_engine, group.loras) == (gpus_per_engine, ())
+    assert group.overrides.get("ulysses_degree") == (2 if gpus_per_engine == 2 else None)
+    assert config.sglang_scaling.group(model_name="video", group_index=0).num_gpus == 4
+    assert config.eval_num_gpus == 1 and config.actor_num_gpus_per_node == 1
+
+
+def test_h3_mode_gives_the_env_assets_and_the_h3_generator_at_its_clip_shape():
+    env = _agent_env(ScriptArgs(run_id="test", video_mode="h3-ref"))
+
+    assert env["AGENT_VIDEO_GEN_GENERATOR"].endswith("keyframe.h3_generator.H3ClipGenerator")
+    # The planner's side is reference mode's: assets, image_ids and its prompt.
+    assert (env["AGENT_VIDEO_GEN_VIDEO_MODE"], env["AGENT_VIDEO_GEN_MAX_IMAGES"]) == ("reference", "4")
+    assert (env["AGENT_VIDEO_GEN_SECONDS"], env["AGENT_VIDEO_GEN_FPS"]) == ("4.0", "24")
+    assert env["AGENT_VIDEO_GEN_VIDEO_MODEL"] == "FastVideo/FastVideo-FastH3-Omni-8-Step-V1"
+    for name in ("NUM_INFERENCE_STEPS", "GUIDANCE_SCALE", "GUIDANCE_SCALE_2", "REFERENCE_SCALE"):
+        assert f"AGENT_VIDEO_GEN_{name}" not in env
+    assert _agent_env(ScriptArgs(run_id="test", video_mode="h3-ref", seconds=8))["AGENT_VIDEO_GEN_SECONDS"] == "8"
+
+
+@pytest.mark.parametrize(
+    "script_args, timeout",
+    [
+        # Two 2-GPU engines share a step's 128 episodes and as many eval episodes, 30 GPU-s a 4 s clip.
+        (dict(), 1920.0),
+        (dict(seconds=8), 3840.0),
+        (dict(video_gpus_per_engine=1), 1920.0),
+        (dict(num_gpus_per_node=4, video_gpus_per_engine=1), 7680.0),
+        (dict(rollout_batch_size=2, n_samples_per_prompt=2), 600.0),
+    ],
+)
+def test_h3_mode_waits_for_each_engines_queue(monkeypatch, script_args, timeout):
+    monkeypatch.delenv("AGENT_VIDEO_GEN_TIMEOUT_S", raising=False)
+    for name, value in _agent_env(ScriptArgs(run_id="test", video_mode="h3-ref", **script_args)).items():
+        monkeypatch.setenv(name, value)
+
+    assert KeyframeEnvOptions.from_env().timeout_s == timeout
+
+
+def test_prepare_builds_h3s_overlay_with_sglang_and_fetches_no_loras(monkeypatch, tmp_path):
+    commands = _recorded(monkeypatch, tmp_path, "prepare", video_mode="h3-ref")
+
+    omni = f"{tmp_path}/models/FastVideo-FastH3-Omni-8-Step-V1"
+    assert any(f"hf download FastVideo/FastVideo-FastH3-Omni-8-Step-V1 --local-dir {omni}" in c for c in commands)
+    (overlay,) = [command for command in commands if "maybe_download_model" in command]
+    assert f'maybe_download_model("{omni}", force_diffusers_model=True)' in overlay
+    assert not any("lightx2v" in command or "ftfy" in command or "reference_model" in command for command in commands)
+
+    with pytest.raises(AssertionError, match=r"--requests is one of \['t2v-compbench', 'vbench', 'vidprom'\]"):
+        ScriptArgs(run_id="test", requests="moviegen")
+
+
 def test_vidprom_requests_are_fetched_at_pinned_revisions_and_built_beside_both_continuity_sets(monkeypatch, tmp_path):
     commands = _recorded(monkeypatch, tmp_path, "prepare", requests="vidprom", vidprom_train=50, moviegen_heldout=7)
 
@@ -495,6 +554,23 @@ def test_compbench_runs_still_eval_both_sets_every_time(monkeypatch, tmp_path):
 @pytest.mark.parametrize(
     "script_args, message",
     [
+        (dict(video_mode="h3-ref", seconds=2), "H3 makes 4 to 15 whole-second clips, not --seconds 2"),
+        (dict(video_mode="h3-ref", seconds=4.5), "H3 makes 4 to 15 whole-second clips, not --seconds 4.5"),
+        (
+            dict(video_mode="h3-ref", num_gpus_per_node=4),
+            "1 video GPUs do not split into engines of 2",
+        ),
+        (dict(video_mode="h3-ref", reference_scale=0.5), "--reference-scale applies to --video-mode reference only"),
+    ],
+)
+def test_an_h3_run_h3_cannot_serve_is_refused(script_args, message):
+    with pytest.raises(AssertionError, match=message):
+        ScriptArgs(run_id="test", **script_args)
+
+
+@pytest.mark.parametrize(
+    "script_args, message",
+    [
         (dict(requests="t2v-compbench", continuity_eval_steps="final"), "applies to --requests vidprom only"),
         (dict(requests="vidprom", continuity_eval_steps="0,last"), "is every or rollout ids and final"),
         # --eval-interval 10 over 50 rollouts evals at 0, 9, 19, 29, 39 and 49.
@@ -508,6 +584,12 @@ def test_compbench_runs_still_eval_both_sets_every_time(monkeypatch, tmp_path):
 def test_a_bad_continuity_schedule_is_refused(script_args, message):
     with pytest.raises(AssertionError, match=message):
         ScriptArgs(run_id="test", **script_args)
+
+
+def test_h3_mode_on_four_gpus_takes_one_gpu_engines_by_flag():
+    args = ScriptArgs(run_id="test", video_mode="h3-ref", num_gpus_per_node=4, video_gpus_per_engine=1)
+
+    assert (args.train_gpus, args.policy_gpus, args.image_gpus, args.video_gpus, args.eval_gpus) == (1, 1, 1, 1, 0)
 
 
 @pytest.mark.parametrize(

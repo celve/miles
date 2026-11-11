@@ -9,14 +9,14 @@ for. Its reward pools share the rollout GPUs, one pool per GPU from the planner'
 One node, not colocated (frozen generators cannot share GPUs with training): the trainer (Qwen3.5 plugin model
 under raw Megatron, vision tower frozen), the planner's engine with the motion judge's reward pool beside it, the image
 engines, the video engines, and on 8 GPUs an eval engine that scores exported snapshots off the training path; on
-4 GPUs eval runs on the planner's engine. Every engine has one GPU.
+4 GPUs eval runs on the planner's engine. Every engine has one GPU unless --video-gpus-per-engine says otherwise.
 The env is ``examples.experimental.video_gen_agent.keyframe.env`` under session server v2; each image comes back to
 the planner as an ``image_url`` part in token space.
 
 Args:
     --planner: ``qwen3.5-9b`` (default) or ``qwen3.8-27b``, the planner's checkpoint, TITO family and layouts.
     --num-gpus-per-node: picks the planner's layout of trainer, planner, image, video and eval GPUs (9B: 4 is
-        1/1/1/1/0, 8 is 1/1/2/3/1, or 1/1/1/4/1 in reference mode; 27B: 8 is 4/1/1/2/0, its trainer at TP4); --train-gpus, --policy-gpus, --image-gpus,
+        1/1/1/1/0, 8 is 1/1/2/3/1, or 1/1/1/4/1 in reference and h3-ref modes; 27B: 8 is 4/1/1/2/0, its trainer at TP4); --train-gpus, --policy-gpus, --image-gpus,
         --video-gpus, --eval-gpus override it. The trainer's GPUs are its tensor-parallel group.
     --optimizer-cpu-offload: keep Adam's state in host memory (default: the planner's recipe, on for the 27B).
     --video-mode: ``preview`` (default) makes the video from text, the chosen image's prompt plus the motion prompt,
@@ -24,23 +24,33 @@ Args:
         moving far less; ``reference`` makes it with Wan2.1-VACE-14B from the planner's asset images (one per subject
         or object, isolated on a plain background) as reference images, which LIN-2830 measured holding the image at no cost in reward, at twice T2V's GPU time.
         Each takes its own lightx2v LoRAs. Reference mode serves VACE through sglang's diffusers backend from a
-        directory ``prepare`` builds beside the checkpoint (``keyframe/reference_model.py``).
+        directory ``prepare`` builds beside the checkpoint (``keyframe/reference_model.py``). ``h3-ref`` makes it from
+        the same assets with MiniMax-H3's 8-step FastH3 Omni (ref2va), which LIN-2860 measured holding the assets
+        better than VACE at about its GPU time; its clips are 4 to 15 s at 24 fps (default 4 s), with an audio track the
+        reward ignores. sglang serves it through a model overlay that ``prepare`` builds from the H3 components it
+        fetches into the HF cache, so HF_HOME must be writable; the env reaches its engines through
+        ``keyframe/h3_generator.py`` rather than the router.
     --reference-scale: how strongly a reference-mode clip holds its images, VACE's conditioning scale (default 0.5,
         LIN-2830's pick; 1.0 copies the image as a near-still frame).
+    --video-gpus-per-engine: GPUs per video engine (default 1; 2 in h3-ref mode, since on H200 one GPU cannot hold
+        FastH3 Omni beside the reward pool colocated there; 1 fits a B300 and serves 12% more clips per GPU). H3 splits
+        an engine's GPUs by Ulysses sequence parallelism.
     --generation-timeout: seconds after which a generation counts as an outage, which drops its group (default: the
-        env's 600; in reference mode, long enough for the queue on a VACE engine, which renders one clip at a time).
+        env's 600; in reference and h3-ref modes, long enough for the queue on an engine, which renders one clip at a
+        time).
     --image-model, --image-steps, --image-guidance-scale, --video-model: the generators (default: Z-Image-Turbo at
         9 steps without CFG; Qwen/Qwen-Image-2.1-Turbo gets 8 steps at CFG 1; the video model follows --video-mode).
     --num-rollout, --rollout-batch-size, --n-samples-per-prompt: GRPO steps, requests per step, episodes per request.
-    --max-images, --max-turns, --seconds: the episode's budgets and the video's length (images: 4 in reference mode,
-        one asset per subject or object; 3 otherwise).
+    --max-images, --max-turns, --seconds: the episode's budgets and the video's length (images: 4 in reference and
+        h3-ref modes, one asset per subject or object; 3 otherwise; seconds: 2, or 4 in h3-ref mode).
     --max-prompt-words: a longer generator prompt gets an error reply (default 0, no cap: Linyu, 2026-11-10, "more
         detailed prompt might generate better video"); 120 is the survey's cap.
     --reward: the signal terms, ``hpsv3+vqascore`` (default), ``hpsv3+unifiedreward``, ``hpsv3``, ``pickscore``,
         ``pairwise`` or ``hpsv3+vqascore+motion``; --adherence-gate adds the judge's prompt-adherence gate, off by
         default. ``pairwise`` is the Qwen3-VL judge's probability that the clip beats its request's one-shot clip
         (B0-ref in reference mode), shown both in both orders, with the OCR gate and no motion gate (LIN-2858); its
-        anchors must be in --anchor-dir (default ``{data-dir}/video_gen_anchors_{video-mode}``) before the run, made
+        anchors must be in --anchor-dir (default ``{data-dir}/video_gen_anchors_{video-mode}``, plus ``_{seconds}s`` for a
+        --seconds other than the mode's default) before the run, made
         by ``keyframe.eval.anchors``. ``hpsv3+vqascore+motion`` is its fallback: the default's terms with the judge's
         motion score as a third term in place of the motion gate.
     --requests: the training requests, ``vbench`` (default; VBench's prompts, 10% held out by hash) or
@@ -61,6 +71,7 @@ Example:
     python examples/experimental/video_gen_agent/keyframe/run_qwen35_9b_keyframe.py --num-rollout 2 --rollout-batch-size 4
     python examples/experimental/video_gen_agent/keyframe/run_qwen35_9b_keyframe.py --image-model Qwen/Qwen-Image-2.1-Turbo
     python examples/experimental/video_gen_agent/keyframe/run_qwen35_9b_keyframe.py --planner qwen3.8-27b
+    python examples/experimental/video_gen_agent/keyframe/run_qwen35_9b_keyframe.py --video-mode h3-ref --requests t2v-compbench
 """
 
 import math
@@ -79,8 +90,7 @@ from miles.utils.misc import should_run_periodic_action
 LIGHTX2V = "lightx2v/Wan2.2-Distill-Loras"
 LIGHTX2V_WAN21 = "lightx2v/Wan2.1-Distill-Loras"
 FTFY = "ftfy==6.3.1"
-# Twice the GPU-seconds a served VACE-14B clip took at 832x480, 33 frames, 4 steps on H200 (LIN-2830).
-_REFERENCE_SECONDS_PER_CLIP = 20.0
+H3_OMNI = "FastVideo/FastVideo-FastH3-Omni-8-Step-V1"
 # T2V-CompBench's repository has no licence: prepare fetches its prompts at this commit and nothing redistributes them.
 COMPBENCH = "https://github.com/KaiyueSun98/T2V-CompBench.git"
 COMPBENCH_COMMIT = "dd5eff7b93af0550b9efa2bdabbb21b3b017ceda"
@@ -150,12 +160,26 @@ _IMAGE_RECIPES = {"Tongyi-MAI/Z-Image-Turbo": (9, 0.0), "Qwen/Qwen-Image-2.1-Tur
 @dataclass(frozen=True)
 class _VideoRecipe:
     model: str
-    lora_repo: str
+    lora_repo: str = ""
     # Each LoRA file in lora_repo, with the expert it merges into.
-    loras: tuple[tuple[str, str], ...]
+    loras: tuple[tuple[str, str], ...] = ()
     # Served by sglang's diffusers backend from a directory reference_model.py builds, which fuses the LoRAs at load
     # and runs its scheduler at this flow shift; None serves the checkpoint natively and merges them by set_lora.
     reference_flow_shift: float | None = None
+    # The env's mode, which sets the planner's tools and prompt; None is the launcher's --video-mode.
+    env_mode: str | None = None
+    generator: str = "multiturn.generator.RouterClipGenerator"
+    seconds: float = 2.0
+    fps: int = 16
+    num_inference_steps: int | None = 4
+    guidance_scale: float | None = 1.0
+    gpus_per_engine: int = 1
+    # Twice a clip's measured GPU-seconds, to bound the wait behind a full queue on engines that render one clip at a
+    # time; None keeps the env's 600 s timeout.
+    seconds_per_clip: float | None = None
+    # sglang serves it through a model overlay, which links components of another checkpoint from the HF cache into
+    # a directory it builds; prepare builds it, so no engine downloads under its startup timeout.
+    overlay: bool = False
 
 
 _VIDEO_RECIPES = {
@@ -181,6 +205,23 @@ _VIDEO_RECIPES = {
         lora_repo=LIGHTX2V_WAN21,
         loras=(("wan2.1_t2v_14b_lora_rank64_lightx2v_4step.safetensors", "transformer"),),
         reference_flow_shift=5.0,
+        # 9.7 GPU-seconds a clip at 832x480, 33 frames, 4 steps on H200 (LIN-2830).
+        seconds_per_clip=20.0,
+    ),
+    # MiniMax-H3's 8-step FastH3 Omni, reference-to-video from the same assets (LIN-2860). Its clips are 4 to 15 s at
+    # 24 fps with audio. Two H200s render a 4 s clip in 8.1 s at 101 GB each; one takes 14.3 s at 125 GB, which leaves
+    # no room on H200 for the reward pool colocated on the first video GPU (a B300 has it).
+    "h3-ref": _VideoRecipe(
+        model=H3_OMNI,
+        env_mode="reference",
+        generator="keyframe.h3_generator.H3ClipGenerator",
+        seconds=4.0,
+        fps=24,
+        num_inference_steps=None,
+        guidance_scale=None,
+        gpus_per_engine=2,
+        seconds_per_clip=30.0,
+        overlay=True,
     ),
 }
 
@@ -228,6 +269,7 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     image_steps: int | None = None
     image_guidance_scale: float | None = None
     video_model: str | None = None
+    video_gpus_per_engine: int | None = None
     reference_scale: float | None = None
     generation_timeout: float | None = None
     num_rollout: int = 200
@@ -236,7 +278,7 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     max_images: int | None = None
     max_turns: int = 6
     max_prompt_words: int = 0
-    seconds: float = 2.0
+    seconds: float | None = None
     reward: str = "hpsv3+vqascore"
     adherence_gate: bool = False
     anchor_dir: str | None = None
@@ -262,7 +304,14 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
         assert self.video_mode in _VIDEO_RECIPES, f"--video-mode is one of {sorted(_VIDEO_RECIPES)}"
         if self.max_images is None:
             # Reference mode makes one asset per subject or object, and T2V-CompBench requests name up to four (LIN-2830).
-            self.max_images = 4 if self.video_mode == "reference" else 3
+            self.max_images = 4 if self.env_mode == "reference" else 3
+        if self.seconds is None:
+            self.seconds = self.video.seconds
+        if self.video_mode == "h3-ref":
+            # sglang's video request takes whole seconds.
+            assert self.seconds in range(4, 16), f"H3 makes 4 to 15 whole-second clips, not --seconds {self.seconds:g}"
+        if self.video_gpus_per_engine is None:
+            self.video_gpus_per_engine = self.video.gpus_per_engine
         if self.video_mode == "reference":
             self.reference_scale = 0.5 if self.reference_scale is None else self.reference_scale
             assert self.reference_scale > 0, f"--reference-scale must be positive, got {self.reference_scale}"
@@ -271,7 +320,9 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
         assert self.generation_timeout is None or self.generation_timeout > 0, "--generation-timeout must be positive"
         assert self.reward in _REWARDS, f"--reward is one of {sorted(_REWARDS)}"
         if "pairwise" in _REWARDS[self.reward]:
-            self.anchor_dir = self.anchor_dir or f"{self.data_dir}/video_gen_anchors_{self.video_mode}"
+            # Anchors are clips of the run's length, so a length other than the mode's own names its own directory.
+            length = "" if self.seconds == self.video.seconds else f"_{self.seconds:g}s"
+            self.anchor_dir = self.anchor_dir or f"{self.data_dir}/video_gen_anchors_{self.video_mode}{length}"
         else:
             assert self.anchor_dir is None, "--anchor-dir applies to --reward pairwise only"
         assert self.requests in _REQUEST_DIRS, f"--requests is one of {sorted(_REQUEST_DIRS)}"
@@ -307,7 +358,7 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
             self.image_guidance_scale = recipe[1] if self.image_guidance_scale is None else self.image_guidance_scale
         split = (self.train_gpus, self.policy_gpus, self.image_gpus, self.video_gpus, self.eval_gpus)
         if None in split:
-            layouts = self.recipe.layouts | (self.recipe.reference_layouts if self.video_mode == "reference" else {})
+            layouts = self.recipe.layouts | (self.recipe.reference_layouts if self.env_mode == "reference" else {})
             layout = layouts.get(self.num_gpus_per_node)
             assert (
                 layout is not None
@@ -319,6 +370,9 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
         assert (
             sum(split) == self.num_gpus_per_node
         ), f"the GPU split adds up to {sum(split)}, not {self.num_gpus_per_node}"
+        assert (
+            self.video_gpus % self.video_gpus_per_engine == 0
+        ), f"{self.video_gpus} video GPUs do not split into engines of {self.video_gpus_per_engine}"
 
     @property
     def recipe(self) -> _PlannerRecipe:
@@ -328,6 +382,10 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     def video(self) -> _VideoRecipe:
         recipe = _VIDEO_RECIPES[self.video_mode]
         return replace(recipe, model=self.video_model) if self.video_model else recipe
+
+    @property
+    def env_mode(self) -> str:
+        return self.video.env_mode or self.video_mode
 
     @property
     def video_path(self) -> str:
@@ -370,17 +428,24 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
 def prepare(args: ScriptArgs):
     U = args.create_backend()
     U.exec_command_cpu(f"mkdir -p {args.model_dir} {args.data_dir}")
-    for repo in (args.recipe.repo, JUDGE, args.image_model, args.video.model, *_reward_models(args)):
+    video = args.video
+    for repo in (args.recipe.repo, JUDGE, args.image_model, video.model, *_reward_models(args)):
         U.exec_command_cpu(f"hf download {repo} --local-dir {args.local(repo)}")
+    if video.overlay:
+        # sglang's own resolution, which matches the checkpoint's directory by name and needs a writable HF_HOME.
+        U.exec_command_cpu(
+            "python -c 'from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import maybe_download_model; "
+            f'maybe_download_model("{args.video_path}", force_diffusers_model=True)\''
+        )
     U.exec_command_cpu(OCR_DEPS_INSTALL)
     # Fetch PaddleOCR's models once; the OCR pool's workers would each download them and race on a cold cache.
     U.exec_command_cpu(
         f"PYTHONPATH={command_utils.repo_base_dir} python -c "
         "'from miles.diffusion.rollout.ocr import OcrScorer; OcrScorer()'"
     )
-    video = args.video
-    lora_files = " ".join(name for name, _ in video.loras)
-    U.exec_command_cpu(f"hf download {video.lora_repo} {lora_files} --local-dir {args.local(video.lora_repo)}")
+    if video.loras:
+        lora_files = " ".join(name for name, _ in video.loras)
+        U.exec_command_cpu(f"hf download {video.lora_repo} {lora_files} --local-dir {args.local(video.lora_repo)}")
     if video.reference_flow_shift is not None:
         # diffusers' WanVACEPipeline cleans every prompt with ftfy, which the Miles image does not ship.
         U.exec_command_cpu(f"python -c 'import ftfy' 2>/dev/null || pip install {FTFY}")
@@ -457,9 +522,10 @@ def execute(args: ScriptArgs):
 
 
 def _generation_timeout(args: ScriptArgs) -> float | None:
-    """The flag, or in reference mode a bound on the wait behind a full queue: VACE renders one clip at a time, so a
-    step's episodes plus an eval's, spread over the video engines, at twice LIN-2830's 9.7 s a clip."""
-    if args.generation_timeout is not None or args.video_mode != "reference":
+    """The flag, or for a video model that renders one clip at a time a bound on the wait behind a full queue: a step's
+    episodes plus an eval's, spread evenly over the video engines, at the recipe's seconds a clip."""
+    per_clip = args.video.seconds_per_clip
+    if args.generation_timeout is not None or per_clip is None:
         return args.generation_timeout
     episodes = args.rollout_batch_size * args.n_samples_per_prompt
     if args.requests != "vbench":
@@ -470,13 +536,15 @@ def _generation_timeout(args: ScriptArgs) -> float | None:
             episodes += args.vidprom_heldout + args.moviegen_heldout
     else:
         episodes *= 2
-    queued = math.ceil(episodes / args.video_gpus)
-    return max(600.0, queued * _REFERENCE_SECONDS_PER_CLIP)
+    queued = math.ceil(episodes / (args.video_gpus // args.video_gpus_per_engine))
+    # Clip time grows with length: H3 took 1.6x as long at 8 s as at 4 s (LIN-2860), so scaling linearly is safe.
+    return max(600.0, queued * per_clip / args.video_gpus_per_engine * args.seconds / args.video.seconds)
 
 
 def _agent_env(args: ScriptArgs) -> dict[str, str]:
+    video = args.video
     env = {
-        "AGENT_VIDEO_GEN_GENERATOR": f"{AGENT}.multiturn.generator.RouterClipGenerator",
+        "AGENT_VIDEO_GEN_GENERATOR": f"{AGENT}.{video.generator}",
         "AGENT_VIDEO_GEN_IMAGE_GENERATOR": f"{AGENT}.keyframe.generator.RouterImageGenerator",
         "AGENT_VIDEO_GEN_CLIP_DIR": f"{args.run_dir}/clips",
         "AGENT_VIDEO_GEN_IMAGE_DIR": f"{args.run_dir}/images",
@@ -487,19 +555,21 @@ def _agent_env(args: ScriptArgs) -> dict[str, str]:
         "AGENT_VIDEO_GEN_SECONDS": str(args.seconds),
         "AGENT_VIDEO_GEN_WIDTH": "832",
         "AGENT_VIDEO_GEN_HEIGHT": "480",
-        "AGENT_VIDEO_GEN_FPS": "16",
-        "AGENT_VIDEO_GEN_VIDEO_MODE": args.video_mode,
+        "AGENT_VIDEO_GEN_FPS": str(video.fps),
+        "AGENT_VIDEO_GEN_VIDEO_MODE": args.env_mode,
         "AGENT_VIDEO_GEN_IMAGE_MODEL": args.image_model,
-        "AGENT_VIDEO_GEN_VIDEO_MODEL": args.video.model,
+        "AGENT_VIDEO_GEN_VIDEO_MODEL": video.model,
         "AGENT_VIDEO_GEN_IMAGE_NUM_INFERENCE_STEPS": str(args.image_steps),
         "AGENT_VIDEO_GEN_IMAGE_GUIDANCE_SCALE": str(args.image_guidance_scale),
-        # lightx2v's 4-step distill runs without CFG, on both of an A14B's experts.
-        "AGENT_VIDEO_GEN_NUM_INFERENCE_STEPS": "4",
-        "AGENT_VIDEO_GEN_GUIDANCE_SCALE": "1.0",
     }
+    # lightx2v's 4-step distill runs without CFG, on both of an A14B's experts; FastH3 Omni takes only its own 8 steps.
+    if video.num_inference_steps is not None:
+        env["AGENT_VIDEO_GEN_NUM_INFERENCE_STEPS"] = str(video.num_inference_steps)
+    if video.guidance_scale is not None:
+        env["AGENT_VIDEO_GEN_GUIDANCE_SCALE"] = str(video.guidance_scale)
     if args.video_mode == "reference":
         env["AGENT_VIDEO_GEN_REFERENCE_SCALE"] = str(args.reference_scale)
-    else:
+    elif args.env_mode != "reference":
         env["AGENT_VIDEO_GEN_GUIDANCE_SCALE_2"] = "1.0"
     if (timeout := _generation_timeout(args)) is not None:
         env["AGENT_VIDEO_GEN_TIMEOUT_S"] = str(timeout)
@@ -639,11 +709,11 @@ def _train_args(args: ScriptArgs) -> str:
 
 
 def _sglang_config(args: ScriptArgs) -> dict:
-    def frozen(name: str, model_path: str, num_gpus: int, **group) -> dict:
+    def frozen(name: str, model_path: str, num_gpus: int, num_gpus_per_engine: int = 1, **group) -> dict:
         diffusion = {
             "worker_type": "regular",
             "num_gpus": num_gpus,
-            "num_gpus_per_engine": 1,
+            "num_gpus_per_engine": num_gpus_per_engine,
             "engine_kind": "diffusion",
         }
         return {
@@ -656,12 +726,17 @@ def _sglang_config(args: ScriptArgs) -> dict:
     if args.video.reference_flow_shift is not None:
         # The served directory's pipeline fuses its LoRAs at load, which the diffusers backend needs: it has no set_lora.
         video = {"overrides": {"backend": "diffusers"}}
-    else:
+    elif args.video.loras:
         video = {"loras": [{"path": path, "target": target} for path, target in args.video_lora_paths()]}
+    else:
+        video = {}
+    if args.video_gpus_per_engine > 1:
+        # H3's recipes split an engine's GPUs by Ulysses sequence parallelism alone.
+        video["overrides"] = video.get("overrides", {}) | {"ulysses_degree": args.video_gpus_per_engine}
     models = [
         {"name": "policy", "server_groups": [{"worker_type": "regular", "num_gpus": args.policy_gpus}]},
         frozen("image", args.local(args.image_model), args.image_gpus),
-        frozen("video", args.video_path, args.video_gpus, **video),
+        frozen("video", args.video_path, args.video_gpus, args.video_gpus_per_engine, **video),
     ]
     if args.eval_gpus:
         models.append({"name": "eval", "server_groups": [{"worker_type": "regular", "num_gpus": args.eval_gpus}]})
