@@ -126,6 +126,22 @@ def test_generate_asks_the_env_generator_for_the_runs_clip_shape(tmp_path, monke
     assert skipped["path"] is None
 
 
+def test_an_h3_runs_arms_take_its_clip_length_and_frame_rate(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_VIDEO_GEN_GENERATOR", "examples.experimental.video_gen_agent.generator.FakeClipGenerator")
+    monkeypatch.setenv("AGENT_VIDEO_GEN_FAKE_DIR", str(tmp_path / "clips"))
+    monkeypatch.delenv("AGENT_VIDEO_GEN_IMAGE_GENERATOR", raising=False)
+    prompts = tmp_path / "prompts.jsonl"
+    row = {"arm": "K-blind", "request": "a fox", "prompt": "a fox", "seed": 7, "reference_paths": ["/img/fox.png"]}
+    prompts.write_text(json.dumps(row) + "\n")
+
+    arms.main(["generate", str(prompts), "--out", str(tmp_path / "clips.jsonl"), "--seconds", "4", "--fps", "24"])
+
+    (made,) = map(json.loads, (tmp_path / "clips.jsonl").read_text().splitlines())
+    asked = json.loads(open(made["path"]).read())
+    assert (asked["seconds"], asked["fps"], asked["width"], asked["height"]) == (4.0, 24, 832, 480)
+    assert asked["reference_paths"] == ["/img/fox.png"]
+
+
 def test_k_arms_replay_their_episodes_video_request_on_the_common_seed(tmp_path, monkeypatch):
     dump = _dump(
         tmp_path,
