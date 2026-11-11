@@ -320,6 +320,21 @@ def test_prepare_stops_on_missing_anchors_for_every_request_the_pairwise_reward_
     assert not any("check-anchors" in command for command in _recorded(monkeypatch, tmp_path, "prepare"))
 
 
+def test_vidprom_anchors_are_checked_for_every_eval_set(monkeypatch, tmp_path):
+    commands = _recorded(
+        monkeypatch, tmp_path, "prepare", video_mode="reference", requests="vidprom", reward="pairwise"
+    )
+
+    (check,) = [command for command in commands if "arms check-anchors" in command]
+    data, vidprom = tmp_path / "data", tmp_path / "data/video_gen_requests_vidprom"
+    assert check.endswith(
+        f"{vidprom}/train.jsonl {vidprom}/heldout.jsonl {data}/video_gen_requests/heldout.jsonl "
+        f"{data}/video_gen_requests_t2v_compbench/heldout.jsonl {vidprom}/moviegen_heldout.jsonl "
+        f"--anchor-dir {data}/video_gen_anchors_reference"
+    )
+    assert commands.index(check) > max(i for i, command in enumerate(commands) if "make_vidprom_requests" in command)
+
+
 def test_prepare_downloads_and_converts_the_27b_planner(monkeypatch, tmp_path):
     commands = _recorded(monkeypatch, tmp_path, "prepare", planner="qwen3.8-27b")
 
@@ -408,8 +423,8 @@ def test_the_reference_timeout_counts_both_held_out_sets(monkeypatch, script_arg
 
 
 def test_an_unknown_request_set_is_refused():
-    with pytest.raises(AssertionError, match="--requests is vbench or t2v-compbench"):
-        ScriptArgs(run_id="test", requests="vidprom")
+    with pytest.raises(AssertionError, match=r"--requests is one of \['t2v-compbench', 'vbench', 'vidprom'\]"):
+        ScriptArgs(run_id="test", requests="moviegen")
 
 
 @pytest.mark.parametrize("gpus_per_engine", [1, 2])
@@ -467,6 +482,74 @@ def test_prepare_builds_h3s_overlay_with_sglang_and_fetches_no_loras(monkeypatch
     assert f'maybe_download_model("{omni}", force_diffusers_model=True)' in overlay
     assert not any("lightx2v" in command or "ftfy" in command or "reference_model" in command for command in commands)
 
+    with pytest.raises(AssertionError, match=r"--requests is one of \['t2v-compbench', 'vbench', 'vidprom'\]"):
+        ScriptArgs(run_id="test", requests="moviegen")
+
+
+def test_vidprom_requests_are_fetched_at_pinned_revisions_and_built_beside_both_continuity_sets(monkeypatch, tmp_path):
+    commands = _recorded(monkeypatch, tmp_path, "prepare", requests="vidprom", vidprom_train=50, moviegen_heldout=7)
+
+    data = tmp_path / "data"
+    assert (
+        f"hf download {launcher.VIDPROM} {launcher.VIDPROM_FILE} --repo-type dataset "
+        f"--revision {launcher.VIDPROM_REVISION} --local-dir {data}/VidProM" in commands
+    )
+    assert any(
+        f"git -C {data}/MovieGenBench checkout -q {launcher.MOVIEGEN_COMMIT} -- {launcher.MOVIEGEN_FILE}" in c
+        for c in commands
+    )
+    (spacy,) = [c for c in commands if launcher.SPACY in c]
+    assert spacy.startswith("python -c 'import en_core_web_md, nltk' 2>/dev/null || pip install spacy==3.8.7 ")
+    assert spacy.endswith("/en_core_web_md-3.8.0/en_core_web_md-3.8.0-py3-none-any.whl nltk==3.9.1")
+    wordnet = f"[ -d {data}/nltk_data/corpora/wordnet ] || python -m nltk.downloader -d {data}/nltk_data wordnet"
+    assert wordnet in commands
+    (build,) = [c for c in commands if "make_vidprom_requests" in c]
+    assert f"NLTK_DATA={data}/nltk_data python -m" in build
+    assert build.endswith(
+        f"make_vidprom_requests {data}/VidProM/VidProM_semantic_unique.csv "
+        f"{data}/MovieGenBench/benchmark/MovieGenVideoBenchWithTag.csv {data}/video_gen_requests_vidprom "
+        "--train 50 --heldout 200 --moviegen 7"
+    )
+    (compbench,) = [c for c in commands if "make_compbench_requests" in c]
+    assert f"{data}/T2V-CompBench {data}/video_gen_requests_t2v_compbench --heldout 200" in compbench
+    assert any(f"all_dimension.txt {data}/video_gen_requests " in c for c in commands)
+    compbench_only = _recorded(monkeypatch, tmp_path / "cb", "prepare", requests="t2v-compbench")
+    assert not any("make_vidprom_requests" in c or launcher.SPACY in c for c in compbench_only)
+
+
+def test_vidprom_trains_on_its_requests_and_evals_continuity_sets_at_the_first_and_last_rollout(monkeypatch, tmp_path):
+    config = _config(monkeypatch, tmp_path, requests="vidprom", data_dir="/d", num_rollout=50)
+
+    assert config.prompt_data == "/d/video_gen_requests_vidprom/train.jsonl"
+    assert [(d.name, d.path, d.rollout_ids) for d in config.eval_datasets] == [
+        ("heldout", "/d/video_gen_requests/heldout.jsonl", [0, 49]),
+        ("compbench_heldout", "/d/video_gen_requests_t2v_compbench/heldout.jsonl", [0, 49]),
+        ("vidprom_heldout", "/d/video_gen_requests_vidprom/heldout.jsonl", None),
+        ("moviegen_heldout", "/d/video_gen_requests_vidprom/moviegen_heldout.jsonl", None),
+    ]
+
+
+@pytest.mark.parametrize(
+    "steps, rollout_ids", [("every", None), ("0,9,final", [0, 9, 49]), ("final", [49]), ("29,final,19", [19, 29, 49])]
+)
+def test_the_continuity_schedule_is_a_flag(monkeypatch, tmp_path, steps, rollout_ids):
+    config = _config(monkeypatch, tmp_path, requests="vidprom", num_rollout=50, continuity_eval_steps=steps)
+
+    assert {d.name: d.rollout_ids for d in config.eval_datasets if d.name in ("heldout", "compbench_heldout")} == {
+        "heldout": rollout_ids,
+        "compbench_heldout": rollout_ids,
+    }
+
+
+def test_an_eval_only_run_evals_continuity_at_its_one_eval():
+    assert ScriptArgs(run_id="test", requests="vidprom", num_rollout=0).continuity_rollout_ids == [0]
+
+
+def test_compbench_runs_still_eval_both_sets_every_time(monkeypatch, tmp_path):
+    config = _config(monkeypatch, tmp_path, requests="t2v-compbench")
+
+    assert [d.rollout_ids for d in config.eval_datasets] == [None, None]
+
 
 @pytest.mark.parametrize(
     "script_args, message",
@@ -485,7 +568,42 @@ def test_an_h3_run_h3_cannot_serve_is_refused(script_args, message):
         ScriptArgs(run_id="test", **script_args)
 
 
+@pytest.mark.parametrize(
+    "script_args, message",
+    [
+        (dict(requests="t2v-compbench", continuity_eval_steps="final"), "applies to --requests vidprom only"),
+        (dict(requests="vidprom", continuity_eval_steps="0,last"), "is every or rollout ids and final"),
+        # --eval-interval 10 over 50 rollouts evals at 0, 9, 19, 29, 39 and 49.
+        (dict(requests="vidprom", num_rollout=50, continuity_eval_steps="0,10,final"), r"rollouts \[10\] at which"),
+        (dict(requests="vidprom", num_rollout=50, continuity_eval_steps="5,20,final"), r"rollouts \[5, 20\] at which"),
+        # 59 is on the cadence but past the last rollout, 49.
+        (dict(requests="vidprom", num_rollout=50, continuity_eval_steps="0,59,final"), r"rollouts \[59\] at which"),
+        (dict(requests="vidprom", num_rollout=0, continuity_eval_steps="0,9"), r"rollouts \[9\] at which"),
+    ],
+)
+def test_a_bad_continuity_schedule_is_refused(script_args, message):
+    with pytest.raises(AssertionError, match=message):
+        ScriptArgs(run_id="test", **script_args)
+
+
 def test_h3_mode_on_four_gpus_takes_one_gpu_engines_by_flag():
     args = ScriptArgs(run_id="test", video_mode="h3-ref", num_gpus_per_node=4, video_gpus_per_engine=1)
 
     assert (args.train_gpus, args.policy_gpus, args.image_gpus, args.video_gpus, args.eval_gpus) == (1, 1, 1, 1, 0)
+
+
+@pytest.mark.parametrize(
+    "script_args, timeout",
+    [
+        # 128 step episodes plus 200 + 95 + 200 + 100 held-out ones on four VACE engines: 181 clips at 20 s.
+        (dict(num_gpus_per_node=8), 3620.0),
+        (dict(num_gpus_per_node=8, vidprom_heldout=0, moviegen_heldout=0), 2120.0),
+    ],
+)
+def test_the_reference_timeout_counts_the_vidprom_and_moviegen_held_out_sets(monkeypatch, script_args, timeout):
+    monkeypatch.delenv("AGENT_VIDEO_GEN_TIMEOUT_S", raising=False)
+    env = _agent_env(ScriptArgs(run_id="test", video_mode="reference", requests="vidprom", **script_args))
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+
+    assert KeyframeEnvOptions.from_env().timeout_s == timeout

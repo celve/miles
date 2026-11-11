@@ -122,8 +122,14 @@ class EvalDatasetConfig:
 
     metadata_overrides: dict[str, Any] = field(default_factory=dict)
 
+    # Evaluate this dataset only at these rollout ids; None evaluates it at every eval.
+    rollout_ids: list[int] | None = None
+
     def __post_init__(self) -> None:
         self.metadata_overrides = _ensure_metadata_overrides(self.metadata_overrides)
+
+    def is_due(self, rollout_id: int) -> bool:
+        return self.rollout_ids is None or rollout_id in self.rollout_ids
 
     @property
     def cache_key(self) -> tuple[Any, ...]:

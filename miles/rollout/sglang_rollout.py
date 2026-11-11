@@ -615,7 +615,7 @@ async def eval_rollout(args: Namespace, rollout_id: int) -> tuple[dict[str, dict
     assert not args.group_rm, "Group RM is not supported for eval rollout"
 
     coros = []
-    for dataset_cfg in args.eval_datasets or []:
+    for dataset_cfg in (cfg for cfg in args.eval_datasets or [] if cfg.is_due(rollout_id)):
         coros.append(eval_rollout_single_dataset(args, rollout_id, dataset_cfg))
     results_list = await asyncio.gather(*coros)
     results = {}
