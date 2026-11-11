@@ -19,7 +19,8 @@ Miles' own ``rollout/episode_raw_reward``.
 keeps one row per episode in each eval dataset before Miles' own eval metrics run, so ``eval/<dataset>`` is the
 mean episode reward: a K that folds more would otherwise weigh its episodes by their branch count. Per-sample eval
 statistics then describe each episode's first branch. A dataset whose requests carry ``metadata["category"]`` (such as
-``make_compbench_requests.py``'s) is also logged per category, as ``eval/<dataset>/<category>``.
+``make_compbench_requests.py``'s) is also logged per category, as ``eval/<dataset>/<category>``, and one whose requests
+carry ``metadata["splits"]`` (``make_vidprom_requests.py``'s) per value of each split, as ``eval/<dataset>/<split>=<value>``.
 """
 
 import numpy as np
@@ -45,6 +46,9 @@ def log_eval_episodes(rollout_id, args, data, extra_metrics) -> bool:
             categories = [sample.metadata.get("category") for sample in data[name]["samples"]]
             for category in sorted({c for c in categories if c is not None}):
                 data[f"{name}/{category}"] = _keep_eval_rows(data[name], keep=[c == category for c in categories])
+            splits = [sample.metadata.get("splits") or {} for sample in data[name]["samples"]]
+            for key, value in sorted({item for split in splits for item in split.items()}):
+                data[f"{name}/{key}={value}"] = _keep_eval_rows(data[name], keep=[s.get(key) == value for s in splits])
     return False
 
 

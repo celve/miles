@@ -155,7 +155,10 @@ def test_reference_mode_serves_vace_through_the_diffusers_backend_from_the_built
     assert "AGENT_VIDEO_GEN_GUIDANCE_SCALE_2" not in env and env["AGENT_VIDEO_GEN_NUM_INFERENCE_STEPS"] == "4"
     assert env["AGENT_VIDEO_GEN_MAX_IMAGES"] == "4"
     assert _agent_env(ScriptArgs(run_id="test"))["AGENT_VIDEO_GEN_MAX_IMAGES"] == "3"
-    assert _agent_env(ScriptArgs(run_id="test", video_mode="reference", max_images=2))["AGENT_VIDEO_GEN_MAX_IMAGES"] == "2"
+    assert (
+        _agent_env(ScriptArgs(run_id="test", video_mode="reference", max_images=2))["AGENT_VIDEO_GEN_MAX_IMAGES"]
+        == "2"
+    )
     scaled = _agent_env(ScriptArgs(run_id="test", video_mode="reference", reference_scale=0.7))
     assert scaled["AGENT_VIDEO_GEN_REFERENCE_SCALE"] == "0.7"
 
@@ -367,5 +370,62 @@ def test_the_reference_timeout_counts_both_held_out_sets(monkeypatch, script_arg
 
 
 def test_an_unknown_request_set_is_refused():
-    with pytest.raises(AssertionError, match="--requests is vbench or t2v-compbench"):
-        ScriptArgs(run_id="test", requests="vidprom")
+    with pytest.raises(AssertionError, match=r"--requests is one of \['t2v-compbench', 'vbench', 'vidprom'\]"):
+        ScriptArgs(run_id="test", requests="moviegen")
+
+
+def test_vidprom_requests_are_fetched_at_pinned_revisions_and_built_beside_both_continuity_sets(monkeypatch, tmp_path):
+    commands = _recorded(monkeypatch, tmp_path, "prepare", requests="vidprom", vidprom_train=50, moviegen_heldout=7)
+
+    data = tmp_path / "data"
+    assert (
+        f"hf download {launcher.VIDPROM} {launcher.VIDPROM_FILE} --repo-type dataset "
+        f"--revision {launcher.VIDPROM_REVISION} --local-dir {data}/VidProM" in commands
+    )
+    assert any(
+        f"git -C {data}/MovieGenBench checkout -q {launcher.MOVIEGEN_COMMIT} -- {launcher.MOVIEGEN_FILE}" in c
+        for c in commands
+    )
+    (spacy,) = [c for c in commands if launcher.SPACY in c]
+    assert spacy.startswith("python -c 'import en_core_web_md' 2>/dev/null || pip install spacy==3.8.7 ")
+    assert spacy.endswith("/en_core_web_md-3.8.0/en_core_web_md-3.8.0-py3-none-any.whl")
+    (build,) = [c for c in commands if "make_vidprom_requests" in c]
+    assert build.endswith(
+        f"make_vidprom_requests {data}/VidProM/VidProM_semantic_unique.csv "
+        f"{data}/MovieGenBench/benchmark/MovieGenVideoBenchWithTag.csv {data}/video_gen_requests_vidprom "
+        "--train 50 --heldout 200 --moviegen 7"
+    )
+    (compbench,) = [c for c in commands if "make_compbench_requests" in c]
+    assert f"{data}/T2V-CompBench {data}/video_gen_requests_t2v_compbench --heldout 200" in compbench
+    assert any(f"all_dimension.txt {data}/video_gen_requests " in c for c in commands)
+    compbench_only = _recorded(monkeypatch, tmp_path / "cb", "prepare", requests="t2v-compbench")
+    assert not any("make_vidprom_requests" in c or launcher.SPACY in c for c in compbench_only)
+
+
+def test_vidprom_trains_on_its_requests_and_evals_all_four_held_out_sets(monkeypatch, tmp_path):
+    config = _config(monkeypatch, tmp_path, requests="vidprom", data_dir="/d")
+
+    assert config.prompt_data == "/d/video_gen_requests_vidprom/train.jsonl"
+    assert [(d.name, d.path) for d in config.eval_datasets] == [
+        ("heldout", "/d/video_gen_requests/heldout.jsonl"),
+        ("compbench_heldout", "/d/video_gen_requests_t2v_compbench/heldout.jsonl"),
+        ("vidprom_heldout", "/d/video_gen_requests_vidprom/heldout.jsonl"),
+        ("moviegen_heldout", "/d/video_gen_requests_vidprom/moviegen_heldout.jsonl"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "script_args, timeout",
+    [
+        # 128 step episodes plus 200 + 95 + 200 + 100 held-out ones on four VACE engines: 181 clips at 20 s.
+        (dict(num_gpus_per_node=8), 3620.0),
+        (dict(num_gpus_per_node=8, vidprom_heldout=0, moviegen_heldout=0), 2120.0),
+    ],
+)
+def test_the_reference_timeout_counts_the_vidprom_and_moviegen_held_out_sets(monkeypatch, script_args, timeout):
+    monkeypatch.delenv("AGENT_VIDEO_GEN_TIMEOUT_S", raising=False)
+    env = _agent_env(ScriptArgs(run_id="test", video_mode="reference", requests="vidprom", **script_args))
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+
+    assert KeyframeEnvOptions.from_env().timeout_s == timeout
