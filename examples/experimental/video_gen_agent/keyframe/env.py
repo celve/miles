@@ -30,6 +30,9 @@ Run-wide options come from ``AGENT_VIDEO_GEN_*`` env vars, which worker and sand
   AGENT_VIDEO_GEN_TIMEOUT_S        a generation slower than this is an outage (default 600)
   AGENT_VIDEO_GEN_VIDEO_MODE       ``preview``, ``i2v`` or ``reference`` (default preview)
   AGENT_VIDEO_GEN_IMAGE_MODEL / _VIDEO_MODEL  the generators' names, recorded on each episode (default: unrecorded)
+  AGENT_VIDEO_GEN_VIDEO_SEED       ``planner`` (default) or ``request``: the video's seed is the request's
+                                   (``phase0.reward.request_seed``) whatever the planner asks, the seed of the one-shot
+                                   anchor clip the pairwise reward judges it against
 """
 
 import asyncio
@@ -53,11 +56,14 @@ from examples.experimental.video_gen_agent.generator import (
     ImageGenerator,
     ImageRequest,
 )
+from examples.experimental.video_gen_agent.phase0.reward import request_seed
+
 from miles.rollout.agentic.agent_function import InfraAbort
 from miles.utils.function_registry import load_function
 
 _IMAGES_LIMIT = 4
 _VIDEO_MODES = ("preview", "i2v", "reference")
+_VIDEO_SEEDS = ("planner", "request")
 _VIDEO_ID = "video_1"
 
 _SHARED_PARAMETERS = {
@@ -160,6 +166,7 @@ class KeyframeEnvOptions:
     video_mode: str = "preview"
     image_model: str = ""
     video_model: str = ""
+    video_seed: str = "planner"
 
     def __post_init__(self) -> None:
         for name in ("generator", "image_generator", "submitted_dir"):
@@ -176,6 +183,8 @@ class KeyframeEnvOptions:
             raise ValueError(f"{_ENV_PREFIX}MAX_IMAGES is at most {_IMAGES_LIMIT}, got {self.max_images}")
         if self.video_mode not in _VIDEO_MODES:
             raise ValueError(f"{_ENV_PREFIX}VIDEO_MODE is one of {', '.join(_VIDEO_MODES)}, got {self.video_mode!r}")
+        if self.video_seed not in _VIDEO_SEEDS:
+            raise ValueError(f"{_ENV_PREFIX}VIDEO_SEED is one of {', '.join(_VIDEO_SEEDS)}, got {self.video_seed!r}")
 
     @classmethod
     def from_env(cls) -> "KeyframeEnvOptions":
@@ -194,6 +203,7 @@ class _GeneratedImage:
 @dataclass
 class _Episode:
     options: KeyframeEnvOptions
+    request: str
     image_generator: ImageGenerator
     video_generator: ClipGenerator
     images: dict[str, _GeneratedImage] = field(default_factory=dict)
@@ -216,6 +226,7 @@ async def run_agent(base_url: str, prompt: list[dict], request_kwargs: dict, met
         options = KeyframeEnvOptions.from_env()
         episode = _Episode(
             options=options,
+            request=_user_request(prompt),
             image_generator=load_function(options.image_generator)(),
             video_generator=load_function(options.generator)(),
         )
@@ -365,6 +376,9 @@ async def _generate_video(episode: _Episode, arguments: dict) -> str:
     )
     if error:
         return f"Error: {error}. {episode.budget()}"
+    if options.video_seed == "request":
+        # The request's seed overrides the planner's, so the clip and its anchor differ only in what was asked.
+        prompted["seed"] = request_seed(episode.request)
     request = ClipRequest(
         **prompted,
         seconds=options.seconds,

@@ -85,6 +85,7 @@ def test_each_layout_parses_with_two_frozen_generators_on_gpus_of_their_own(
         ("pickscore", False, ["pickscore"], {"motion", "pickscore", "ocr"}),
         ("hpsv3", True, ["hpsv3"], {"motion", "hpsv3", "adherence", "ocr"}),
         ("hpsv3+unifiedreward", False, ["hpsv3", "unifiedreward"], {"motion", "hpsv3", "unifiedreward", "ocr"}),
+        ("hpsv3+vqascore+motion", False, ["hpsv3", "vqascore", "motion"], {"motion", "hpsv3", "vqascore", "ocr"}),
     ],
 )
 def test_the_reward_is_a_flag(monkeypatch, tmp_path, reward, adherence_gate, signals, pools):
@@ -92,10 +93,31 @@ def test_the_reward_is_a_flag(monkeypatch, tmp_path, reward, adherence_gate, sig
 
     hook = config.custom_rm_path.config
     assert hook.video_reward_signal_pools == signals and {pool.name for pool in config.reward_pools} == pools
+    # Motion is a term in place of the gate in the fallback, and the gate everywhere else.
+    assert hook.video_reward_motion_pool == (None if "motion" in signals else "motion")
+    assert len(hook.video_reward_signal_ranges) == 2 * len(signals)
     if adherence_gate:
         assert hook.video_reward_adherence_pool == "adherence" and hook.video_reward_adherence_threshold > 0
         adherence = next(pool for pool in config.reward_pools if pool.name == "adherence")
         assert adherence.scorer_kwargs["axis_weights"] == {"prompt_adherence": 1.0}
+
+
+def test_the_pairwise_reward_judges_against_the_anchors_with_the_ocr_gate_alone(monkeypatch, tmp_path):
+    config = _config(monkeypatch, tmp_path, num_gpus_per_node=8, video_mode="reference", reward="pairwise")
+
+    hook = config.custom_rm_path.config
+    assert hook.video_reward_signal_pools == ["pairwise"] and hook.video_reward_signal_ranges == [0.0, 1.0]
+    assert hook.video_reward_motion_pool is None and hook.video_reward_ocr_pool == "ocr"
+    pools = {pool.name: pool for pool in config.reward_pools}
+    assert set(pools) == {"pairwise", "ocr"} and config.reward_scaling.pools["pairwise"].gpu_offset == 0
+    assert pools["pairwise"].scorer_path == "miles.rollout.rm_hub.video.pairwise.VideoPairwiseScorer"
+    assert pools["pairwise"].scorer_kwargs == {
+        "model_path": f"{tmp_path}/Qwen3-VL-8B-Instruct",
+        "anchor_dir": "/root/datasets/video_gen_anchors_reference",
+    }
+    pairwise = ScriptArgs(run_id="test", video_mode="reference", reward="pairwise")
+    assert _agent_env(pairwise)["AGENT_VIDEO_GEN_VIDEO_SEED"] == "request"
+    assert "AGENT_VIDEO_GEN_VIDEO_SEED" not in _agent_env(ScriptArgs(run_id="test", video_mode="reference"))
 
 
 def test_the_27b_planner_trains_at_tp4_with_its_own_template_and_eval_on_the_planner_engine(monkeypatch, tmp_path):
@@ -280,6 +302,21 @@ def test_prepare_downloads_the_defaults_models_and_only_the_modes_lightx2v_loras
     assert any("make_requests" in command for command in commands)
 
 
+def test_prepare_stops_on_missing_anchors_for_every_request_the_pairwise_reward_judges(monkeypatch, tmp_path):
+    commands = _recorded(
+        monkeypatch, tmp_path, "prepare", video_mode="reference", requests="t2v-compbench", reward="pairwise"
+    )
+
+    (check,) = [command for command in commands if "arms check-anchors" in command]
+    data = tmp_path / "data"
+    assert check.endswith(
+        f"{data}/video_gen_requests_t2v_compbench/train.jsonl {data}/video_gen_requests_t2v_compbench/heldout.jsonl "
+        f"{data}/video_gen_requests/heldout.jsonl --anchor-dir {data}/video_gen_anchors_reference"
+    )
+    assert commands.index(check) > max(i for i, command in enumerate(commands) if "make_compbench_requests" in command)
+    assert not any("check-anchors" in command for command in _recorded(monkeypatch, tmp_path, "prepare"))
+
+
 def test_prepare_downloads_and_converts_the_27b_planner(monkeypatch, tmp_path):
     commands = _recorded(monkeypatch, tmp_path, "prepare", planner="qwen3.8-27b")
 
@@ -310,6 +347,7 @@ def test_execute_submits_the_run_with_the_keyframe_env(monkeypatch, tmp_path):
         (dict(generation_timeout=0), "--generation-timeout must be positive"),
         (dict(image_model="org/Image"), "has no recipe"),
         (dict(reward="judge"), "--reward is one of"),
+        (dict(anchor_dir="/anchors"), "--anchor-dir applies to --reward pairwise only"),
     ],
 )
 def test_a_bad_layout_or_mode_is_refused(script_args, message):

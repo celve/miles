@@ -7,7 +7,9 @@ from pathlib import Path
 import examples.experimental.video_gen_agent.keyframe.env as env
 import pytest
 from examples.experimental.video_gen_agent.keyframe import reference_model
+from examples.experimental.video_gen_agent.phase0.reward import request_seed
 from tests.fast.examples.experimental.video_gen_agent.keyframe.test_env import (  # noqa: F401
+    REQUEST,
     _call,
     _clip_request,
     _run,
@@ -166,3 +168,26 @@ def test_the_served_directory_links_the_checkpoint_and_names_the_reference_pipel
 def test_a_lora_names_the_expert_it_merges_into():
     with pytest.raises(SystemExit):
         reference_model.main(["--src", "s", "--dst", "d", "--flow-shift", "5", "--lora", "/l/a.safetensors"])
+
+
+@pytest.mark.parametrize("video_seed, expected", [("request", request_seed(REQUEST)), (None, 7)])
+async def test_the_pairwise_rewards_videos_take_the_requests_seed_over_the_planners(reference, video_seed, expected):
+    if video_seed:
+        reference.setenv("AGENT_VIDEO_GEN_VIDEO_SEED", video_seed)
+    _script(
+        reference,
+        [_call("generate_image", {"prompt": "a fox, isolated on a plain white background", "seed": 3})],
+        [_call("generate_video", {"image_ids": ["image_1"], "prompt": "a fox runs", "seed": 7})],
+        tools=env.REFERENCE_TOOLS,
+    )
+
+    record = (await _run())["video_gen"]
+
+    assert _clip_request(record["video"]["path"])["seed"] == expected == record["video"]["seed"]
+    assert record["images"][0]["seed"] == 3
+
+
+def test_an_unknown_video_seed_policy_is_refused(reference):
+    reference.setenv("AGENT_VIDEO_GEN_VIDEO_SEED", "random")
+    with pytest.raises(ValueError, match="VIDEO_SEED is one of planner, request"):
+        env.KeyframeEnvOptions.from_env()

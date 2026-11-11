@@ -5,7 +5,8 @@ Each signal term is a reward pool's score of the submitted clip against the requ
 request, PickScore, ...), mapped to [0, 1] by a fixed affine map fit on the calibration clips. Gates act on every
 term before anything else sees it:
 
-  motion     every term 0 when the motion judge pool's score is below ``--video-reward-motion-threshold``
+  motion     every term 0 when the motion judge pool's score is below ``--video-reward-motion-threshold``; off unless
+             ``--video-reward-motion-pool`` names a pool
   ocr        every term times ``--video-reward-ocr-factor`` when the OCR pool counts text the request does not ask for
   adherence  off by default; every term 0 when the adherence judge pool's score is below its threshold
 
@@ -46,7 +47,9 @@ class GatedVideoRewardConfig(BaseConfig):
             help="Per signal pool, the scores that map to 0 and 1, fit on the calibration clips; outside is clipped.",
         ),
     ]
-    video_reward_motion_pool: A[str, Arg(help="A judge pool weighting only the motion axis.")] = "motion"
+    video_reward_motion_pool: A[
+        str | None, Arg(help="A judge pool weighting only the motion axis; unset leaves the gate off.")
+    ] = None
     video_reward_motion_threshold: A[float, Arg(help="A motion score below this zeroes every term.")] = 0.4
     video_reward_ocr_pool: A[str, Arg(help="A pool counting text in the clip that the request does not ask for.")] = (
         "ocr"
@@ -101,7 +104,9 @@ def _pool_names(args) -> dict[str, str]:
         low < high for low, high in zip(ranges[::2], ranges[1::2], strict=True)
     ), f"a signal range is empty: {ranges}"
     names = {f"signal:{pool}": pool for pool in pools}
-    names |= {"motion": args.video_reward_motion_pool, "ocr": args.video_reward_ocr_pool}
+    names["ocr"] = args.video_reward_ocr_pool
+    if args.video_reward_motion_pool is not None:
+        names["motion"] = args.video_reward_motion_pool
     if args.video_reward_adherence_pool is not None:
         names["adherence"] = args.video_reward_adherence_pool
     return names
@@ -128,7 +133,7 @@ def clip_record(args, scores: dict[str, float | None]) -> dict:
     if any(score is None for score in scores.values()):
         return record | {"reward": None}
     fired = {
-        "motion": scores["motion"] < args.video_reward_motion_threshold,
+        "motion": "motion" in scores and scores["motion"] < args.video_reward_motion_threshold,
         "ocr": scores["ocr"] > 0,
         "adherence": "adherence" in scores and scores["adherence"] < args.video_reward_adherence_threshold,
     }
