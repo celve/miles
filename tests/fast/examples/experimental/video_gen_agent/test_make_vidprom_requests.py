@@ -188,7 +188,9 @@ def test_the_build_filters_dedups_and_splits_real_requests(spacy_model, tmp_path
     subprocess.run([*args[:-5], str(again), "--train", "40", "--heldout", "10", "--moviegen", "6"], check=True)
     assert (again / "heldout.jsonl").read_text() == (out / "heldout.jsonl").read_text()
     reseeded = tmp_path / "reseeded"
-    subprocess.run([*args[:-5], str(reseeded), "--train", "40", "--heldout", "10", "--seed", "1"], check=True)
+    subprocess.run(
+        [*args[:-5], str(reseeded), "--train", "40", "--heldout", "10", "--moviegen", "6", "--seed", "1"], check=True
+    )
     assert (reseeded / "heldout.jsonl").read_text() != (out / "heldout.jsonl").read_text()
 
 
