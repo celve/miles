@@ -49,7 +49,8 @@ Args:
         ``pairwise`` or ``hpsv3+vqascore+motion``; --adherence-gate adds the judge's prompt-adherence gate, off by
         default. ``pairwise`` is the Qwen3-VL judge's probability that the clip beats its request's one-shot clip
         (B0-ref in reference mode), shown both in both orders, with the OCR gate and no motion gate (LIN-2858); its
-        anchors must be in --anchor-dir (default ``{data-dir}/video_gen_anchors_{video-mode}``) before the run, made
+        anchors must be in --anchor-dir (default ``{data-dir}/video_gen_anchors_{video-mode}``, plus ``_{seconds}s`` for a
+        --seconds other than the mode's default) before the run, made
         by ``keyframe.eval.anchors``. ``hpsv3+vqascore+motion`` is its fallback: the default's terms with the judge's
         motion score as a third term in place of the motion gate.
     --requests: the training requests, ``vbench`` (default; VBench's prompts, 10% held out by hash) or
@@ -287,7 +288,9 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
         assert self.generation_timeout is None or self.generation_timeout > 0, "--generation-timeout must be positive"
         assert self.reward in _REWARDS, f"--reward is one of {sorted(_REWARDS)}"
         if "pairwise" in _REWARDS[self.reward]:
-            self.anchor_dir = self.anchor_dir or f"{self.data_dir}/video_gen_anchors_{self.video_mode}"
+            # Anchors are clips of the run's length, so a length other than the mode's own names its own directory.
+            length = "" if self.seconds == self.video.seconds else f"_{self.seconds:g}s"
+            self.anchor_dir = self.anchor_dir or f"{self.data_dir}/video_gen_anchors_{self.video_mode}{length}"
         else:
             assert self.anchor_dir is None, "--anchor-dir applies to --reward pairwise only"
         assert self.requests in ("vbench", "t2v-compbench"), "--requests is vbench or t2v-compbench"

@@ -124,3 +124,16 @@ def test_h3_anchors_need_whole_engines_and_have_a_measured_rate(tmp_path, reques
     with pytest.raises(AssertionError, match="do not split into engines of 2"):
         _args(tmp_path, video_mode="h3-ref", gpus="0,1")
     assert "about 0.0 GPU-h" in anchors.plan(_args(tmp_path, video_mode="h3-ref", gpus="0,1,2"))[1]
+
+
+@pytest.mark.parametrize(
+    "overrides, directory",
+    [
+        (dict(), "video_gen_anchors_reference"),
+        (dict(seconds=3), "video_gen_anchors_reference_3s"),
+        (dict(video_mode="h3-ref"), "video_gen_anchors_h3-ref"),
+        (dict(video_mode="h3-ref", seconds=8), "video_gen_anchors_h3-ref_8s"),
+    ],
+)
+def test_anchors_of_another_length_go_to_their_own_directory(tmp_path, overrides, directory):
+    assert _args(tmp_path, **overrides).anchor_dir == f"{tmp_path}/{directory}"
