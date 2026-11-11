@@ -405,16 +405,46 @@ def test_vidprom_requests_are_fetched_at_pinned_revisions_and_built_beside_both_
     assert not any("make_vidprom_requests" in c or launcher.SPACY in c for c in compbench_only)
 
 
-def test_vidprom_trains_on_its_requests_and_evals_all_four_held_out_sets(monkeypatch, tmp_path):
-    config = _config(monkeypatch, tmp_path, requests="vidprom", data_dir="/d")
+def test_vidprom_trains_on_its_requests_and_evals_continuity_sets_at_the_first_and_last_rollout(monkeypatch, tmp_path):
+    config = _config(monkeypatch, tmp_path, requests="vidprom", data_dir="/d", num_rollout=50)
 
     assert config.prompt_data == "/d/video_gen_requests_vidprom/train.jsonl"
-    assert [(d.name, d.path) for d in config.eval_datasets] == [
-        ("heldout", "/d/video_gen_requests/heldout.jsonl"),
-        ("compbench_heldout", "/d/video_gen_requests_t2v_compbench/heldout.jsonl"),
-        ("vidprom_heldout", "/d/video_gen_requests_vidprom/heldout.jsonl"),
-        ("moviegen_heldout", "/d/video_gen_requests_vidprom/moviegen_heldout.jsonl"),
+    assert [(d.name, d.path, d.rollout_ids) for d in config.eval_datasets] == [
+        ("heldout", "/d/video_gen_requests/heldout.jsonl", [0, 49]),
+        ("compbench_heldout", "/d/video_gen_requests_t2v_compbench/heldout.jsonl", [0, 49]),
+        ("vidprom_heldout", "/d/video_gen_requests_vidprom/heldout.jsonl", None),
+        ("moviegen_heldout", "/d/video_gen_requests_vidprom/moviegen_heldout.jsonl", None),
     ]
+
+
+@pytest.mark.parametrize(
+    "steps, rollout_ids", [("every", None), ("0,10,final", [0, 10, 49]), ("final", [49]), ("20,final,5", [5, 20, 49])]
+)
+def test_the_continuity_schedule_is_a_flag(monkeypatch, tmp_path, steps, rollout_ids):
+    config = _config(monkeypatch, tmp_path, requests="vidprom", num_rollout=50, continuity_eval_steps=steps)
+
+    assert {d.name: d.rollout_ids for d in config.eval_datasets if d.name in ("heldout", "compbench_heldout")} == {
+        "heldout": rollout_ids,
+        "compbench_heldout": rollout_ids,
+    }
+
+
+def test_compbench_runs_still_eval_both_sets_every_time(monkeypatch, tmp_path):
+    config = _config(monkeypatch, tmp_path, requests="t2v-compbench")
+
+    assert [d.rollout_ids for d in config.eval_datasets] == [None, None]
+
+
+@pytest.mark.parametrize(
+    "script_args, message",
+    [
+        (dict(requests="t2v-compbench", continuity_eval_steps="final"), "applies to --requests vidprom only"),
+        (dict(requests="vidprom", continuity_eval_steps="0,last"), "is every or rollout ids and final"),
+    ],
+)
+def test_a_bad_continuity_schedule_is_refused(script_args, message):
+    with pytest.raises(AssertionError, match=message):
+        ScriptArgs(run_id="test", **script_args)
 
 
 @pytest.mark.parametrize(

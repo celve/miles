@@ -36,7 +36,7 @@ async def run_eval_datasets(
 
     record_dir = eval_point_dir(args.eval_record_dir, rollout_id) if args.eval_record_dir is not None else None
     coros = []
-    for dataset_cfg in args.eval_datasets:
+    for dataset_cfg in (cfg for cfg in args.eval_datasets if cfg.is_due(rollout_id)):
         coros.append(
             eval_rollout_single_dataset(
                 state,

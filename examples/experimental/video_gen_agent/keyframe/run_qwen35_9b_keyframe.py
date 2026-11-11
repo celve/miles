@@ -45,7 +45,8 @@ Args:
         ``vidprom`` (LIN-2859: --vidprom-train real user requests from VidProM rich enough for a 4-15 s clip,
         tagged with subjects, setting and a suggested length by ``make_vidprom_requests.py``). With ``vidprom`` eval runs
         --vidprom-heldout more of them as ``vidprom_heldout``, --moviegen-heldout MovieGenBench prompts as
-        ``moviegen_heldout``, each also logged per split, and CompBench's and VBench's held-out sets for continuity.
+        ``moviegen_heldout``, each also logged per split, and CompBench's and VBench's held-out sets for continuity
+        at the rollouts --continuity-eval-steps names (default ``0,final``; ``every`` runs them at every eval).
         VidProM and MovieGenBench are CC-BY-NC-4.0: prepare fetches them at pinned revisions and nothing copies them.
     --model-dir, --data-dir: where models and the requests live; checkpoints, images and clips go under --output-dir.
 
@@ -231,6 +232,7 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     vidprom_train: int = 2000
     vidprom_heldout: int = 200
     moviegen_heldout: int = 100
+    continuity_eval_steps: str | None = None
     feature_cache: bool = True
     model_dir: str = "/root/models"
     data_dir: str = "/root/datasets"
@@ -254,6 +256,14 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
         assert self.generation_timeout is None or self.generation_timeout > 0, "--generation-timeout must be positive"
         assert self.reward in _REWARDS, f"--reward is one of {sorted(_REWARDS)}"
         assert self.requests in _REQUEST_DIRS, f"--requests is one of {sorted(_REQUEST_DIRS)}"
+        if self.requests == "vidprom":
+            self.continuity_eval_steps = self.continuity_eval_steps or "0,final"
+            steps = self.continuity_eval_steps.split(",")
+            assert self.continuity_eval_steps == "every" or all(
+                step == "final" or step.isdigit() for step in steps
+            ), f"--continuity-eval-steps is every or rollout ids and final, got {self.continuity_eval_steps}"
+        else:
+            assert self.continuity_eval_steps is None, "--continuity-eval-steps applies to --requests vidprom only"
         if self.image_steps is None or self.image_guidance_scale is None:
             recipe = _IMAGE_RECIPES.get(self.image_model)
             assert (
@@ -306,6 +316,14 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     @property
     def compbench_requests_dir(self) -> str:
         return f"{self.data_dir}/{_REQUEST_DIRS['t2v-compbench']}"
+
+    @property
+    def continuity_rollout_ids(self) -> list[int] | None:
+        """The rollouts at which a vidprom run evals CompBench's and VBench's held-out sets; None is every eval."""
+        if self.continuity_eval_steps in (None, "every"):
+            return None
+        final = max(self.num_rollout - 1, 0)
+        return sorted({final if step == "final" else int(step) for step in self.continuity_eval_steps.split(",")})
 
     @property
     def run_dir(self) -> str:
@@ -399,7 +417,8 @@ def _generation_timeout(args: ScriptArgs) -> float | None:
         return args.generation_timeout
     episodes = args.rollout_batch_size * args.n_samples_per_prompt
     if args.requests != "vbench":
-        # Eval runs every held-out set, one episode a request; VBench's hash split holds about its share out.
+        # The largest eval runs every held-out set, one episode a request: with --requests vidprom that is the step-0
+        # one, which an eval engine runs beside step 0. VBench's hash split holds about its share out.
         episodes += args.compbench_heldout + math.ceil(_VBENCH_REQUESTS * args.heldout_percent / 100)
         if args.requests == "vidprom":
             episodes += args.vidprom_heldout + args.moviegen_heldout
@@ -669,12 +688,13 @@ def _reward_pools(args: ScriptArgs) -> list[dict]:
 
 
 def _eval_config(args: ScriptArgs) -> dict:
+    continuity = {} if args.continuity_rollout_ids is None else {"rollout_ids": args.continuity_rollout_ids}
     return {
         "eval": {
             "defaults": {"n_samples_per_eval_prompt": 1, "top_k": 1, "max_response_len": 2048},
-            "datasets": [{"name": "heldout", "path": f"{args.vbench_requests_dir}/heldout.jsonl"}]
+            "datasets": [{"name": "heldout", "path": f"{args.vbench_requests_dir}/heldout.jsonl"} | continuity]
             + (
-                [{"name": "compbench_heldout", "path": f"{args.compbench_requests_dir}/heldout.jsonl"}]
+                [{"name": "compbench_heldout", "path": f"{args.compbench_requests_dir}/heldout.jsonl"} | continuity]
                 if args.requests != "vbench"
                 else []
             )
