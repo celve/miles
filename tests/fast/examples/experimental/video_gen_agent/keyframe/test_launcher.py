@@ -387,9 +387,12 @@ def test_vidprom_requests_are_fetched_at_pinned_revisions_and_built_beside_both_
         for c in commands
     )
     (spacy,) = [c for c in commands if launcher.SPACY in c]
-    assert spacy.startswith("python -c 'import en_core_web_md' 2>/dev/null || pip install spacy==3.8.7 ")
-    assert spacy.endswith("/en_core_web_md-3.8.0/en_core_web_md-3.8.0-py3-none-any.whl")
+    assert spacy.startswith("python -c 'import en_core_web_md, nltk' 2>/dev/null || pip install spacy==3.8.7 ")
+    assert spacy.endswith("/en_core_web_md-3.8.0/en_core_web_md-3.8.0-py3-none-any.whl nltk==3.9.1")
+    wordnet = f"[ -d {data}/nltk_data/corpora/wordnet ] || python -m nltk.downloader -d {data}/nltk_data wordnet"
+    assert wordnet in commands
     (build,) = [c for c in commands if "make_vidprom_requests" in c]
+    assert f"NLTK_DATA={data}/nltk_data python -m" in build
     assert build.endswith(
         f"make_vidprom_requests {data}/VidProM/VidProM_semantic_unique.csv "
         f"{data}/MovieGenBench/benchmark/MovieGenVideoBenchWithTag.csv {data}/video_gen_requests_vidprom "

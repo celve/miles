@@ -109,11 +109,14 @@ def test_splits_bucket_length_subjects_and_setting():
 
 @pytest.fixture
 def spacy_model():
+    """The tagger and WordNet that ``prepare`` installs, which the fast-test image lacks."""
     spacy = pytest.importorskip("spacy")
+    wordnet = pytest.importorskip("nltk.corpus").wordnet
     try:
+        wordnet.ensure_loaded()
         return spacy.load("en_core_web_md")
-    except OSError:
-        pytest.skip("en_core_web_md is not installed")
+    except (OSError, LookupError):
+        pytest.skip("en_core_web_md or WordNet is not installed")
 
 
 def test_tags_name_the_subjects_setting_actions_and_a_length(spacy_model):

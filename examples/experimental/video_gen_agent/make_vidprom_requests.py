@@ -18,18 +18,22 @@ only, and never copied into this repository. A VidProM request is kept when it i
 
 Requests are taken in the order of a hash of ``--seed`` and VidProM's uuid: the first ``--heldout`` are held out, the
 next ``--train`` train. MovieGenBench's prompts pass the same filters but for the template rule, the Detoxify scores it
-lacks and a floor of 20 words, and ``--moviegen`` of them form a second held-out set. Rows are ``make_requests.py``'s, plus metadata:
+lacks and a floor of 20 words, and ``--moviegen`` of them form a second held-out set, with their concept as ``category``
+and their ``motion_level``. Rows are ``make_requests.py``'s, plus metadata:
 
   {"messages": [{"role": "user", "content": <request>}],
    "metadata": {"source": "vidprom" | "moviegenbench", "id": <uuid> | "moviegen/<line>", "subjects": [...],
-                "setting": <phrase> | null, "actions": [...], "seconds": 4-15, "category": <MovieGenBench concept>,
-                "splits": {"seconds": "4-7s" | "8-11s" | "12-15s", "subjects": "1" | "2" | "3+", "setting": "yes" | "no"}}}
+                "setting": <phrase> | null, "actions": [...], "seconds": 4-15,
+                "splits": {"seconds": "4-7s" | "8-11s" | "12-15s", "subjects": "1" | "2" | "3+",
+                           "setting": "yes" | "no"}}}
 
-``seconds`` suggests a clip length from the request's actions, sequence words and length; it, ``subjects`` and
-``setting`` are spaCy's reading, and ``splits`` buckets them for ``episode_metrics.log_eval_episodes``.
+Tagging needs spaCy's ``en_core_web_md`` and NLTK's WordNet (under ``NLTK_DATA``), which the keyframe launcher's
+``prepare`` installs. ``seconds`` suggests a clip length from the request's actions, sequence words and length;
+``subjects``, ``setting`` and ``seconds`` are a heuristic reading, and ``splits`` buckets them for
+``episode_metrics.log_eval_episodes``.
 
-  python examples/experimental/video_gen_agent/make_vidprom_requests.py /root/datasets/VidProM/VidProM_semantic_unique.csv \\
-      /root/datasets/MovieGenBench/benchmark/MovieGenVideoBenchWithTag.csv /root/datasets/video_gen_requests_vidprom
+  python examples/experimental/video_gen_agent/make_vidprom_requests.py \\
+      /root/datasets/VidProM/VidProM_semantic_unique.csv /root/datasets/MovieGenBench/benchmark/MovieGenVideoBenchWithTag.csv /root/datasets/video_gen_requests_vidprom
 """
 
 import argparse
@@ -150,7 +154,8 @@ def template_keys(text: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
 
 
 def persons(doc) -> list[tuple[str, ...]]:
-    """The person names the tagger found, lower-cased, and each capitalized proper noun WordNet knows as a particular person (Columbus)."""
+    """The person names the tagger found, lower-cased, and each capitalized proper noun WordNet knows as a particular
+    person (Columbus)."""
     names = [tuple(words(ent.text)) for ent in doc.ents if ent.label_ == "PERSON"]
     return names + [(t.lower_,) for t in doc if t.pos_ == "PROPN" and t.is_title and _is_person_name(t.lower_)]
 

@@ -42,8 +42,8 @@ Args:
         ``t2v-compbench`` (T2V-CompBench's 1,400 compositional prompts, --compbench-heldout of them held out across its
         seven categories, LIN-2834). With ``t2v-compbench`` eval runs both held-out sets: ``compbench_heldout``, logged
         per category too, and VBench's as ``heldout``, so ``eval/heldout`` stays comparable with VBench runs; or
-        ``vidprom`` (LIN-2859: --vidprom-train real user requests from VidProM rich enough for a 4-15 s clip, tagged with
-        subjects, setting and a suggested length by ``make_vidprom_requests.py``). With ``vidprom`` eval runs
+        ``vidprom`` (LIN-2859: --vidprom-train real user requests from VidProM rich enough for a 4-15 s clip,
+        tagged with subjects, setting and a suggested length by ``make_vidprom_requests.py``). With ``vidprom`` eval runs
         --vidprom-heldout more of them as ``vidprom_heldout``, --moviegen-heldout MovieGenBench prompts as
         ``moviegen_heldout``, each also logged per split, and CompBench's and VBench's held-out sets for continuity.
         VidProM and MovieGenBench are CC-BY-NC-4.0: prepare fetches them at pinned revisions and nothing copies them.
@@ -88,6 +88,7 @@ SPACY_MODEL = (
     "https://github.com/explosion/spacy-models/releases/download/"
     f"{SPACY_MODEL_NAME}-3.8.0/{SPACY_MODEL_NAME}-3.8.0-py3-none-any.whl"
 )
+NLTK = "nltk==3.9.1"
 # Lines in VBench's prompts/all_dimension.txt, which bound its held-out share in the reference-mode timeout.
 _VBENCH_REQUESTS = 946
 # Where each --requests value's train.jsonl and held-out sets live under --data-dir.
@@ -362,7 +363,11 @@ def prepare(args: ScriptArgs):
         )
     if args.requests == "vidprom":
         moviegen = f"{args.data_dir}/MovieGenBench"
-        U.exec_command_cpu(f"python -c 'import {SPACY_MODEL_NAME}' 2>/dev/null || pip install {SPACY} {SPACY_MODEL}")
+        nltk_data = f"{args.data_dir}/nltk_data"
+        U.exec_command_cpu(
+            f"python -c 'import {SPACY_MODEL_NAME}, nltk' 2>/dev/null || pip install {SPACY} {SPACY_MODEL} {NLTK}"
+        )
+        U.exec_command_cpu(f"[ -d {nltk_data}/corpora/wordnet ] || python -m nltk.downloader -d {nltk_data} wordnet")
         U.exec_command_cpu(
             f"hf download {VIDPROM} {VIDPROM_FILE} --repo-type dataset --revision {VIDPROM_REVISION} "
             f"--local-dir {args.data_dir}/VidProM"
@@ -370,7 +375,7 @@ def prepare(args: ScriptArgs):
         U.exec_command_cpu(f"[ -d {moviegen} ] || git clone -q --filter=blob:none --no-checkout {MOVIEGEN} {moviegen}")
         U.exec_command_cpu(f"git -C {moviegen} checkout -q {MOVIEGEN_COMMIT} -- {MOVIEGEN_FILE}")
         U.exec_command_cpu(
-            f"cd {command_utils.repo_base_dir} && python -m {AGENT}.make_vidprom_requests "
+            f"cd {command_utils.repo_base_dir} && NLTK_DATA={nltk_data} python -m {AGENT}.make_vidprom_requests "
             f"{args.data_dir}/VidProM/{VIDPROM_FILE} {moviegen}/{MOVIEGEN_FILE} {args.requests_dir} "
             f"--train {args.vidprom_train} --heldout {args.vidprom_heldout} --moviegen {args.moviegen_heldout}"
         )
