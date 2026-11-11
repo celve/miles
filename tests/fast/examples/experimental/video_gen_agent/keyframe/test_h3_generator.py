@@ -18,13 +18,20 @@ from miles.utils.test_utils.uvicorn_thread_server import UvicornThreadServer
 _ids = itertools.count()
 
 
-def _fake_h3_engine(name: str, seen: list, *, delay: float = 0.0, fail: bool = False) -> FastAPI:
+def _fake_h3_engine(name: str, seen: list, *, delay: float = 0.0, fail: bool = False, refuse: str = "") -> FastAPI:
     """sglang's async video API as H3 runs it: a job per POST, finished after ``delay``, written under output_path."""
     app = FastAPI()
     jobs: dict[str, dict] = {}
 
     @app.post("/v1/videos")
     async def create(body: dict):
+        if refuse:
+            raise HTTPException(400, refuse)
+        # H3's own refusals (sglang f8d0201), of fields the planner controls.
+        if body.get("negative_prompt"):
+            raise HTTPException(400, "negative_prompt is not supported: MiniMax H3 serves only the CFG-distilled ...")
+        if body.get("seed", 0) < 0:
+            raise HTTPException(400, f"seed must be a non-negative int or list of ints, got {body['seed']}")
         job = f"{name}-{next(_ids)}"
         seen.append((name, body))
         jobs[job] = {"id": job, "status": "queued", "done_at": asyncio.get_running_loop().time() + delay, "body": body}
@@ -164,6 +171,22 @@ async def test_a_failed_job_or_a_dead_router_is_an_outage(h3, monkeypatch):
 
     monkeypatch.setenv(h3_generator.URL_ENV, f"http://127.0.0.1:{find_available_port(38000)}")
     with pytest.raises(GeneratorUnavailable, match="an H3 engine failed"):
+        await H3ClipGenerator().generate(_request())
+
+
+async def test_a_negative_prompt_or_seed_from_the_planner_is_no_outage(h3):
+    seen, _ = h3({})
+
+    await H3ClipGenerator().generate(_request(negative_prompt="blurry, watermark", seed=-1))
+
+    (_, body), _ = seen
+    assert "negative_prompt" not in body and body["seed"] == 2**32 - 1
+
+
+async def test_a_refused_job_says_why(h3):
+    h3({"refuse": "reference image is unreadable"})
+
+    with pytest.raises(GeneratorUnavailable, match="refused an H3 job: 400 .*reference image is unreadable"):
         await H3ClipGenerator().generate(_request())
 
 

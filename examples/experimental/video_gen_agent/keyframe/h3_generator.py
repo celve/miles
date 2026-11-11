@@ -6,7 +6,8 @@ reference preparation, and H3 delivers an MP4 file rather than the frames that e
 on the engine that took it, so rather than going through the router, this asks the router for its engines and sends
 each clip to the engine with the fewest unfinished jobs, then polls that engine until the clip is written. The engines
 count their own jobs, since each episode runs in a process of its own. The MP4 keeps H3's audio track; the reward reads
-only its video stream.
+only its video stream. H3 refuses a negative prompt (its checkpoint is CFG-distilled, so one would do nothing, as in the
+other modes' CFG-1 generators) and a negative seed, both of which the planner may send, so neither reaches it as such.
 
 Options come from ``AGENT_VIDEO_GEN_*`` env vars, as the env's own do:
 
@@ -109,18 +110,18 @@ class H3ClipGenerator:
                 "duration_seconds": float(request.seconds),
             },
             "seconds": request.seconds,
-            "seed": request.seed,
+            "seed": request.seed % 2**32,
             "num_outputs_per_prompt": 1,
             # FastH3 Omni's default upscales each reference to a 2048 short edge, about 10 s of 2xB300 per reference
             # with no gain in reward or subject fidelity (LIN-2860).
             "reference_resize_mode": "match",
             "output_path": self.clip_dir,
         }
-        if request.negative_prompt:
-            body["negative_prompt"] = request.negative_prompt
         if self.num_inference_steps is not None:
             body["num_inference_steps"] = self.num_inference_steps
         response = await client.post(f"{engine}/v1/videos", json=body)
+        if response.is_client_error:
+            raise GeneratorUnavailable(f"{engine} refused an H3 job: {response.status_code} {response.text}")
         response.raise_for_status()
         job = response.json()["id"]
         try:
