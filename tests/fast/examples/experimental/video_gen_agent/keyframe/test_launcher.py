@@ -115,6 +115,9 @@ def test_the_pairwise_reward_judges_against_the_anchors_with_the_ocr_gate_alone(
         "model_path": f"{tmp_path}/Qwen3-VL-8B-Instruct",
         "anchor_dir": "/root/datasets/video_gen_anchors_reference",
     }
+    pairwise = ScriptArgs(run_id="test", video_mode="reference", reward="pairwise")
+    assert _agent_env(pairwise)["AGENT_VIDEO_GEN_VIDEO_SEED"] == "request"
+    assert "AGENT_VIDEO_GEN_VIDEO_SEED" not in _agent_env(ScriptArgs(run_id="test", video_mode="reference"))
 
 
 def test_the_27b_planner_trains_at_tp4_with_its_own_template_and_eval_on_the_planner_engine(monkeypatch, tmp_path):

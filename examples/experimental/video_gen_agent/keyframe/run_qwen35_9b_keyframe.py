@@ -419,6 +419,9 @@ def _agent_env(args: ScriptArgs) -> dict[str, str]:
         env["AGENT_VIDEO_GEN_GUIDANCE_SCALE_2"] = "1.0"
     if (timeout := _generation_timeout(args)) is not None:
         env["AGENT_VIDEO_GEN_TIMEOUT_S"] = str(timeout)
+    if args.anchor_dir is not None:
+        # Its anchors are made at the request's seed, so the pairwise reward's videos are too.
+        env["AGENT_VIDEO_GEN_VIDEO_SEED"] = "request"
     return env
 
 
