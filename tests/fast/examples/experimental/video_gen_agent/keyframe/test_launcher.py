@@ -320,6 +320,21 @@ def test_prepare_stops_on_missing_anchors_for_every_request_the_pairwise_reward_
     assert not any("check-anchors" in command for command in _recorded(monkeypatch, tmp_path, "prepare"))
 
 
+def test_vidprom_anchors_are_checked_for_every_eval_set(monkeypatch, tmp_path):
+    commands = _recorded(
+        monkeypatch, tmp_path, "prepare", video_mode="reference", requests="vidprom", reward="pairwise"
+    )
+
+    (check,) = [command for command in commands if "arms check-anchors" in command]
+    data, vidprom = tmp_path / "data", tmp_path / "data/video_gen_requests_vidprom"
+    assert check.endswith(
+        f"{vidprom}/train.jsonl {vidprom}/heldout.jsonl {data}/video_gen_requests/heldout.jsonl "
+        f"{data}/video_gen_requests_t2v_compbench/heldout.jsonl {vidprom}/moviegen_heldout.jsonl "
+        f"--anchor-dir {data}/video_gen_anchors_reference"
+    )
+    assert commands.index(check) > max(i for i, command in enumerate(commands) if "make_vidprom_requests" in command)
+
+
 def test_prepare_downloads_and_converts_the_27b_planner(monkeypatch, tmp_path):
     commands = _recorded(monkeypatch, tmp_path, "prepare", planner="qwen3.8-27b")
 

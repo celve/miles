@@ -440,9 +440,9 @@ def prepare(args: ScriptArgs):
 
 
 def _anchor_request_files(args: ScriptArgs) -> list[str]:
-    """Every request file the pairwise reward judges: the training requests and both held-out sets."""
+    """Every request file the pairwise reward judges: the training requests and every eval dataset."""
     files = [f"{args.requests_dir}/train.jsonl", f"{args.requests_dir}/heldout.jsonl"]
-    return list(dict.fromkeys([*files, f"{args.vbench_requests_dir}/heldout.jsonl"]))
+    return list(dict.fromkeys([*files, *(dataset["path"] for dataset in _eval_config(args)["eval"]["datasets"])]))
 
 
 def execute(args: ScriptArgs):
