@@ -46,8 +46,8 @@ Args:
         tagged with subjects, setting and a suggested length by ``make_vidprom_requests.py``). With ``vidprom``
         eval runs --vidprom-heldout more of them as ``vidprom_heldout``, --moviegen-heldout MovieGenBench prompts as
         ``moviegen_heldout``, each also logged per heuristic split, and CompBench's and VBench's held-out sets for
-        continuity at the rollouts --continuity-eval-steps names (default ``0,final``; ``every`` runs them at every
-        eval). The suggested length only splits eval: --seconds sets every clip's length.
+        continuity at the evals --continuity-eval-steps names among those --eval-interval runs (default
+        ``0,final``; ``every`` runs them at every eval; a rollout no eval reaches is refused). The suggested length only splits eval: --seconds sets every clip's length.
         VidProM and MovieGenBench are CC-BY-NC-4.0: prepare fetches them at pinned revisions and nothing copies them.
     --model-dir, --data-dir: where models and the requests live; checkpoints, images and clips go under --output-dir.
 
@@ -69,6 +69,7 @@ from scripts.run_sd35_medium_flow_grpo_ocr import OCR_DEPS_INSTALL
 
 from miles.utils.chat_template_utils import resolve_reasoning_and_tool_call_parser
 from miles.utils.external_utils import command_utils
+from miles.utils.misc import should_run_periodic_action
 
 LIGHTX2V = "lightx2v/Wan2.2-Distill-Loras"
 LIGHTX2V_WAN21 = "lightx2v/Wan2.1-Distill-Loras"
@@ -263,6 +264,18 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
             assert self.continuity_eval_steps == "every" or all(
                 step == "final" or step.isdigit() for step in steps
             ), f"--continuity-eval-steps is every or rollout ids and final, got {self.continuity_eval_steps}"
+            # A dataset's rollout ids only filter the evals --eval-interval already runs, plus the one before training.
+            unreached = [
+                rollout_id
+                for rollout_id in self.continuity_rollout_ids or []
+                if rollout_id != 0
+                and not should_run_periodic_action(rollout_id, self.eval_interval, num_rollout=self.num_rollout)
+            ]
+            assert not unreached, (
+                f"--continuity-eval-steps names rollouts {unreached} at which no eval runs; with --eval-interval "
+                f"{self.eval_interval} and --num-rollout {self.num_rollout} an eval runs at 0, at each rollout r with "
+                f"(r + 1) a multiple of the interval, and at the last"
+            )
         else:
             assert self.continuity_eval_steps is None, "--continuity-eval-steps applies to --requests vidprom only"
         if self.image_steps is None or self.image_guidance_scale is None:

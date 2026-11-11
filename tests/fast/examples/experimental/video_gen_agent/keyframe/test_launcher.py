@@ -418,7 +418,7 @@ def test_vidprom_trains_on_its_requests_and_evals_continuity_sets_at_the_first_a
 
 
 @pytest.mark.parametrize(
-    "steps, rollout_ids", [("every", None), ("0,10,final", [0, 10, 49]), ("final", [49]), ("20,final,5", [5, 20, 49])]
+    "steps, rollout_ids", [("every", None), ("0,9,final", [0, 9, 49]), ("final", [49]), ("29,final,19", [19, 29, 49])]
 )
 def test_the_continuity_schedule_is_a_flag(monkeypatch, tmp_path, steps, rollout_ids):
     config = _config(monkeypatch, tmp_path, requests="vidprom", num_rollout=50, continuity_eval_steps=steps)
@@ -440,6 +440,9 @@ def test_compbench_runs_still_eval_both_sets_every_time(monkeypatch, tmp_path):
     [
         (dict(requests="t2v-compbench", continuity_eval_steps="final"), "applies to --requests vidprom only"),
         (dict(requests="vidprom", continuity_eval_steps="0,last"), "is every or rollout ids and final"),
+        # --eval-interval 10 over 50 rollouts evals at 0, 9, 19, 29, 39 and 49.
+        (dict(requests="vidprom", num_rollout=50, continuity_eval_steps="0,10,final"), r"rollouts \[10\] at which"),
+        (dict(requests="vidprom", num_rollout=50, continuity_eval_steps="5,20,final"), r"rollouts \[5, 20\] at which"),
     ],
 )
 def test_a_bad_continuity_schedule_is_refused(script_args, message):
