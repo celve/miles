@@ -9,7 +9,7 @@ for. Its reward pools share the rollout GPUs, one pool per GPU from the planner'
 One node, not colocated (frozen generators cannot share GPUs with training): the trainer (Qwen3.5 plugin model
 under raw Megatron, vision tower frozen), the planner's engine with the motion judge's reward pool beside it, the image
 engines, the video engines, and on 8 GPUs an eval engine that scores exported snapshots off the training path; on
-4 GPUs eval runs on the planner's engine. Every engine has one GPU, except H3's (--video-gpus-per-engine).
+4 GPUs eval runs on the planner's engine. Every engine has one GPU unless --video-gpus-per-engine says otherwise.
 The env is ``examples.experimental.video_gen_agent.keyframe.env`` under session server v2; each image comes back to
 the planner as an ``image_url`` part in token space.
 
@@ -31,8 +31,8 @@ Args:
         reaches its engines through ``keyframe/h3_generator.py`` rather than the router.
     --reference-scale: how strongly a reference-mode clip holds its images, VACE's conditioning scale (default 0.5,
         LIN-2830's pick; 1.0 copies the image as a near-still frame).
-    --video-gpus-per-engine: GPUs per video engine (default 1; 2 in h3-ref mode, since one H200 cannot hold FastH3
-        Omni; 1 fits a B300). H3 splits an engine's GPUs by Ulysses sequence parallelism.
+    --video-gpus-per-engine: GPUs per video engine (default 1). H3 splits an engine's GPUs by Ulysses sequence
+        parallelism, which LIN-2860 measured cutting a clip's time but not its GPU-seconds.
     --generation-timeout: seconds after which a generation counts as an outage, which drops its group (default: the
         env's 600; in reference and h3-ref modes, long enough for the queue on an engine, which renders one clip at a
         time).
@@ -138,8 +138,8 @@ class _VideoRecipe:
     num_inference_steps: int | None = 4
     guidance_scale: float | None = 1.0
     gpus_per_engine: int = 1
-    # Twice a clip's measured seconds on one engine, which renders one at a time, to bound the wait behind a full queue;
-    # None keeps the env's 600 s timeout.
+    # Twice a clip's measured GPU-seconds, to bound the wait behind a full queue on engines that render one clip at a
+    # time; None keeps the env's 600 s timeout.
     seconds_per_clip: float | None = None
     # sglang serves it through a model overlay, which links components of another checkpoint from the HF cache into
     # a directory it builds; prepare builds it, so no engine downloads under its startup timeout.
@@ -173,7 +173,7 @@ _VIDEO_RECIPES = {
         seconds_per_clip=20.0,
     ),
     # MiniMax-H3's 8-step FastH3 Omni, reference-to-video from the same assets (LIN-2860). Its clips are 4 to 15 s at
-    # 24 fps with audio, and one engine needs two H200s (131 GB peak on one GPU).
+    # 24 fps with audio. One H200 holds it (125 GB peak) and renders a 4 s clip in 14.3 s; two take 8.1 s.
     "h3-ref": _VideoRecipe(
         model=H3_OMNI,
         env_mode="reference",
@@ -182,8 +182,7 @@ _VIDEO_RECIPES = {
         fps=24,
         num_inference_steps=None,
         guidance_scale=None,
-        gpus_per_engine=2,
-        seconds_per_clip=16.0,
+        seconds_per_clip=30.0,
         overlay=True,
     ),
 }
@@ -418,7 +417,7 @@ def _generation_timeout(args: ScriptArgs) -> float | None:
         episodes *= 2
     queued = math.ceil(episodes / (args.video_gpus // args.video_gpus_per_engine))
     # Clip time grows with length: H3 took 1.6x as long at 8 s as at 4 s (LIN-2860), so scaling linearly is safe.
-    return max(600.0, queued * per_clip * args.seconds / args.video.seconds)
+    return max(600.0, queued * per_clip / args.video_gpus_per_engine * args.seconds / args.video.seconds)
 
 
 def _agent_env(args: ScriptArgs) -> dict[str, str]:

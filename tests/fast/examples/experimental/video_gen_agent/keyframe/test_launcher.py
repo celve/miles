@@ -371,14 +371,16 @@ def test_an_unknown_request_set_is_refused():
         ScriptArgs(run_id="test", requests="vidprom")
 
 
-def test_h3_mode_serves_fasth3_omni_on_two_gpu_ulysses_engines(monkeypatch, tmp_path):
-    config = _config(monkeypatch, tmp_path, video_mode="h3-ref")
+@pytest.mark.parametrize("gpus_per_engine", [1, 2])
+def test_h3_mode_serves_fasth3_omni_on_ulysses_engines_of_the_flags_size(monkeypatch, tmp_path, gpus_per_engine):
+    config = _config(monkeypatch, tmp_path, video_mode="h3-ref", video_gpus_per_engine=gpus_per_engine)
 
     models = {model.name: model for model in config.sglang.models}
     video = models["video"]
     (group,) = video.server_groups
     assert video.model_path == f"{tmp_path}/FastVideo-FastH3-Omni-8-Step-V1" and not video.update_weights
-    assert (group.num_gpus_per_engine, group.overrides["ulysses_degree"], group.loras) == (2, 2, ())
+    assert (group.num_gpus_per_engine, group.loras) == (gpus_per_engine, ())
+    assert group.overrides.get("ulysses_degree") == (2 if gpus_per_engine == 2 else None)
     assert config.sglang_scaling.group(model_name="video", group_index=0).num_gpus == 4
     assert config.eval_num_gpus == 1 and config.actor_num_gpus_per_node == 1
 
@@ -399,10 +401,11 @@ def test_h3_mode_gives_the_env_assets_and_the_h3_generator_at_its_clip_shape():
 @pytest.mark.parametrize(
     "script_args, timeout",
     [
-        # Two 2-GPU engines share a step's 128 episodes and as many eval episodes, 16 s a 4 s clip.
-        (dict(), 2048.0),
-        (dict(seconds=8), 4096.0),
-        (dict(video_gpus_per_engine=1), 1024.0),
+        # Four 1-GPU engines share a step's 128 episodes and as many eval episodes, 30 GPU-s a 4 s clip.
+        (dict(), 1920.0),
+        (dict(seconds=8), 3840.0),
+        (dict(video_gpus_per_engine=2), 1920.0),
+        (dict(num_gpus_per_node=4), 7680.0),
         (dict(rollout_batch_size=2, n_samples_per_prompt=2), 600.0),
     ],
 )
@@ -428,7 +431,7 @@ def test_prepare_builds_h3s_overlay_with_sglang_and_fetches_no_loras(monkeypatch
     "script_args, message",
     [
         (dict(video_mode="h3-ref", seconds=2), "H3 makes 4 to 15 second clips, not --seconds 2"),
-        (dict(video_mode="h3-ref", num_gpus_per_node=4), "1 video GPUs do not split into engines of 2"),
+        (dict(video_mode="h3-ref", num_gpus_per_node=4, video_gpus_per_engine=2), "1 video GPUs do not split into engines of 2"),
         (dict(video_mode="h3-ref", reference_scale=0.5), "--reference-scale applies to --video-mode reference only"),
     ],
 )
@@ -438,6 +441,6 @@ def test_an_h3_run_h3_cannot_serve_is_refused(script_args, message):
 
 
 def test_h3_mode_on_four_gpus_takes_one_gpu_engines():
-    args = ScriptArgs(run_id="test", video_mode="h3-ref", num_gpus_per_node=4, video_gpus_per_engine=1)
+    args = ScriptArgs(run_id="test", video_mode="h3-ref", num_gpus_per_node=4)
 
     assert (args.train_gpus, args.policy_gpus, args.image_gpus, args.video_gpus, args.eval_gpus) == (1, 1, 1, 1, 0)
