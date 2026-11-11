@@ -36,11 +36,13 @@ Args:
         one asset per subject or object; 3 otherwise).
     --max-prompt-words: a longer generator prompt gets an error reply (default 0, no cap: Linyu, 2026-11-10, "more
         detailed prompt might generate better video"); 120 is the survey's cap.
-    --reward: the signal terms, ``hpsv3+vqascore`` (default), ``hpsv3+unifiedreward``, ``hpsv3``, ``pickscore`` or
-        ``pairwise``; --adherence-gate adds the judge's prompt-adherence gate, off by default. ``pairwise`` is the
-        Qwen3-VL judge's probability that the clip beats its request's one-shot clip (B0-ref in reference mode), shown
-        both in both orders, with the OCR gate and no motion gate (LIN-2858); its anchors must be in --anchor-dir
-        (default ``{data-dir}/video_gen_anchors_{video-mode}``) before the run, made by ``keyframe.eval.arms``.
+    --reward: the signal terms, ``hpsv3+vqascore`` (default), ``hpsv3+unifiedreward``, ``hpsv3``, ``pickscore``,
+        ``pairwise`` or ``hpsv3+vqascore+motion``; --adherence-gate adds the judge's prompt-adherence gate, off by
+        default. ``pairwise`` is the Qwen3-VL judge's probability that the clip beats its request's one-shot clip
+        (B0-ref in reference mode), shown both in both orders, with the OCR gate and no motion gate (LIN-2858); its
+        anchors must be in --anchor-dir (default ``{data-dir}/video_gen_anchors_{video-mode}``) before the run, made
+        by ``keyframe.eval.anchors``. ``hpsv3+vqascore+motion`` is its fallback: the default's terms with the judge's
+        motion score as a third term in place of the motion gate.
     --requests: the training requests, ``vbench`` (default; VBench's prompts, 10% held out by hash) or
         ``t2v-compbench`` (T2V-CompBench's 1,400 compositional prompts, --compbench-heldout of them held out across its
         seven categories, LIN-2834). With ``t2v-compbench`` eval runs both held-out sets: ``compbench_heldout``, logged
@@ -163,6 +165,7 @@ _SIGNAL_RANGES = {
     "unifiedreward": (0.248, 3.229),
     "pickscore": (0.604, 0.910),
     "pairwise": (0.0, 1.0),
+    "motion": (0.0, 1.0),
 }
 # hpsv3+unifiedreward is the survey's pick; UnifiedReward-2.0 failed LIN-2736's overlay and mismatch pairs on its
 # own (0.62, 0.29), so the survey's fallback, VQAScore on the request, takes its place by default (LIN-2821).
@@ -172,10 +175,11 @@ _REWARDS = {
     "hpsv3": ("hpsv3",),
     "pickscore": ("pickscore",),
     "pairwise": ("pairwise",),
+    "hpsv3+vqascore+motion": ("hpsv3", "vqascore", "motion"),
 }
-# The pairwise judge ranks a frozen clip below a moving one on all 36 static pairs without the motion gate, whose
-# all-or-nothing step carried most of phase 1's VBench reward gain (LIN-2858).
-_WITHOUT_MOTION_GATE = {"pairwise"}
+# Both rank a frozen clip below a moving one on all 36 static pairs without the motion gate, whose all-or-nothing step
+# carried most of phase 1's VBench reward gain (LIN-2858).
+_WITHOUT_MOTION_GATE = {"pairwise", "hpsv3+vqascore+motion"}
 # The adherence gate's threshold, set between the scores of LIN-2736's 24 mismatch pairs' two sides (LIN-2821).
 _ADHERENCE_THRESHOLD = 0.016
 
@@ -348,13 +352,16 @@ def prepare(args: ScriptArgs):
         )
     if args.anchor_dir is not None:
         # The anchors take the run's generators, which prepare does not serve, so a missing one stops the run here.
-        files = dict.fromkeys(
-            [f"{args.requests_dir}/train.jsonl", f"{args.requests_dir}/heldout.jsonl", f"{args.vbench_requests_dir}/heldout.jsonl"]
-        )
         U.exec_command_cpu(
             f"cd {command_utils.repo_base_dir} && python -m {AGENT}.keyframe.eval.arms check-anchors "
-            f"{' '.join(files)} --anchor-dir {args.anchor_dir}"
+            f"{' '.join(_anchor_request_files(args))} --anchor-dir {args.anchor_dir}"
         )
+
+
+def _anchor_request_files(args: ScriptArgs) -> list[str]:
+    """Every request file the pairwise reward judges: the training requests and both held-out sets."""
+    files = [f"{args.requests_dir}/train.jsonl", f"{args.requests_dir}/heldout.jsonl"]
+    return list(dict.fromkeys([*files, f"{args.vbench_requests_dir}/heldout.jsonl"]))
 
 
 def execute(args: ScriptArgs):
@@ -598,6 +605,7 @@ def _reward_models(args: ScriptArgs) -> list[str]:
         "unifiedreward": [UNIFIED_REWARD],
         "pickscore": [PICKSCORE, PICKSCORE_PROCESSOR],
         "pairwise": [],
+        "motion": [],
     }
     return [repo for signal in _REWARDS[args.reward] for repo in repos[signal]]
 

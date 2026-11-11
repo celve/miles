@@ -30,7 +30,8 @@ row's ``metadata["category"]`` is copied onto its rows as ``category``, for ``co
   python -m examples.experimental.video_gen_agent.keyframe.eval.arms generate prompts.jsonl k0.jsonl k.jsonl --out clips.jsonl
 
 The pairwise reward (the launcher's ``--reward pairwise``) judges each clip against its request's one-shot clip, its
-anchor, which these commands make once per request set, on the run's generators:
+anchor. ``keyframe.eval.anchors`` serves the run's generators and makes them; on generators already served, these
+commands do the same:
 
   python -m examples.experimental.video_gen_agent.keyframe.eval.arms anchor-prompts train.jsonl heldout.jsonl... \
       --mode reference --out anchors.jsonl
@@ -63,7 +64,7 @@ from miles.rollout.rm_hub.video.pairwise import anchor_name
 from miles.utils.function_registry import load_function
 
 SHAPE = {"seconds": 2.0, "width": 832, "height": 480, "fps": 16}
-ANCHORS = "make them with arms anchor-prompts, generate and place-anchors (this module's docstring)"
+ANCHORS = "make them with python -m examples.experimental.video_gen_agent.keyframe.eval.anchors and the run's flags"
 
 
 def heldout_requests(path: Path) -> list[str]:

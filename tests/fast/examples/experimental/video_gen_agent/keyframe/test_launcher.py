@@ -85,6 +85,7 @@ def test_each_layout_parses_with_two_frozen_generators_on_gpus_of_their_own(
         ("pickscore", False, ["pickscore"], {"motion", "pickscore", "ocr"}),
         ("hpsv3", True, ["hpsv3"], {"motion", "hpsv3", "adherence", "ocr"}),
         ("hpsv3+unifiedreward", False, ["hpsv3", "unifiedreward"], {"motion", "hpsv3", "unifiedreward", "ocr"}),
+        ("hpsv3+vqascore+motion", False, ["hpsv3", "vqascore", "motion"], {"motion", "hpsv3", "vqascore", "ocr"}),
     ],
 )
 def test_the_reward_is_a_flag(monkeypatch, tmp_path, reward, adherence_gate, signals, pools):
@@ -92,6 +93,9 @@ def test_the_reward_is_a_flag(monkeypatch, tmp_path, reward, adherence_gate, sig
 
     hook = config.custom_rm_path.config
     assert hook.video_reward_signal_pools == signals and {pool.name for pool in config.reward_pools} == pools
+    # Motion is a term in place of the gate in the fallback, and the gate everywhere else.
+    assert hook.video_reward_motion_pool == (None if "motion" in signals else "motion")
+    assert len(hook.video_reward_signal_ranges) == 2 * len(signals)
     if adherence_gate:
         assert hook.video_reward_adherence_pool == "adherence" and hook.video_reward_adherence_threshold > 0
         adherence = next(pool for pool in config.reward_pools if pool.name == "adherence")
