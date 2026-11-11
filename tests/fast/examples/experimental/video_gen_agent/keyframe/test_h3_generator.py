@@ -54,6 +54,8 @@ def _fake_h3_engine(name: str, seen: list, *, delay: float = 0.0, fail: bool = F
         if fail:
             return {"id": job, "status": "failed", "error": "reference-image preparation failed"}
         path = Path(record["body"]["output_path"]) / f"{job}.mp4"
+        # sglang makes the output directory, as entrypoints/utils.py does before saving.
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"mp4")
         return {"id": job, "status": "completed", "file_path": str(path)}
 

@@ -5,8 +5,8 @@ the run's own image and video models served on this machine's GPUs, and placed i
       [the launcher's flags: --video-mode, --requests, --model-dir, --data-dir, --anchor-dir, ...]
 
 Run the launcher's ``prepare`` first for the models and request files; the launcher's flags then pick the same
-generators, requests and directory its run reads. The first GPU serves the image model and each other one a video
-engine. Requests that already have an anchor are skipped, the count and an estimate are printed before anything is
+generators, requests, clip shape and directory its run reads. The first GPU serves the image model, and the others
+video engines of the run's --video-gpus-per-engine each (two consecutive GPUs an engine in h3-ref mode). Requests that already have an anchor are skipped, the count and an estimate are printed before anything is
 served, and it exits non-zero if any request is still without one.
 """
 
@@ -28,8 +28,8 @@ from examples.experimental.video_gen_agent.keyframe.run_qwen35_9b_keyframe impor
     ScriptArgs,
     _agent_env,
     _anchor_request_files,
+    _sglang_config,
 )
-from examples.experimental.video_gen_agent.multiturn.generator import RouterClipGenerator
 
 from miles.backends.sglang_utils.sglang_config import DiffusionLora
 from miles.diffusion.api_client import DiffusionApiClient
@@ -37,11 +37,13 @@ from miles.diffusion.engine import compute_diffusion_engine_launch_cmd
 from miles.router.config import MilesRouterConfig
 from miles.router.router import MilesRouter
 from miles.utils.external_utils import command_utils
+from miles.utils.function_registry import load_function
 from miles.utils.test_utils.uvicorn_thread_server import UvicornThreadServer
 
-# GPU-seconds per reference-mode anchor on H200: 295 made in about 55 min with Z-Image-Turbo and VACE-14B sharing one
-# GPU (LIN-2858). No other mode is measured.
-SECONDS_PER_ANCHOR = {"reference": 11.0}
+# GPU-seconds per anchor on H200: reference mode made 295 in about 55 min with Z-Image-Turbo and VACE-14B sharing one
+# GPU (LIN-2858); h3-ref's is two GPUs for 8.1 s a 4 s clip plus the image (LIN-2860). No other mode is measured.
+SECONDS_PER_ANCHOR = {"reference": 11.0, "h3-ref": 17.0}
+# The arms' one-shot arm for each env mode, which h3-ref shares with reference mode.
 _ARMS_MODE = {"preview": "t2v", "i2v": "i2v", "reference": "reference"}
 
 
@@ -54,6 +56,11 @@ class AnchorArgs(ScriptArgs):
         super().__post_init__()
         assert self.anchor_dir is not None, "anchors are for --reward pairwise"
         assert len(self.gpu_ids) >= 2, "--gpus names the image model's GPU, then one or more video GPUs"
+        assert (
+            len(self.gpu_ids) - 1
+        ) % self.video_gpus_per_engine == 0, (
+            f"--gpus' video GPUs do not split into engines of {self.video_gpus_per_engine}"
+        )
 
     @property
     def gpu_ids(self) -> list[int]:
@@ -64,7 +71,7 @@ def plan(args: AnchorArgs) -> tuple[list[dict], str]:
     """The one-shot rows of the requests without an anchor, and what making them costs."""
     requests = [request for path in _anchor_request_files(args) for request in arms.heldout_requests(Path(path))]
     missing = arms.missing_anchors(requests, Path(args.anchor_dir))
-    rows = [arms.one_shot_row(request, _ARMS_MODE[args.video_mode]) for request in missing]
+    rows = [arms.one_shot_row(request, _ARMS_MODE[args.env_mode]) for request in missing]
     video_gpus = len(args.gpu_ids) - 1
     if (rate := SECONDS_PER_ANCHOR.get(args.video_mode)) is None:
         cost = f"no measured rate for {args.video_mode} mode"
@@ -92,15 +99,19 @@ def make_anchors(args: AnchorArgs) -> None:
 async def _make(args: AnchorArgs, rows: list[dict]) -> None:
     ports = iter(range(args.port_base, args.port_base + 1000, 10))
     image_gpu, *video_gpus = args.gpu_ids
-    reference = args.video.reference_flow_shift is not None
-    video_overrides = {"backend": "diffusers"} if reference else {}
-    image = [_launch(args.local(args.image_model), image_gpu, {}, ports)]
-    videos = [_launch(args.video_path, gpu, video_overrides, ports) for gpu in video_gpus]
+    # The run's own video group: the diffusers backend in reference mode, H3's Ulysses split, the LoRAs to set.
+    (group,) = next(model for model in _sglang_config(args)["sglang"] if model["name"] == "video")["server_groups"]
+    size = group["num_gpus_per_engine"]
+    image = [_launch(args.local(args.image_model), [image_gpu], {}, ports)]
+    videos = [
+        _launch(args.video_path, video_gpus[i : i + size], group.get("overrides", {}), ports)
+        for i in range(0, len(video_gpus), size)
+    ]
     servers = []
     try:
         await _wait_healthy([url for _, url in image + videos], timeout_s=3600)
-        if not reference:
-            loras = [DiffusionLora(path=path, target=target) for path, target in args.video_lora_paths()]
+        if group.get("loras"):
+            loras = [DiffusionLora(**lora) for lora in group["loras"]]
             await asyncio.gather(*(DiffusionApiClient(server_url=url).set_lora(loras) for _, url in videos))
         servers = [_router([url for _, url in group], next(ports)) for group in (image, videos)]
         os.environ.update(
@@ -112,7 +123,9 @@ async def _make(args: AnchorArgs, rows: list[dict]) -> None:
                 "AGENT_VIDEO_GEN_CLIP_DIR": f"{args.anchor_dir}/.clips",
             }
         )
-        made = await arms.generate(rows, RouterClipGenerator(), RouterImageGenerator(), concurrency=4 * len(videos))
+        generator = load_function(os.environ["AGENT_VIDEO_GEN_GENERATOR"])()
+        shape = arms.SHAPE | {"seconds": args.seconds, "fps": args.video.fps}
+        made = await arms.generate(rows, generator, RouterImageGenerator(), concurrency=4 * len(videos), shape=shape)
         print(f"placed {arms.place_anchors(made, Path(args.anchor_dir))} anchors", flush=True)
     finally:
         for server in servers:
@@ -123,13 +136,14 @@ async def _make(args: AnchorArgs, rows: list[dict]) -> None:
             process.wait(timeout=60)
 
 
-def _launch(model_path: str, gpu: int, overrides: dict, ports) -> tuple[subprocess.Popen, str]:
+def _launch(model_path: str, gpus: list[int], overrides: dict, ports) -> tuple[subprocess.Popen, str]:
+    assert gpus == list(range(gpus[0], gpus[0] + len(gpus))), f"an engine's GPUs are consecutive, not {gpus}"
     port = next(ports)
     cmd = compute_diffusion_engine_launch_cmd(
         SimpleNamespace(hf_checkpoint=model_path, diffusion_dit_precision=None, diffusion_flow_shift=None),
         interpreter_prefix=[sys.executable],
-        base_gpu_id=gpu,
-        num_gpus_per_engine=1,
+        base_gpu_id=gpus[0],
+        num_gpus_per_engine=len(gpus),
         sglang_overrides={"model_path": model_path, **overrides},
         update_weights=False,
         nccl_port=next(ports),
