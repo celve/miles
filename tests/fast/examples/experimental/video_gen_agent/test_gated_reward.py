@@ -217,3 +217,15 @@ def test_episode_metrics_report_how_often_each_gate_fires():
     assert metrics["reward/ocr_fired"] == pytest.approx(1 / 3) and metrics["reward/adherence_fired"] == 0
     assert metrics["reward/score_hps"] == 4.0 and metrics["reward/term_hps"] == pytest.approx(0.8 / 3)
     assert (metrics["episode/video_prompt_words"], metrics["episode/image_prompt_words"]) == (3.0, 3.5)
+
+
+async def test_without_a_motion_pool_the_motion_gate_is_off_and_no_motion_pool_is_asked():
+    pools = _pools(hps={"c": 5.0}, ur={"c": 3.0}, ocr={"c": 1.0})
+    del pools["motion_pool"]
+    sample = _sample("c")
+
+    (reward,) = await reward_func(_args(video_reward_motion_pool=None), [sample], **pools)
+
+    assert reward == pytest.approx(0.25)
+    assert sample.metadata[RECORD_KEY]["fired"] == {"motion": False, "ocr": True, "adherence": False}
+    assert "motion" not in sample.metadata[RECORD_KEY]["scores"]

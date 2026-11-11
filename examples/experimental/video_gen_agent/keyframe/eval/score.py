@@ -1,7 +1,7 @@
 """Score eval-arm clips with the training reward and the outside checks, on one GPU.
 
   python -m examples.experimental.video_gen_agent.keyframe.eval.score clips.jsonl... --out scored.jsonl \\
-      [--model-dir /root/models] [--reward <the launcher's --reward>] [--adherence-gate]
+      [--model-dir /root/models] [--reward <the launcher's --reward>] [--adherence-gate] [--anchor-dir <dir>]
 
 Each row gains ``scores`` (every training pool's score, the three-axis Qwen3-VL ``judge`` and ``pickscore``),
 ``reward`` (the training reward's gated mean, as eval reports it), ``fired`` (its gates), ``frame_diff`` (mean absolute
@@ -61,7 +61,9 @@ def score_rows(rows: list[dict], scorers: dict, config: GatedVideoRewardConfig) 
         for name, scorer in scorers.items()
     }
     parts = {f"signal:{pool}": pool for pool in config.video_reward_signal_pools}
-    parts |= {"motion": config.video_reward_motion_pool, "ocr": config.video_reward_ocr_pool}
+    parts["ocr"] = config.video_reward_ocr_pool
+    if config.video_reward_motion_pool is not None:
+        parts["motion"] = config.video_reward_motion_pool
     if config.video_reward_adherence_pool is not None:
         parts["adherence"] = config.video_reward_adherence_pool
     out = []
@@ -94,9 +96,16 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--model-dir", default="/root/models")
     parser.add_argument("--reward", default=ScriptArgs.reward, help="as the launcher's --reward, and its default")
     parser.add_argument("--adherence-gate", action="store_true")
+    parser.add_argument("--anchor-dir", help="as the launcher's --anchor-dir, for --reward pairwise")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args(argv)
-    run = ScriptArgs(run_id="eval", model_dir=args.model_dir, reward=args.reward, adherence_gate=args.adherence_gate)
+    run = ScriptArgs(
+        run_id="eval",
+        model_dir=args.model_dir,
+        reward=args.reward,
+        adherence_gate=args.adherence_gate,
+        anchor_dir=args.anchor_dir,
+    )
     rows = [json.loads(line) for path in args.clips for line in path.read_text().splitlines()]
     scored = {}
     # One scorer on the GPU at a time: the judge and the reward models do not all fit beside each other on one GPU.

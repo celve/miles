@@ -29,6 +29,15 @@ row's ``metadata["category"]`` is copied onto its rows as ``category``, for ``co
       --out k0.jsonl
   python -m examples.experimental.video_gen_agent.keyframe.eval.arms generate prompts.jsonl k0.jsonl k.jsonl --out clips.jsonl
 
+The pairwise reward (the launcher's ``--reward pairwise``) judges each clip against its request's one-shot clip, its
+anchor. ``keyframe.eval.anchors`` serves the run's generators and makes them; on generators already served, these
+commands do the same:
+
+  python -m examples.experimental.video_gen_agent.keyframe.eval.arms anchor-prompts train.jsonl heldout.jsonl... \
+      --mode reference --out anchors.jsonl
+  python -m examples.experimental.video_gen_agent.keyframe.eval.arms generate anchors.jsonl --out anchor_clips.jsonl
+  python -m examples.experimental.video_gen_agent.keyframe.eval.arms place-anchors anchor_clips.jsonl --anchor-dir <dir>
+
 ``generate`` makes clips with the env's generator, so ``AGENT_VIDEO_GEN_GENERATOR`` and its options pick the router
 (or a fake) exactly as in training; a row with an ``image_prompt`` first gets its image from
 ``AGENT_VIDEO_GEN_IMAGE_GENERATOR``. B0, B1 and B1-rewrite are text-to-video and the mode's one-shot arm is not, so generate them
@@ -41,6 +50,8 @@ import argparse
 import asyncio
 import json
 import os
+import shutil
+import sys
 from pathlib import Path
 
 import httpx
@@ -50,9 +61,11 @@ from examples.experimental.video_gen_agent.generator import ClipRequest, ImageRe
 from examples.experimental.video_gen_agent.keyframe.eval.compare import ONE_SHOT_ARMS
 from examples.experimental.video_gen_agent.phase0.make_planner_data import SYSTEM_PROMPT
 from examples.experimental.video_gen_agent.phase0.reward import planner_prompt, request_seed
+from miles.rollout.rm_hub.video.pairwise import anchor_name
 from miles.utils.function_registry import load_function
 
 SHAPE = {"seconds": 2.0, "width": 832, "height": 480, "fps": 16}
+ANCHORS = "make them with python -m examples.experimental.video_gen_agent.keyframe.eval.anchors and the run's flags"
 
 
 def heldout_requests(path: Path) -> list[str]:
@@ -109,11 +122,28 @@ def arm_prompts(
             # i2v starts from the first image; reference mode takes every asset the agent made, which K's video may not.
             paths = [image["path"] for image in images] if mode == "reference" else [images[0]["path"]]
             rows[-1] |= _conditioned(mode, paths)
-        rows.append(
-            {"arm": ONE_SHOT_ARMS[mode], "request": request, "prompt": request, "image_prompt": request}
-            | {"seed": request_seed(request), "mode": mode}
-        )
+        rows.append(one_shot_row(request, mode))
     return rows
+
+
+def one_shot_row(request: str, mode: str) -> dict:
+    """The mode's one-shot arm for a request: the raw request to the video model, by way of the image model in i2v or
+    reference mode."""
+    row = {"arm": ONE_SHOT_ARMS[mode], "request": request, "prompt": request, "seed": request_seed(request)}
+    return row if mode == "t2v" else row | {"image_prompt": request, "mode": mode}
+
+
+def missing_anchors(requests: list[str], anchor_dir: Path) -> list[str]:
+    return [request for request in dict.fromkeys(requests) if not (anchor_dir / anchor_name(request)).is_file()]
+
+
+def place_anchors(rows: list[dict], anchor_dir: Path) -> int:
+    """Copy each generated one-shot clip to ``anchor_dir`` under its request's anchor name; the count placed."""
+    anchor_dir.mkdir(parents=True, exist_ok=True)
+    placed = [row for row in rows if row["arm"] in ONE_SHOT_ARMS.values() and row["path"] is not None]
+    for row in placed:
+        shutil.copyfile(row["path"], anchor_dir / anchor_name(row["request"]))
+    return len(placed)
 
 
 def _blind_prompt(mode: str, images: list[dict]) -> str | None:
@@ -259,9 +289,27 @@ def main(argv: list[str] | None = None) -> None:
     dumped.add_argument("--arm", choices=("K0", "K"), required=True)
     dumped.add_argument("--heldout", type=Path, required=True)
     dumped.add_argument("--out", type=Path, required=True)
+    anchor_prompts = commands.add_parser("anchor-prompts")
+    anchor_prompts.add_argument("requests", type=Path, nargs="+")
+    anchor_prompts.add_argument("--mode", choices=sorted(ONE_SHOT_ARMS), required=True)
+    anchor_prompts.add_argument("--out", type=Path, required=True)
+    for name in ("place-anchors", "check-anchors"):
+        anchors = commands.add_parser(name)
+        anchors.add_argument("files", type=Path, nargs="+", help="generate's clips, or the request files to check")
+        anchors.add_argument("--anchor-dir", type=Path, required=True)
     args = parser.parse_args(argv)
 
-    if args.command == "prompts":
+    if args.command == "anchor-prompts":
+        requests = dict.fromkeys(request for path in args.requests for request in heldout_requests(path))
+        _write(args.out, [one_shot_row(request, args.mode) for request in requests])
+    elif args.command == "place-anchors":
+        rows = [json.loads(line) for path in args.files for line in path.read_text().splitlines()]
+        print(f"placed {place_anchors(rows, args.anchor_dir)} anchors in {args.anchor_dir}")
+    elif args.command == "check-anchors":
+        missing = missing_anchors([r for path in args.files for r in heldout_requests(path)], args.anchor_dir)
+        if missing:
+            sys.exit(f"{len(missing)} requests have no anchor clip in {args.anchor_dir}, e.g. {missing[0]!r}; {ANCHORS}")
+    elif args.command == "prompts":
         rows = arm_prompts(
             heldout_requests(args.heldout),
             _answers(args.phase0, "answer99"),
