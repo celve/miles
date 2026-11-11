@@ -4,6 +4,7 @@ import asyncio
 import itertools
 from pathlib import Path
 
+import httpx
 import pytest
 from examples.experimental.video_gen_agent.generator import ClipRequest, GeneratorUnavailable
 from examples.experimental.video_gen_agent.keyframe import h3_generator
@@ -28,6 +29,13 @@ def _fake_h3_engine(name: str, seen: list, *, delay: float = 0.0, fail: bool = F
         seen.append((name, body))
         jobs[job] = {"id": job, "status": "queued", "done_at": asyncio.get_running_loop().time() + delay, "body": body}
         return {"id": job, "status": "queued"}
+
+    @app.get("/v1/videos")
+    async def listed(limit: int = 20, after: str | None = None):
+        ids = list(jobs)
+        ids = ids[ids.index(after) + 1 :] if after else ids
+        page = [await status(job) for job in ids[:limit]]
+        return {"data": page, "last_id": page[-1]["id"] if page else None, "has_more": len(ids) > limit}
 
     @app.get("/v1/videos/{job}")
     async def status(job: str):
@@ -85,10 +93,8 @@ def h3(monkeypatch, tmp_path):
         servers.append(server)
         monkeypatch.setenv(h3_generator.URL_ENV, server.url)
         monkeypatch.setenv(h3_generator.CLIP_DIR_ENV, str(tmp_path))
-        monkeypatch.setattr(h3_generator, "_engines", {})
-        monkeypatch.setattr(h3_generator, "_in_flight", {})
         monkeypatch.setattr(h3_generator, "POLL_S", 0.01)
-        return seen
+        return seen, [server.url for server in servers[-len(engines) - 1 : -1]]
 
     yield start
     for server in servers:
@@ -101,7 +107,7 @@ def _request(**fields) -> ClipRequest:
 
 
 async def test_a_clip_is_one_ref2va_job_with_the_assets_written_where_the_trainer_reads(h3, tmp_path):
-    seen = h3({})
+    seen, _ = h3({})
 
     clip = await H3ClipGenerator().generate(_request())
 
@@ -122,27 +128,36 @@ async def test_a_clip_is_one_ref2va_job_with_the_assets_written_where_the_traine
     assert clip.path == str(tmp_path / f"{job}.mp4") and deleted == "deleted"
 
 
-async def test_each_clip_goes_to_the_engine_with_the_fewest_in_flight(h3):
-    seen = h3({"delay": 1.0}, {"delay": 0.05})
+async def test_each_clip_goes_to_the_engine_whose_own_queue_is_shortest(h3):
+    seen, (busy, _) = h3({"delay": 30.0}, {"delay": 0.05})
+    # Jobs another episode's process left queued, which only the engine itself can count: 150 spans two list pages.
+    async with httpx.AsyncClient() as client:
+        for _ in range(150):
+            (await client.post(f"{busy}/v1/videos", json={"output_path": "/unused"})).raise_for_status()
 
-    slow = asyncio.create_task(H3ClipGenerator().generate(_request(seed=0)))
-    await asyncio.sleep(0.2)
-    for seed in range(1, 4):
+    for seed in range(3):
         await H3ClipGenerator().generate(_request(seed=seed))
-    await slow
 
-    engines = [name for name, body in ((entry[0], entry[1]) for entry in seen) if isinstance(body, dict)]
-    assert engines == ["e0", "e1", "e1", "e1"] and h3_generator._in_flight == {u: 0 for u in h3_generator._in_flight}
+    assert [entry[0] for entry in seen[150:] if isinstance(entry[1], dict)] == ["e1", "e1", "e1"]
+
+
+async def test_engines_with_equal_queues_share_the_episodes_that_start_together(h3, monkeypatch):
+    seen, _ = h3({"delay": 0.2}, {"delay": 0.2})
+    monkeypatch.setattr(h3_generator.random, "choice", lambda engines: engines[-1])
+
+    await H3ClipGenerator().generate(_request())
+
+    (name, _), _ = seen
+    assert name == "e1"
 
 
 async def test_a_failed_job_or_a_dead_router_is_an_outage(h3, monkeypatch):
-    seen = h3({"fail": True})
+    seen, _ = h3({"fail": True})
 
     with pytest.raises(GeneratorUnavailable, match="reference-image preparation failed"):
         await H3ClipGenerator().generate(_request())
     assert seen[-1][1] == "deleted"
 
-    monkeypatch.setattr(h3_generator, "_engines", {})
     monkeypatch.setenv(h3_generator.URL_ENV, f"http://127.0.0.1:{find_available_port(38000)}")
     with pytest.raises(GeneratorUnavailable, match="an H3 engine failed"):
         await H3ClipGenerator().generate(_request())
@@ -156,7 +171,7 @@ async def test_a_failed_job_or_a_dead_router_is_an_outage(h3, monkeypatch):
     ],
 )
 async def test_a_request_h3_cannot_make_is_refused_before_any_engine_sees_it(h3, fields, message):
-    seen = h3({})
+    seen, _ = h3({})
 
     with pytest.raises(ValueError, match=message):
         await H3ClipGenerator().generate(_request(**fields))

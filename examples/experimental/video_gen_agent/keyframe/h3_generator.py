@@ -3,9 +3,10 @@
 
 sglang serves H3's ref2va only through its asynchronous ``/v1/videos``: ``/rollout/generate`` skips H3's pre-queue
 reference preparation, and H3 delivers an MP4 file rather than the frames that endpoint returns (LIN-2860). A job lives
-on the engine that took it, so rather than going through the router, this asks the router for its engines once and
-sends each clip to the engine with the fewest clips in flight from this process, then polls that engine until the clip
-is written. The MP4 keeps H3's audio track; the reward reads only its video stream.
+on the engine that took it, so rather than going through the router, this asks the router for its engines and sends
+each clip to the engine with the fewest unfinished jobs, then polls that engine until the clip is written. The engines
+count their own jobs, since each episode runs in a process of its own. The MP4 keeps H3's audio track; the reward reads
+only its video stream.
 
 Options come from ``AGENT_VIDEO_GEN_*`` env vars, as the env's own do:
 
@@ -16,6 +17,7 @@ Options come from ``AGENT_VIDEO_GEN_*`` env vars, as the env's own do:
 
 import asyncio
 import os
+import random
 
 import httpx
 
@@ -28,12 +30,8 @@ STEPS_ENV = "AGENT_VIDEO_GEN_NUM_INFERENCE_STEPS"
 # H3's canvases (sglang's MINIMAX_H3_FINITE_ASPECT_RATIOS); a request takes the one nearest its width over height.
 ASPECT_RATIOS = ("21:9", "16:9", "4:3", "1:1", "3:4", "9:16")
 SECONDS_RANGE = (4.0, 15.0)
-POLL_S = 0.5
-
-# Clips in flight per engine, shared by every generator in this process, since the env makes one per episode.
-_in_flight: dict[str, int] = {}
-_engines: dict[str, list[str]] = {}
-_engines_lock = asyncio.Lock()
+# A queued clip waits for every clip ahead of it, so a slow poll costs an episode at most this much and no throughput.
+POLL_S = 2.0
 
 
 def h3_prompt(prompt: str, num_references: int) -> str:
@@ -69,25 +67,32 @@ class H3ClipGenerator:
             raise ValueError(f"H3 makes {low:g} to {high:g} second clips, not {request.seconds:g}")
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
-                engine = min(await self._engines(client), key=lambda url: _in_flight.get(url, 0))
-                _in_flight[engine] = _in_flight.get(engine, 0) + 1
-                try:
-                    return await self._generate_on(client, engine, request)
-                finally:
-                    _in_flight[engine] -= 1
+                return await self._generate_on(client, await self._least_queued(client), request)
         except httpx.HTTPError as error:
             raise GeneratorUnavailable(f"an H3 engine failed: {error!r}") from error
 
-    async def _engines(self, client: httpx.AsyncClient) -> list[str]:
-        async with _engines_lock:
-            if not _engines.get(self.router_url):
-                response = await client.get(f"{self.router_url}/list_workers")
-                response.raise_for_status()
-                urls = response.json()["urls"]
-                if not urls:
-                    raise GeneratorUnavailable("the H3 router lists no engines")
-                _engines[self.router_url] = urls
-            return _engines[self.router_url]
+    async def _least_queued(self, client: httpx.AsyncClient) -> str:
+        response = await client.get(f"{self.router_url}/list_workers")
+        response.raise_for_status()
+        engines = response.json()["urls"]
+        if not engines:
+            raise GeneratorUnavailable("the H3 router lists no engines")
+        queues = await asyncio.gather(*(self._unfinished(client, engine) for engine in engines))
+        # Episodes that start together all see the same queues, so ties go to a random engine.
+        shortest = min(queues)
+        return random.choice([engine for engine, queue in zip(engines, queues, strict=True) if queue == shortest])
+
+    async def _unfinished(self, client: httpx.AsyncClient, engine: str) -> int:
+        """The engine's jobs not yet completed or failed; finished jobs are deleted, so few pages are live ones."""
+        count, after = 0, None
+        while True:
+            response = await client.get(f"{engine}/v1/videos", params={"limit": 100} | ({"after": after} if after else {}))
+            response.raise_for_status()
+            page = response.json()
+            count += sum(job["status"] not in ("completed", "failed") for job in page["data"])
+            if not page.get("has_more"):
+                return count
+            after = page["last_id"]
 
     async def _generate_on(self, client: httpx.AsyncClient, engine: str, request: ClipRequest) -> Clip:
         body = {
