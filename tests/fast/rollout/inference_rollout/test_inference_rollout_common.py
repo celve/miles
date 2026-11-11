@@ -181,3 +181,28 @@ class TestFailedGenerationHandsOverItsOutputStoreRefs:
             )
 
         assert list(take_dropped_refs()) == ["returned"]
+
+
+@pytest.mark.parametrize(
+    "rollout_id, evaluated", [(0, ["every", "scheduled"]), (4, ["every"]), (9, ["every", "scheduled"])]
+)
+async def test_a_dataset_with_rollout_ids_is_evaluated_only_at_those_rollouts(rollout_id, evaluated):
+    from miles.rollout.inference_rollout.inference_rollout_eval import run_eval_datasets
+    from miles.utils.eval_config import EvalDatasetConfig
+
+    datasets = [
+        EvalDatasetConfig(name="every", path="every.jsonl", n_samples_per_eval_prompt=1),
+        EvalDatasetConfig(name="scheduled", path="scheduled.jsonl", n_samples_per_eval_prompt=1, rollout_ids=[0, 9]),
+    ]
+    args = SimpleNamespace(**make_eval_args() | dict(eval_datasets=datasets))
+    cache = {
+        dataset.cache_key
+        + (args.hf_checkpoint, args.apply_chat_template, args.chat_template_path): SimpleNamespace(
+            samples=[Sample(prompt="p")]
+        )
+        for dataset in datasets
+    }
+
+    results = await run_eval_datasets(make_state(StampRecordingGenerate(), args=args), cache, rollout_id=rollout_id)
+
+    assert sorted(results) == evaluated
