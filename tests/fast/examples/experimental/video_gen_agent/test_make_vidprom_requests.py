@@ -64,6 +64,14 @@ def test_clean_strips_pika_flags_entities_and_a_prompt_prefix():
     assert clean("A dog runs, -neg &quot;blurry, ugly&quot; -camera zoom in") == "A dog runs"
     assert clean("Odin walks home --ar 9:16") == "Odin walks home"
     assert clean("a well-lit room with a high-backed chair") == "a well-lit room with a high-backed chair"
+    assert clean("a sage sits in the forest with peace--camera zoom out") == "a sage sits in the forest with peace"
+    assert clean("quick cuts of cities. Use more white and light blue.4k-gs 40") == (
+        "quick cuts of cities. Use more white and light blue.4k"
+    )
+    assert clean("a mermaid girl plays in the ocean, 16:9, motion 2") == "a mermaid girl plays in the ocean, 16:9"
+    assert clean("an old-style tram with a t-shirt vendor in slow motion") == (
+        "an old-style tram with a t-shirt vendor in slow motion"
+    )
 
 
 @pytest.mark.parametrize(

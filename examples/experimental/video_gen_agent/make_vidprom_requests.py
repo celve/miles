@@ -60,8 +60,13 @@ NSFW_WORDS = frozenset(
 )
 TEMPLATE_WORDS, MAX_TEMPLATE_SHARE = 6, 5
 MAX_JACCARD = 0.5
-# Pika's flags, which end a prompt: everything from the first one on is dropped.
-_FLAGS = re.compile(r"(?:^|[\s.,;:])-{1,2}\s?(?:neg|gs|ar|motion|camera|fps|seed|size|hide|style|v)\b.*", re.I | re.S)
+# Pika's flags, which end a prompt: everything from the first one on is dropped. A flag can follow a separator, or be
+# glued to the word before it when it has two dashes ("peace--camera") or a number ("4k-gs 40").
+_FLAG_NAMES = r"(?:neg|gs|ar|motion|camera|fps|seed|size|hide|style|v)\b"
+_FLAGS = re.compile(
+    rf"(?:(?:^|(?<=[\s.,;:]))-{{1,2}}\s?{_FLAG_NAMES}|--{_FLAG_NAMES}|-(?:gs|motion|fps|seed|ar)\s*\d|[\s,]+motion\s*\d+\s*$).*",
+    re.I | re.S,
+)
 _LEAD = re.compile(r"^\s*(?:prompt\s*:\s*)+", re.I)
 _MARKUP = re.compile(r"<[a-z/!]|https?://|www\.|[{}\[\]|`#@]|\\n", re.I)
 _WORD = re.compile(r"[a-z0-9']+")
