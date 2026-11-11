@@ -9,8 +9,9 @@ only, and never copied into this repository. A VidProM request is kept when it i
   words of English prose on one paragraph, with no markup, links or keyword list (most comma-separated parts a few
   words long);
 - below 0.1 on every Detoxify score VidProM ships, and free of the sexual and gore words in ``NSFW_WORDS``;
-- naming no person, by spaCy's named-entity tagger (when capitalized), by a multi-word name it tagged elsewhere in the pool, written in
-  any case, or by a capitalized proper noun WordNet knows as a particular person (this drops fictional names too);
+- naming no person, by spaCy's named-entity tagger (when capitalized), by a multi-word name it tagged elsewhere in the
+  pool, written in any case, or by a capitalized proper noun WordNet knows as a particular person (this drops fictional
+  names too);
 - not sharing its first or last six words with four other kept prompts (templates);
 - not opening as a writing task (``Write``, ``Compose``, ``Hello`` ...);
 - naming at least two subjects, or a subject, a setting and an action, where a subject is a noun phrase WordNet reads
