@@ -6,9 +6,10 @@ motion (``MovieGenVideoBenchWithTag.csv``, CC-BY-NC-4.0). Both are fetched at pr
 only, and never copied into this repository. A VidProM request is kept when it is rich enough for a 4-15 s clip:
 
 - after Pika's flags (``-gs 12 -motion 2 -neg ...``), leading packed tags and HTML entities are stripped, 25 to 120
-  words of English prose on one paragraph, with no markup, links or keyword list (most comma-separated parts a few words long);
+  words of English prose on one paragraph, with no markup, links or keyword list (most comma-separated parts a few
+  words long);
 - below 0.1 on every Detoxify score VidProM ships, and free of the sexual and gore words in ``NSFW_WORDS``;
-- naming no person, by spaCy's named-entity tagger, by a multi-word name it tagged elsewhere in the pool, written in
+- naming no person, by spaCy's named-entity tagger (when capitalized), by a multi-word name it tagged elsewhere in the pool, written in
   any case, or by a capitalized proper noun WordNet knows as a particular person (this drops fictional names too);
 - not sharing its first or last six words with four other kept prompts (templates);
 - not opening as a writing task (``Write``, ``Compose``, ``Hello`` ...);
@@ -166,7 +167,8 @@ def template_keys(text: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
 def persons(doc) -> list[tuple[str, ...]]:
     """The person names the tagger found, lower-cased, and each capitalized proper noun WordNet knows as a particular
     person (Columbus)."""
-    names = [tuple(words(ent.text)) for ent in doc.ents if ent.label_ == "PERSON"]
+    # A lower-case PERSON is mostly a misread noun ("a brown wolf"); the pool's names catch a lower-case real name.
+    names = [tuple(words(ent.text)) for ent in doc.ents if ent.label_ == "PERSON" and any(t.is_title for t in ent)]
     return names + [(t.lower_,) for t in doc if t.pos_ == "PROPN" and t.is_title and _is_person_name(t.lower_)]
 
 

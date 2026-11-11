@@ -30,10 +30,11 @@ def _request(rng: random.Random) -> str:
     person = rng.choice(_PEOPLE)
     c1, c2, c3 = rng.sample(_COLORS, 3)
     e1, e2 = rng.sample(_EXTRAS, 2)
+    c4 = rng.choice(_COLORS)
     return (
         f"A {c1} {a} {rng.choice(_ACTS)} a {c2} {b} {e1} through the {rng.choice(_PLACES)} while a {person} in a "
-        f"{c3} coat {rng.choice(_ACTS)} them {e2}, and the {b} then turns around as the light fades over the "
-        f"{rng.choice(_PLACES)}"
+        f"{c3} coat {rng.choice(_ACTS)} them {e2}, and the {b} then turns around as the {c4} sky {rng.choice(_ACTS)} "
+        f"the {rng.choice(_PLACES)}"
     )
 
 
@@ -134,12 +135,14 @@ def spacy_model():
 def test_tags_name_the_subjects_setting_actions_and_a_length(spacy_model):
     from examples.experimental.video_gen_agent.make_vidprom_requests import is_rich, tag
 
-    tags = tag(spacy_model("A red fox chases a white rabbit through a snowy forest, then an owl swoops down at night"))
+    tags = tag(
+        spacy_model("A red fox is chasing a white rabbit through a snowy forest, then an owl swoops down at night")
+    )
 
     assert tags["subjects"] == ["A red fox", "a white rabbit", "an owl"]
     assert tags["setting"] == "a snowy forest"
     assert tags["actions"] == ["chase", "swoop"]
-    assert tags["suggested_seconds"] == 8 and is_rich(tags)
+    assert tags["suggested_seconds"] == 7 and is_rich(tags)
     lone = tag(spacy_model("A cinematic shot of a lonely lighthouse, ultra detailed, 4k, beautiful lighting"))
     assert not is_rich(lone)
 
