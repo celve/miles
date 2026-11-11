@@ -429,6 +429,10 @@ def test_the_continuity_schedule_is_a_flag(monkeypatch, tmp_path, steps, rollout
     }
 
 
+def test_an_eval_only_run_evals_continuity_at_its_one_eval():
+    assert ScriptArgs(run_id="test", requests="vidprom", num_rollout=0).continuity_rollout_ids == [0]
+
+
 def test_compbench_runs_still_eval_both_sets_every_time(monkeypatch, tmp_path):
     config = _config(monkeypatch, tmp_path, requests="t2v-compbench")
 
@@ -443,6 +447,9 @@ def test_compbench_runs_still_eval_both_sets_every_time(monkeypatch, tmp_path):
         # --eval-interval 10 over 50 rollouts evals at 0, 9, 19, 29, 39 and 49.
         (dict(requests="vidprom", num_rollout=50, continuity_eval_steps="0,10,final"), r"rollouts \[10\] at which"),
         (dict(requests="vidprom", num_rollout=50, continuity_eval_steps="5,20,final"), r"rollouts \[5, 20\] at which"),
+        # 59 is on the cadence but past the last rollout, 49.
+        (dict(requests="vidprom", num_rollout=50, continuity_eval_steps="0,59,final"), r"rollouts \[59\] at which"),
+        (dict(requests="vidprom", num_rollout=0, continuity_eval_steps="0,9"), r"rollouts \[9\] at which"),
     ],
 )
 def test_a_bad_continuity_schedule_is_refused(script_args, message):

@@ -269,7 +269,10 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
                 rollout_id
                 for rollout_id in self.continuity_rollout_ids or []
                 if rollout_id != 0
-                and not should_run_periodic_action(rollout_id, self.eval_interval, num_rollout=self.num_rollout)
+                and not (
+                    rollout_id < self.num_rollout
+                    and should_run_periodic_action(rollout_id, self.eval_interval, num_rollout=self.num_rollout)
+                )
             ]
             assert not unreached, (
                 f"--continuity-eval-steps names rollouts {unreached} at which no eval runs; with --eval-interval "
