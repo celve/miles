@@ -127,6 +127,7 @@ def harbor_env_vars(args) -> dict[str, str]:
         "HARBOR_CUA_DESKTOP",
         "HARBOR_CUA_SETTLE_SEC",
         "HARBOR_CUA_SCREENSHOT_SIZE",
+        "HARBOR_CUA_CAPTURE_COMMAND",
         "HARBOR_CUA_KEEP_SCREENSHOTS",
         "HARBOR_AGENT_KWARGS",
         "HARBOR_VERIFIER_IMPORT_PATH",
