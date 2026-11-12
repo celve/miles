@@ -115,7 +115,12 @@ class RewardPoolClient:
         (infos,) = await asyncio.to_thread(
             provider.get_worker_infos, cell_ids=[reward_cell_id(self.name, cell_index=index)]
         )
-        if (handle := provider.get_handles_of_worker_infos(infos).get(name)) is None:
+        try:
+            handles = await asyncio.to_thread(provider.get_handles_of_worker_infos, infos)
+        except AssertionError as e:
+            # RayWorkerManager.get_actor_handle asserts when the cell went down or restarted after the infos were read.
+            raise WorkerUnreachableError(f"Reward worker {name} changed while it was looked up: {e}") from e
+        if (handle := handles.get(name)) is None:
             # The liveness scan tore the cell down, so the manager lists no worker for it.
             raise WorkerUnreachableError(f"Reward worker {name} has no live actor")
         return handle
