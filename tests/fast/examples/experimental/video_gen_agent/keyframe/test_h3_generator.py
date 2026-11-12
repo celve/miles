@@ -193,10 +193,40 @@ async def test_a_refused_job_says_why(h3):
         await H3ClipGenerator().generate(_request())
 
 
+async def test_first_and_last_frames_go_as_keyframes_before_the_references_which_alone_are_numbered(h3):
+    seen, _ = h3({})
+
+    await H3ClipGenerator().generate(_request(image_path="/k/open.png", last_image_path="/k/end.png"))
+
+    (_, body), _ = seen
+    assert body["task"] == "ref2va" and body["reference_resize_mode"] == "match"
+    assert body["conditions"] == [
+        {"type": "image", "role": "keyframe", "uri": "file:///k/open.png", "frame_index": 0},
+        {"type": "image", "role": "keyframe", "uri": "file:///k/end.png", "frame_index": -1},
+        {"type": "image", "role": "reference", "uri": "file:///assets/corgi.png"},
+        {"type": "image", "role": "reference", "uri": "file:///assets/ball.png"},
+    ]
+    assert body["prompt"].count("<Picture") == 2
+
+
+async def test_without_references_keyframes_make_an_fl2va_job_and_text_alone_a_t2va_one(h3):
+    seen, _ = h3({})
+
+    await H3ClipGenerator().generate(_request(reference_paths=(), last_image_path="/k/end.png"))
+    await H3ClipGenerator().generate(_request(reference_paths=()))
+
+    (_, fl2va), _, (_, t2va), _ = seen
+    assert (fl2va["task"], fl2va["prompt"]) == ("fl2va", "a corgi chases a ball")
+    assert fl2va["conditions"] == [
+        {"type": "image", "role": "keyframe", "uri": "file:///k/end.png", "frame_index": -1}
+    ]
+    assert (t2va["task"], t2va["prompt"], t2va["conditions"]) == ("t2va", "a corgi chases a ball", [])
+    assert "reference_resize_mode" not in fl2va and "reference_resize_mode" not in t2va
+
+
 @pytest.mark.parametrize(
     "fields, message",
     [
-        (dict(reference_paths=()), "needs at least one reference image"),
         (dict(seconds=2.0), "4 to 15 whole-second clips, not 2"),
         (dict(seconds=4.5), "4 to 15 whole-second clips, not 4.5"),
     ],

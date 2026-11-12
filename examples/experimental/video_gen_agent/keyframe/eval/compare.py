@@ -11,7 +11,8 @@ in at least 15 of 20 decided pairs against B0 (``--picks``, from ``blind.py unbl
 mode the agent trained in, the hub's revision) the one-shot arm of that mode, B0-i2v or B0-ref, takes B0's place in
 every condition, since an image-conditioned video is not fairly held to text-to-video; B0 is still reported, as a
 reference. ``--b1 B1-rewrite`` holds K to the untrained rewrite where Phase 0's trained B1 does not exist (LIN-2834).
-``--by-category`` adds the comparisons within each request category.
+``--by-category`` adds the comparisons within each request category. ``--ours`` compares another arm, such as one of the
+survey's (LIN-2864), against the same arms in K's place; the win bar is K's alone, so it is printed only for K.
 """
 
 import argparse
@@ -29,7 +30,7 @@ METRICS = {
 }
 # The one-shot arm the win bar holds K to, by the video mode the agent trained in.
 ONE_SHOT_ARMS = {"t2v": "B0", "i2v": "B0-i2v", "reference": "B0-ref"}
-AGAINST = ("B0", "B1", "B1-rewrite", "B0-i2v", "B0-ref", "K0", "K-blind")
+AGAINST = ("B0", "B1", "B1-rewrite", "B1-ref", "B0-i2v", "B0-ref", "K0", "K-blind")
 B1_ARMS = ("B1", "B1-rewrite")
 
 
@@ -56,16 +57,16 @@ def paired(ours: dict[str, float], theirs: dict[str, float]) -> dict:
     }
 
 
-def compare(rows: list[dict]) -> dict[str, dict[str, dict]]:
+def compare(rows: list[dict], ours: str = "K") -> dict[str, dict[str, dict]]:
     by_arm: dict[str, dict[str, dict]] = {}
     for row in rows:
         by_arm.setdefault(row["arm"], {})[row["request"]] = row
     results = {}
     for other in AGAINST:
-        if other in by_arm and "K" in by_arm:
+        if other in by_arm and ours in by_arm and other != ours:
             results[other] = {
                 name: paired(
-                    {r: metric(row) for r, row in by_arm["K"].items()},
+                    {r: metric(row) for r, row in by_arm[ours].items()},
                     {r: metric(row) for r, row in by_arm[other].items()},
                 )
                 for name, metric in METRICS.items()
@@ -101,9 +102,9 @@ def _all(*checks: bool | None) -> bool | None:
     return None if None in checks else all(checks)
 
 
-def table(results: dict) -> str:
+def table(results: dict, ours: str = "K") -> str:
     lines = [
-        "| K vs | metric | n | K mean | other mean | K wins | other wins | ties | sign p |",
+        f"| {ours} vs | metric | n | {ours} mean | other mean | {ours} wins | other wins | ties | sign p |",
         "|---|---|---|---|---|---|---|---|---|",
     ]
     for other, metrics in results.items():
@@ -127,16 +128,19 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--b1", choices=B1_ARMS, default="B1", help="the prompt-rewriting arm the win bar holds K to")
     parser.add_argument("--by-category", action="store_true", help="also compare within each request category")
+    parser.add_argument("--ours", default="K", help="the arm compared against the others (default K)")
     args = parser.parse_args(argv)
     rows = [json.loads(line) for path in args.scored for line in path.read_text().splitlines()]
-    results = compare(rows)
-    print(table(results))
-    picks = json.loads(args.picks.read_text()) if args.picks else None
-    for check, passed in win_bar(results, picks, mode=args.mode, b1=args.b1).items():
-        print(f"- {check}: {'pending' if passed is None else 'pass' if passed else 'fail'}")
+    results = compare(rows, args.ours)
+    print(table(results, args.ours))
+    if args.ours == "K":
+        picks = json.loads(args.picks.read_text()) if args.picks else None
+        for check, passed in win_bar(results, picks, mode=args.mode, b1=args.b1).items():
+            print(f"- {check}: {'pending' if passed is None else 'pass' if passed else 'fail'}")
     if args.by_category:
         for category in sorted({row["category"] for row in rows if row.get("category")}):
-            print(f"\n## {category}\n\n{table(compare([row for row in rows if row.get('category') == category]))}")
+            within = compare([row for row in rows if row.get("category") == category], args.ours)
+            print(f"\n## {category}\n\n{table(within, args.ours)}")
 
 
 if __name__ == "__main__":
