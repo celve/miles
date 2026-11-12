@@ -2396,6 +2396,7 @@ class TestSessionMessageMatcherArgument:
         [
             "strict",
             "loose_tool_call",
+            "loose_tool_call_ignore_reasoning",
             "role_content_only",
             "not_installed.matchers.same_message",
         ],
