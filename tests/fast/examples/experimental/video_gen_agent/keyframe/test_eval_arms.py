@@ -3,16 +3,18 @@ comparisons and the blind page."""
 
 import asyncio
 import json
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import torch
-from examples.experimental.video_gen_agent.generator import FakeClipGenerator, FakeImageGenerator
+from examples.experimental.video_gen_agent.generator import FakeClipGenerator, FakeImageGenerator, GeneratorUnavailable
 from examples.experimental.video_gen_agent.keyframe.eval import arms, blind, compare, score
 from examples.experimental.video_gen_agent.keyframe.run_qwen35_9b_keyframe import ScriptArgs
 from examples.experimental.video_gen_agent.phase0.reward import request_seed
-from miles.rollout.rm_hub.video.pairwise import anchor_name
 from PIL import Image
+
+from miles.rollout.rm_hub.video.pairwise import anchor_name
 
 av = pytest.importorskip("av")
 
@@ -114,6 +116,41 @@ def test_in_i2v_mode_k_blind_animates_the_agents_recorded_first_image(tmp_path, 
     assert by["K-blind", "a tv"]["prompt"] is None and "image_path" not in by["K-blind", "a tv"]
     t2v = next(r for r in arms.arm_prompts(["a fox"], {}, final) if r["arm"] == "K-blind")
     assert "image_path" not in t2v
+
+
+class _Flaky:
+    """Fails its first ``failures`` calls as an unavailable router does, then succeeds; records every request."""
+
+    def __init__(self, failures: int):
+        self.failures, self.requests = failures, []
+
+    async def generate(self, request):
+        self.requests.append(request)
+        if len(self.requests) <= self.failures:
+            raise GeneratorUnavailable("the generator's router failed: ReadError('')")
+        return SimpleNamespace(path=f"/made/{len(self.requests)}")
+
+
+def test_generate_retries_a_transient_failure_with_the_same_request():
+    rows = [
+        {
+            "arm": "B0-ref",
+            "request": "a fox",
+            "prompt": "a fox",
+            "image_prompt": "a fox",
+            "seed": 7,
+            "mode": "reference",
+        }
+    ]
+    image, clip = _Flaky(failures=2), _Flaky(failures=1)
+
+    (made,) = asyncio.run(arms.generate(rows, clip, image, retry_delay_s=0))
+
+    assert made["path"] == "/made/2" and made["reference_paths"] == ["/made/3"]
+    assert len(set(image.requests)) == 1 and len(image.requests) == 3
+    assert clip.requests[0] == clip.requests[1] and clip.requests[0].seed == 7
+    with pytest.raises(GeneratorUnavailable):
+        asyncio.run(arms.generate(rows, _Flaky(failures=arms.TRIES), _Flaky(failures=0), retry_delay_s=0))
 
 
 def test_generate_asks_the_env_generator_for_the_runs_clip_shape(tmp_path, monkeypatch):
@@ -562,7 +599,9 @@ def test_the_win_bar_can_hold_k_to_b1_rewrite_and_compare_splits_by_category(tmp
 
 def test_anchors_are_each_requests_one_shot_clip_placed_by_request_and_checked(tmp_path, monkeypatch, capsys):
     heldout = _heldout(tmp_path)
-    arms.main(["anchor-prompts", str(heldout), str(heldout), "--mode", "reference", "--out", str(tmp_path / "a.jsonl")])
+    arms.main(
+        ["anchor-prompts", str(heldout), str(heldout), "--mode", "reference", "--out", str(tmp_path / "a.jsonl")]
+    )
     rows = [json.loads(line) for line in (tmp_path / "a.jsonl").read_text().splitlines()]
     assert rows == [arms.one_shot_row(request, "reference") for request in REQUESTS]
     assert rows[0] == arms.arm_prompts(["a fox"], {}, {}, mode="reference")[-1]

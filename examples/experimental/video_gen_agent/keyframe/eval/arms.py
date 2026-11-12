@@ -57,7 +57,7 @@ from pathlib import Path
 import httpx
 import torch
 
-from examples.experimental.video_gen_agent.generator import ClipRequest, ImageRequest
+from examples.experimental.video_gen_agent.generator import ClipRequest, GeneratorUnavailable, ImageRequest
 from examples.experimental.video_gen_agent.keyframe.eval.compare import ONE_SHOT_ARMS
 from examples.experimental.video_gen_agent.phase0.make_planner_data import SYSTEM_PROMPT
 from examples.experimental.video_gen_agent.phase0.reward import planner_prompt, request_seed
@@ -65,6 +65,10 @@ from miles.rollout.rm_hub.video.pairwise import anchor_name
 from miles.utils.function_registry import load_function
 
 SHAPE = {"seconds": 2.0, "width": 832, "height": 480, "fps": 16}
+# A generator's router fails transiently under load (an httpx ReadError on the image router, LIN-2822); the arms gather
+# every row, so one such failure would otherwise end the whole run.
+TRIES = 4
+RETRY_DELAY_S = 15.0
 ANCHORS = "make them with python -m examples.experimental.video_gen_agent.keyframe.eval.anchors and the run's flags"
 
 
@@ -159,8 +163,25 @@ def _conditioned(mode: str, image_paths: list[str]) -> dict:
     return {"image_path": image_paths[0]} if mode == "i2v" else {"reference_paths": image_paths}
 
 
+async def _retried(generator, request, delay_s: float):
+    """The generator's output for ``request``, retrying GeneratorUnavailable with the same request, so a retried clip
+    is the same sample (prompt, seed, references) as a first attempt would have been."""
+    for attempt in range(TRIES):
+        try:
+            return await generator.generate(request)
+        except GeneratorUnavailable:
+            if attempt == TRIES - 1:
+                raise
+            await asyncio.sleep(delay_s * (attempt + 1))
+
+
 async def generate(
-    rows: list[dict], generator, image_generator=None, concurrency: int = 8, shape: dict | None = None
+    rows: list[dict],
+    generator,
+    image_generator=None,
+    concurrency: int = 8,
+    shape: dict | None = None,
+    retry_delay_s: float = RETRY_DELAY_S,
 ) -> list[dict]:
     shape = shape or SHAPE
     if image_generator is None and any(row.get("image_prompt") for row in rows):
@@ -172,17 +193,20 @@ async def generate(
             return row | {"path": None}
         async with semaphore:
             if row.get("image_prompt"):
-                image = await image_generator.generate(
+                image = await _retried(
+                    image_generator,
                     ImageRequest(
                         prompt=row["image_prompt"],
                         negative_prompt="",
                         seed=row["seed"],
                         width=shape["width"],
                         height=shape["height"],
-                    )
+                    ),
+                    retry_delay_s,
                 )
                 row = row | _conditioned(row["mode"], [image.path])
-            clip = await generator.generate(
+            clip = await _retried(
+                generator,
                 ClipRequest(
                     prompt=row["prompt"],
                     negative_prompt=row.get("negative_prompt") or "",
@@ -190,7 +214,8 @@ async def generate(
                     image_path=row.get("image_path"),
                     reference_paths=tuple(row.get("reference_paths") or ()),
                     **shape,
-                )
+                ),
+                retry_delay_s,
             )
         return row | {"path": clip.path}
 
@@ -308,7 +333,9 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "check-anchors":
         missing = missing_anchors([r for path in args.files for r in heldout_requests(path)], args.anchor_dir)
         if missing:
-            sys.exit(f"{len(missing)} requests have no anchor clip in {args.anchor_dir}, e.g. {missing[0]!r}; {ANCHORS}")
+            sys.exit(
+                f"{len(missing)} requests have no anchor clip in {args.anchor_dir}, e.g. {missing[0]!r}; {ANCHORS}"
+            )
     elif args.command == "prompts":
         rows = arm_prompts(
             heldout_requests(args.heldout),
