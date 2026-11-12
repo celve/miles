@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.distributed as dist
+from torch.multiprocessing import reductions
 
 from miles.backends.training_utils.weight_update.hf_weight_iterator import HfWeightIteratorBase
 from miles.backends.training_utils.weight_update.updater import WeightUpdater
@@ -42,11 +43,16 @@ def single_rank(tmp_path, monkeypatch):
     dist.init_process_group("gloo", init_method=f"file://{tmp_path}/pg", rank=0, world_size=1)
     monkeypatch.setattr(distributed_utils, "GLOO_GROUP", dist.new_group(backend="gloo"))
     monkeypatch.setattr(weight_sync, "get_physical_gpu_id", lambda: "GPU-test")
-    # The UUID reduction patch is process-wide and handles only CUDA tensors.
+    # The UUID reduction patch is process-wide and handles only CUDA tensors; an earlier test may have applied it.
     monkeypatch.setattr(weight_sync, "monkey_patch_torch_reductions", lambda: None)
+    patched_reduce = reductions.reduce_tensor
+    reductions.reduce_tensor = getattr(reductions, "_reduce_tensor_original", patched_reduce)
+    reductions.init_reductions()
     monkeypatch.setattr(torch.cuda, "ipc_collect", lambda: None)
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
     yield
+    reductions.reduce_tensor = patched_reduce
+    reductions.init_reductions()
     dist.destroy_process_group()
 
 
