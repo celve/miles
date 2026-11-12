@@ -58,6 +58,7 @@ class _Cluster:
         self.generation = [0] * num_workers
         self.dead: set[int] = set()
         self.torn_down: set[int] = set()
+        self.goes_down_during_lookup: set[int] = set()
         self.calls: list[tuple[int, list[str]]] = []
         self.operations: list[tuple[str, str]] = []
 
@@ -71,6 +72,11 @@ class _Cluster:
         handles = {}
         for name in infos:
             _, cell_index, _ = parse_worker_name(name)
+            if cell_index in self.goes_down_during_lookup:
+                self.goes_down_during_lookup.discard(cell_index)
+                self.torn_down.add(cell_index)
+                # What ray.get raises for RayWorkerManager._find_actor's assertion, a RayTaskError(AssertionError).
+                raise AssertionError("matches=[]")
             handles[name] = _Handle(self, cell_index, self.generation[cell_index])
         return handles
 
@@ -175,6 +181,17 @@ async def test_a_worker_torn_down_before_its_first_call_is_restarted_by_that_cal
     client = _client(cluster, _config())
     await client.ensure_healthy()
     cluster.torn_down.add(0)
+
+    scores = await client.score([None] * 2, ["ab", "c"])
+
+    assert scores == [2.0, 1.0]
+    assert cluster.operations == [("suspend", "reward-pickscore-00000"), ("resume", "reward-pickscore-00000")]
+
+
+async def test_a_worker_torn_down_between_its_two_lookup_reads_is_restarted():
+    cluster = _Cluster(num_workers=2)
+    client = _client(cluster, _config())
+    cluster.goes_down_during_lookup.add(0)
 
     scores = await client.score([None] * 2, ["ab", "c"])
 
