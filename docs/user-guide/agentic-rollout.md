@@ -147,7 +147,6 @@ the agent function returned. A failed call the agent retried successfully does
 not count, and a 4xx, whether the engine's context-length error or the session
 rejecting the request, is the policy's own outcome.
 
-
 ### What the session URL accepts
 
 The session server trains only on what it records, so it refuses what it cannot record instead of passing it through. An agent framework or CLI pointed at `base_url` must fit these rules; where it does not by default, the agent function configures it.
@@ -159,7 +158,6 @@ The session server trains only on what it records, so it refuses what it cannot 
 - **Matcher and picker.** A recipe names its `--session-message-matcher` when its client re-serializes tool-call arguments or drops `reasoning_content` ([Choose replay matching](#choose-replay-matching)), and its `--session-sample-picker-path` when the client makes side calls, such as title requests, that cannot be turned off. A picker is specific to a harness.
 - **Sampling.** The rollout owns sampling: pass `request_kwargs` through, and keep the client from setting its own `temperature`, `top_p` or `top_k`. A training request whose temperature differs from the session's, or whose `top_p` or `top_k` is bounded without sampling-support replay, is HTTP 400.
 - **Other traffic.** Turn the client's telemetry and tracing off. A model the client uses for anything other than the policy, such as a judge or a memory model, goes to another endpoint, not to `base_url`.
-
 
 ### Where the agent runs
 
