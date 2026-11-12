@@ -12,6 +12,7 @@ from miles.router.backend import RouterKind
 from miles.utils.args.configs.algo import AlgoConfig
 from miles.utils.args.configs.backend_fields import TrainerBackendTraitConfig
 from miles.utils.args.configs.data import DataConfig
+from miles.utils.args.configs.reward_model import RewardModelRolloutOnlyConfig
 from miles.utils.args.configs.rollout import RolloutRelatedConfig, RolloutRelatedRolloutOnlyConfig
 
 _HOOKS = {
@@ -116,6 +117,8 @@ _UNREAD = {
         *("rollout_data_yaml_config", "rollout_data_reset_on_load"),
         *("multimodal_token_space_processing", "shared_media_dir"),
     ],
+    # The text converter applies this token-length penalty; the diffusion converter has no tokens to penalize.
+    RewardModelRolloutOnlyConfig: ["length_penalty_coeff", "length_penalty_min_tokens"],
     RolloutRelatedRolloutOnlyConfig: [
         "max_seq_len",
         "rollout_max_prompt_len",

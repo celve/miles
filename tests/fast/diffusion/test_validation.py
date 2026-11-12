@@ -206,6 +206,7 @@ def test_a_parsed_diffusion_run_derives_its_batch_size_from_steps_per_rollout():
         (dict(multimodal_keys={"image": "img"}), "--multimodal-keys"),
         (dict(rollout_data_yaml_config="mix.yaml"), "--rollout-data-yaml-config"),
         (dict(multimodal_token_space_processing=True), "--multimodal-token-space-processing"),
+        (dict(length_penalty_coeff=0.1), "--length-penalty-coeff"),
     ],
 )
 def test_a_text_flag_the_diffusion_path_never_reads_is_rejected(override, flag):
@@ -216,6 +217,11 @@ def test_a_text_flag_the_diffusion_path_never_reads_is_rejected(override, flag):
 def test_a_parsed_fp16_run_is_pointed_at_the_diffusion_dtype():
     with pytest.raises(ValueError, match="--fp16.*--diffusion-forward-dtype"):
         _parse_diffusion_run("--global-batch-size", "64", "--fp16")
+
+
+def test_a_parsed_length_penalty_run_is_rejected():
+    with pytest.raises(ValueError, match="--length-penalty-coeff"):
+        _parse_diffusion_run("--global-batch-size", "64", "--length-penalty-coeff", "0.1")
 
 
 def test_the_shared_loop_save_sentinel_stays_accepted():
