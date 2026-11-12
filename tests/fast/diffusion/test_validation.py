@@ -22,7 +22,7 @@ def _supported(**overrides):
     recipe = dict(
         train_backend="fsdp",
         colocate=True,
-        use_miles_router=True,
+        router="miles",
         rollout_batch_size=8,
         n_samples_per_prompt=16,
         global_batch_size=64,
@@ -51,7 +51,7 @@ def test_the_recipe_layout_passes_and_resolves_the_family_defaults():
         (dict(train_backend="megatron"), "fsdp"),
         (dict(colocate=False), "colocate"),
         (dict(rollout_num_gpus_per_engine=2), "several GPUs"),
-        (dict(use_miles_router=False), "router"),
+        (dict(router="sglang"), "router"),
         (dict(advantage_estimator="ppo"), "critic"),
         (dict(ref_load="/ref"), "reference"),
         (dict(use_kl_loss=True), "reference"),

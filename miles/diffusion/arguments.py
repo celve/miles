@@ -8,6 +8,7 @@ starts, rather than failing inside one.
 from miles.backends.fsdp_utils.arguments import FSDPArgs
 from miles.backends.sglang_utils.sglang_api_client import WorkerType
 from miles.diffusion.train.pipeline_config import get_train_pipeline_config, resolve_model_family
+from miles.router.backend import RouterKind
 from miles.utils.args.configs.algo import AlgoConfig
 from miles.utils.args.configs.backend_fields import TrainerBackendTraitConfig
 from miles.utils.args.configs.data import DataConfig
@@ -27,7 +28,7 @@ _UNSUPPORTED = [
         "engines spanning several GPUs (--rollout-num-gpus-per-engine > 1)",
         lambda a: a.rollout_num_gpus_per_engine != 1,
     ),
-    ("a router other than --use-miles-router", lambda a: not a.use_miles_router),
+    ("a router other than --router miles", lambda a: a.router != RouterKind.MILES),
     ("an advantage estimator other than grpo, including a critic", lambda a: a.advantage_estimator != "grpo"),
     (
         "a separate reference model or token KL (--ref-load, --use-kl-loss, --kl-coef)",
