@@ -39,7 +39,13 @@ from miles.rollout.session.samples.merge import (
     truncate_samples_by_total_tokens,
 )
 from miles.rollout.session.store_refs import response_store_ref
-from miles.rollout.session.token_space import check_engine_prompt, engine_token_ids, lcp_len, store_message_media
+from miles.rollout.session.token_space import (
+    check_engine_prompt,
+    engine_token_ids,
+    lcp_len,
+    prepare_engine_request,
+    store_message_media,
+)
 from miles.rollout.session.types import GetSessionResponse, SessionRecord
 from miles.utils.output_store.plan import StorePlanError
 
