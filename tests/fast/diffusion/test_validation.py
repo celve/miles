@@ -204,6 +204,8 @@ def test_a_parsed_diffusion_run_derives_its_batch_size_from_steps_per_rollout():
         (dict(attn_implementation="sdpa"), "--attn-implementation"),
         (dict(apply_chat_template=True), "--apply-chat-template"),
         (dict(multimodal_keys={"image": "img"}), "--multimodal-keys"),
+        (dict(rollout_data_yaml_config="mix.yaml"), "--rollout-data-yaml-config"),
+        (dict(multimodal_token_space_processing=True), "--multimodal-token-space-processing"),
     ],
 )
 def test_a_text_flag_the_diffusion_path_never_reads_is_rejected(override, flag):

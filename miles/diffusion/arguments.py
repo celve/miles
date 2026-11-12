@@ -111,6 +111,9 @@ _UNREAD = {
         # --apply-chat-template-kwargs only acts with --apply-chat-template, and its parser default is not the model's.
         *("apply_chat_template", "chat_template_path"),
         *("multimodal_keys", "tool_key"),
+        # The mixer replaces --data-source-path after this validation runs, which would drop the diffusion prompts.
+        *("rollout_data_yaml_config", "rollout_data_reset_on_load"),
+        *("multimodal_token_space_processing", "shared_media_dir"),
     ],
     RolloutRelatedRolloutOnlyConfig: [
         "max_seq_len",
