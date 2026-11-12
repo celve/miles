@@ -13,6 +13,7 @@ symlink, that non-path sources are written once by content hash, and the rejecti
 import base64
 import io
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image
@@ -23,7 +24,9 @@ from miles.utils.media_refs import (
     has_message_media,
     materialize_media_ref,
     materialize_message_media,
+    release_run_media,
     rollout_media_payload,
+    run_media_dir,
 )
 
 
@@ -144,6 +147,26 @@ def test_video_refs_reach_the_engine_payload(tmp_path):
     )
 
     assert rollout_media_payload(multimodal_inputs) == {"video_data": [str(video)]}
+
+
+def test_run_media_is_written_under_the_run_and_released_without_touching_shared_paths(tmp_path):
+    shared = tmp_path / "dataset.png"
+    shared.write_bytes(_png_bytes("red"))
+    args = SimpleNamespace(shared_media_dir=str(tmp_path / "media"), run_uuid="run-1")
+
+    written = materialize_media_ref(_png_bytes("blue"), run_media_dir(args))
+    kept = materialize_media_ref(str(shared), run_media_dir(args))
+    assert Path(written).is_relative_to(tmp_path / "media" / "run-1")
+
+    release_run_media(args)
+    assert not Path(written).exists()
+    assert Path(kept).is_file()
+
+
+def test_runs_without_a_shared_media_dir_have_no_run_media():
+    args = SimpleNamespace(shared_media_dir=None, run_uuid="run-1")
+    assert run_media_dir(args) is None
+    release_run_media(args)
 
 
 def test_message_media_become_shared_paths_and_text_messages_stay_as_they_are(tmp_path):
