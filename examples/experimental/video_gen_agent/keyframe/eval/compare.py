@@ -30,7 +30,7 @@ METRICS = {
 }
 # The one-shot arm the win bar holds K to, by the video mode the agent trained in.
 ONE_SHOT_ARMS = {"t2v": "B0", "i2v": "B0-i2v", "reference": "B0-ref"}
-AGAINST = ("B0", "B1", "B1-rewrite", "B0-i2v", "B0-ref", "K0", "K-blind")
+AGAINST = ("B0", "B1", "B1-rewrite", "B1-ref", "B0-i2v", "B0-ref", "K0", "K-blind")
 B1_ARMS = ("B1", "B1-rewrite")
 
 

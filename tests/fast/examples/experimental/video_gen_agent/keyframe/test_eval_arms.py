@@ -790,3 +790,29 @@ def test_compare_holds_any_arm_against_the_baselines_and_keeps_the_win_bar_for_k
     out = capsys.readouterr().out
     assert "| bo3 vs | metric |" in out and "| B0-ref | reward | 6 |" in out and "win" not in out.split("\n")[-2]
     assert "beats" not in out
+
+
+def test_b1_ref_renders_the_rewrite_as_b0_ref_renders_the_raw_request(tmp_path, monkeypatch):
+    rewrites = {"a fox": "<think>x</think> A red fox trots through snow."}
+    rows = arms.arm_prompts(["a fox", "a tv"], None, {}, mode="reference", rewrites=rewrites)
+    by = {(row["arm"], row["request"]): row for row in rows}
+    monkeypatch.setenv("AGENT_VIDEO_GEN_FAKE_DIR", str(tmp_path / "made"))
+
+    b0_ref, b1_ref = asyncio.run(
+        arms.generate([by["B0-ref", "a fox"], by["B1-ref", "a fox"]], FakeClipGenerator(), FakeImageGenerator())
+    )
+
+    assert ("B1-ref", "a tv") not in by and "B1-ref" not in {
+        r["arm"] for r in arms.arm_prompts(["a fox"], None, {}, rewrites=rewrites)
+    }
+    image = _made(b1_ref["reference_paths"][0])
+    assert (image["prompt"], image["seed"]) == (
+        "A red fox trots through snow.",
+        _made(b0_ref["reference_paths"][0])["seed"],
+    )
+    asked = json.loads(open(b1_ref["path"]).read())
+    assert (asked["prompt"], asked["reference_paths"], asked["seed"]) == (
+        "A red fox trots through snow.",
+        b1_ref["reference_paths"],
+        request_seed("a fox"),
+    )

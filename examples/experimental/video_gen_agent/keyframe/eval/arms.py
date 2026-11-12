@@ -8,6 +8,9 @@
   B1       Phase 0's trained planner prompt (LIN-2737's ``answer99``) → the video model, for VBench's requests only
   B1-rewrite  the untrained planner's one-turn rewrite of the request (``rewrite``: Phase 0's system prompt, no images,
            no thinking, greedy) → the video model; Phase 0's checkpoint is gone, so this stands in for B1 on new requests
+  B1-ref   in reference mode, that rewrite as B0-ref takes the raw request: one image of it, as the video model's
+           reference, with the rewrite as the prompt; on an h3-ref run it shares K's video model, where B1-rewrite's
+           text-to-video cannot (FastH3 Omni makes reference-to-video only), so it isolates the better prompt (LIN-2864)
   K0, K    the keyframe agent at its step-0 and final eval: the video request its episode submitted (prompt, negative
            prompt, and in i2v or reference mode the images), read from the run's eval dumps and generated again
   K-blind  the final agent's first image prompt → the video model, with no image watched; with ``--mode i2v``, the
@@ -162,6 +165,9 @@ def arm_prompts(
             paths = [image["path"] for image in images] if mode == "reference" else [images[0]["path"]]
             rows[-1] |= _conditioned(mode, paths)
         rows.append(one_shot_row(request, mode))
+        if mode == "reference" and prompts.get("B1-rewrite") is not None:
+            rewritten = prompts["B1-rewrite"]
+            rows.append(rows[-1] | {"arm": "B1-ref", "prompt": rewritten, "image_prompt": rewritten})
     return rows
 
 
