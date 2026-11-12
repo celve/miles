@@ -60,6 +60,35 @@ def test_the_ocr_scorer_counts_distinct_unrequested_lines_over_sampled_frames(tm
     assert scorer._ocr.frames == [(48, 64, 3)] * 4
 
 
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "a chalkboard with the words of a poem",
+        "a neon sign above the bar",
+        "the company logo on a cloud with AWS icons",
+        "a banner that says welcome home",
+        "a t shirt printed in a modern font",
+    ],
+    ids=["text words", "signage", "logo or icon", "quoting verb", "print or font"],
+)
+def test_a_request_that_asks_for_text_is_not_read(tmp_path, request_text):
+    _write_clip(tmp_path / "clip.mp4", num_frames=9)
+    scorer = object.__new__(ocr.VideoOcrScorer)
+    scorer.num_frames, scorer.min_confidence, scorer.min_chars, scorer._ocr = 4, 0.8, 2, _Reader("Data Pigeline")
+
+    assert scorer.score_batch([str(tmp_path / "clip.mp4")], [request_text]) == [0.0]
+    assert scorer._ocr.frames == []
+
+
+@pytest.mark.parametrize("request_text", ["A panda drinking coffee", "a signal fire on a hill"])
+def test_a_caption_of_the_request_still_counts_without_a_text_cue(tmp_path, request_text):
+    _write_clip(tmp_path / "clip.mp4", num_frames=9)
+    scorer = object.__new__(ocr.VideoOcrScorer)
+    scorer.num_frames, scorer.min_confidence, scorer.min_chars, scorer._ocr = 4, 0.8, 2, _Reader("A PANDA DRINKING")
+
+    assert scorer.score_batch([str(tmp_path / "clip.mp4")], [request_text]) == [1.0]
+
+
 def test_unified_reward_reads_the_alignment_its_model_writes(tmp_path):
     _write_clip(tmp_path / "clip.mp4", num_frames=12)
     replies = iter(["Alignment Score (1-5): 3.25\nPhysics Score (1-5): 2\nStyle Score (1-5): 4", "I cannot judge."])

@@ -2,8 +2,10 @@
 is how many distinct lines it reads that the request does not ask for, so a planner gains nothing by drawing the
 request's words into the video.
 
-A request asks for text only by quoting it; a line counts when its letters and digits are not in the request's
-quoted text, it has at least `min_chars` of them, and PaddleOCR is at least `min_confidence` sure of it.
+A request that asks for text with a word in `TEXT_CUES` ("a logo", "a sign that says ...") scores 0 without being
+read, since PaddleOCR misreads the asked-for words and the scene's other lettering (LIN-2863). Otherwise a request
+asks for text only by quoting it; a line counts when its letters and digits are not in the request's quoted text,
+it has at least `min_chars` of them, and PaddleOCR is at least `min_confidence` sure of it.
 """
 
 import re
@@ -16,6 +18,11 @@ from miles.diffusion.rollout.pickscore import sample_frame_indices
 from miles.rollout.rm_hub.video.clip import Clip, score_clips
 
 _QUOTED = re.compile(r"\"([^\"]*)\"|“([^”]*)”")
+TEXT_CUES = re.compile(
+    r"\b(text|texts|words?|letters?|lettering|signs?|signage|logos?|icons?|labels?|captions?|titled?|posters?|"
+    r"banners?|billboards?|says|saying|reads|written|writing|typography|font|slogan|headline|message|printed)\b",
+    re.IGNORECASE,
+)
 
 
 class VideoOcrScorer:
@@ -31,6 +38,8 @@ class VideoOcrScorer:
         return score_clips(outputs, prompts, self._score)
 
     def _score(self, clip: Clip, request: str) -> float:
+        if TEXT_CUES.search(request):
+            return 0.0
         lines = [(text, confidence) for _, text, confidence in self.read(clip)]
         return float(
             len(unrequested_lines(lines, request, min_confidence=self.min_confidence, min_chars=self.min_chars))
