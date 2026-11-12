@@ -218,6 +218,14 @@ def validate_diffusion_args(args) -> None:
             f"--loss-type {args.loss_type} keeps an EMA of one adapter, but family {config.model_family} trains "
             f"the components {list(config.components)}"
         )
+    if (
+        args.diffusion_guidance_scale_2 is not None
+        and args.diffusion_guidance_scale <= 1.0 < args.diffusion_guidance_scale_2
+    ):
+        raise ValueError(
+            "the engine runs classifier-free guidance only when --diffusion-guidance-scale is above 1, so "
+            f"--diffusion-guidance-scale-2 {args.diffusion_guidance_scale_2} would never be read"
+        )
 
 
 def validate_diffusion_batch_size(args) -> None:

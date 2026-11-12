@@ -349,6 +349,16 @@ def test_the_second_guidance_scale_is_required_exactly_by_a_family_that_guides_w
         validate_diffusion_args(_supported(diffusion_guidance_scale_2=3.0))
 
 
+def test_a_second_guidance_scale_is_rejected_when_the_first_disables_guidance(two_experts):
+    validate_diffusion_args(
+        _supported(
+            **(two_experts | _GLOBAL_STEPS | dict(diffusion_guidance_scale=1.0, diffusion_guidance_scale_2=1.0))
+        )
+    )
+    with pytest.raises(ValueError, match="--diffusion-guidance-scale-2 3.0 would never be read"):
+        validate_diffusion_args(_supported(**(two_experts | _GLOBAL_STEPS | dict(diffusion_guidance_scale=1.0))))
+
+
 _PICKSCORE = dict(
     rm_type="pickscore",
     diffusion_pickscore_model_path="/models/PickScore_v1",
