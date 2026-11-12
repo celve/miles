@@ -4472,6 +4472,10 @@ class TestMultimodalTokenSpaceProcessingArgs:
                 "multimodal_token_space_processing": True,
                 "rollout_external_engine_addrs": None,
                 "custom_inference_engine_provider_path": None,
+                "trainer_mm_processor_worker_num": 1,
+                "trainer_mm_io_worker_num": 0,
+                "hf_checkpoint": "/ckpt",
+                "train_backend": "megatron",
                 "use_session_server": False,
                 "use_miles_router": False,
                 **overrides,
@@ -4492,6 +4496,7 @@ class TestMultimodalTokenSpaceProcessingArgs:
     def test_settings_the_trainer_cannot_follow_are_rejected(self, engine_overrides, external_engines, match):
         args = SimpleNamespace(
             multimodal_token_space_processing=True,
+            use_session_server=None,
             rollout_external_engine_addrs=external_engines,
             custom_inference_engine_provider_path=None,
             trainer_mm_processor_worker_num=1,
@@ -4509,6 +4514,7 @@ class TestMultimodalTokenSpaceProcessingArgs:
         """torchtitan has no consumer of multimodal_train_inputs, so it would train on placeholder tokens alone."""
         args = SimpleNamespace(
             multimodal_token_space_processing=True,
+            use_session_server=None,
             rollout_external_engine_addrs=None,
             custom_inference_engine_provider_path=None,
             hf_checkpoint="/ckpt",
@@ -4521,6 +4527,7 @@ class TestMultimodalTokenSpaceProcessingArgs:
     def test_supported_settings_pass(self):
         args = SimpleNamespace(
             multimodal_token_space_processing=True,
+            use_session_server=None,
             rollout_external_engine_addrs=None,
             custom_inference_engine_provider_path=None,
             trainer_mm_processor_worker_num=1,
@@ -4536,6 +4543,7 @@ class TestMultimodalTokenSpaceProcessingArgs:
         processor the trainer builds for the actor engines' samples."""
         args = SimpleNamespace(
             multimodal_token_space_processing=True,
+            use_session_server=None,
             rollout_external_engine_addrs=None,
             custom_inference_engine_provider_path=None,
             trainer_mm_processor_worker_num=1,
@@ -4578,6 +4586,7 @@ class TestMultimodalTokenSpaceProcessingArgs:
         """The trainer builds one processor, so two engine groups with different settings cannot both be mirrored."""
         args = SimpleNamespace(
             multimodal_token_space_processing=True,
+            use_session_server=None,
             rollout_external_engine_addrs=None,
             custom_inference_engine_provider_path=None,
             trainer_mm_processor_worker_num=1,
@@ -4615,6 +4624,7 @@ class TestMultimodalTokenSpaceProcessingArgs:
     def test_a_custom_inference_engine_provider_is_rejected(self):
         args = SimpleNamespace(
             multimodal_token_space_processing=True,
+            use_session_server=None,
             rollout_external_engine_addrs=None,
             custom_inference_engine_provider_path="my.provider.fn",
             trainer_mm_processor_worker_num=1,

@@ -116,7 +116,7 @@ def materialize_message_media(messages: list[dict[str, Any]], media_dir: str | N
             out.append(message)
             continue
         parts = []
-        for part in content:
+        for part in message["content"]:
             if (media := _media_source(part)) is None:
                 parts.append(part)
                 continue
