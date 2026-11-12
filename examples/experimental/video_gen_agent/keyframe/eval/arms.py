@@ -26,7 +26,9 @@ untrained planner (``--base-url``), makes images with ``AGENT_VIDEO_GEN_IMAGE_GE
   bo3       three keyframes of the raw request, the first at B0-ref's seed so it is B0-ref's own; the planner watches
             them and picks one, which goes to the video model as B0-ref's does, with the raw request as the prompt
   end-key   the planner writes a first frame, a last frame and a video prompt (dynamic-attribute and motion-binding
-            requests only); the image model renders both frames and the clip starts and ends on them
+            requests only); the image model renders both frames and the clip starts and ends on them. FastH3 Omni
+            takes keyframes only beside a reference, so the first frame is also the clip's one reference, as B0-ref's
+            keyframe is
 
 Every arm takes Phase 0's per-request seed and the run's clip shape (832x480, by default 2 s at 16 fps: 33 frames;
 ``generate --seconds 4 --fps 24`` for an ``h3-ref`` run), so arms differ only in what the generator is asked; K0 and K keep the clip and seed their episode made as ``episode_path`` and
@@ -409,6 +411,7 @@ async def keyframes(
             first, last = await asyncio.gather(image(plan["first"], seed), image(plan["last"], seed))
             return row | {
                 "prompt": plan["video"],
+                "reference_paths": [first],
                 "image_path": first,
                 "last_image_path": last,
                 "frame_prompts": [plan["first"], plan["last"]],

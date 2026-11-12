@@ -738,11 +738,15 @@ def test_end_key_renders_the_planners_first_and_last_frames_for_dynamic_and_moti
         ("a green leaf", seed),
         ("a red leaf", seed),
     ]
-    assert leaf["prompt"] == "the leaf turns red" and "reference_paths" not in leaf
+    assert (leaf["prompt"], leaf["reference_paths"]) == ("the leaf turns red", [leaf["image_path"]])
     assert (car["request"], car["prompt"], car["planner_answer"]) == ("a car drives left", None, "no idea")
     (made, _) = asyncio.run(arms.generate([leaf, car], FakeClipGenerator()))
     asked = json.loads(open(made["path"]).read())
-    assert (asked["image_path"], asked["last_image_path"]) == (leaf["image_path"], leaf["last_image_path"])
+    assert (asked["image_path"], asked["last_image_path"], asked["reference_paths"]) == (
+        leaf["image_path"],
+        leaf["last_image_path"],
+        [leaf["image_path"]],
+    )
 
 
 def test_a_pick_or_an_end_key_plan_the_planner_garbles_is_recorded_as_none():
