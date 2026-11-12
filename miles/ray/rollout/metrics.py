@@ -50,7 +50,7 @@ def log_eval_rollout_data(rollout_id, args, data, extra_metrics: dict[str, Any] 
             log_dict |= dict_add_prefix(
                 compute_pass_rate(
                     flat_rewards=rewards,
-                    group_size=args.n_samples_per_eval_prompt,
+                    group_size=_eval_samples_per_prompt(args, key),
                 ),
                 f"eval/{key}-",
             )
@@ -62,6 +62,13 @@ def log_eval_rollout_data(rollout_id, args, data, extra_metrics: dict[str, Any] 
     tracking.log(args, log_dict, step_key="eval/step")
 
     return log_dict
+
+
+def _eval_samples_per_prompt(args, key: str) -> int:
+    return next(
+        (cfg.n_samples_per_eval_prompt for cfg in args.eval_datasets or [] if cfg.name == key),
+        args.n_samples_per_eval_prompt,
+    )
 
 
 def log_eval_skip(rollout_id, args, reason: str):
@@ -88,6 +95,8 @@ def log_rollout_data(
 
     log_dict = {**(rollout_extra_metrics or {})}
     log_dict |= dict_add_prefix(_compute_metrics_from_samples(args, samples), "rollout/")
+    # training only: an eval jsonl may carry its own `dataset_name` field
+    log_dict |= dict_add_prefix(_compute_dataset_metrics(args, samples), "rollout/")
     log_dict |= dict_add_prefix(_compute_perf_metrics_from_samples(args, samples, rollout_time), "perf/")
     if args.log_passrate:
         log_dict |= dict_add_prefix(
@@ -113,6 +122,7 @@ def _compute_metrics_from_samples(args, samples):
     log_dict |= dict_add_prefix(compute_statistics(response_lengths), "response_len/")
     log_dict |= _compute_zero_std_metrics(args, samples)
     log_dict |= _compute_spec_metrics(args, samples)
+    log_dict |= _compute_session_tree_metrics(samples)
     log_dict |= _compute_prefix_cache_metrics(args, samples)
     log_dict |= _compute_reward_cat_metrics(args, samples)
     log_dict["repetition_frac"] = np.mean([int(has_repetition(s.response)) for s in samples]).item()
@@ -161,10 +171,9 @@ def _compute_metrics_from_samples(args, samples):
 
 
 def _get_rollout_key(sample: Sample, position: int) -> tuple[str, int | None, int]:
-    if sample.rollout_id is not None:
-        return ("rollout", sample.group_index, sample.rollout_id)
-    if sample.index is not None:
-        return ("sample", sample.group_index, sample.index)
+    if sample.episode_id is not None:
+        kind, value = sample.episode_id
+        return (kind, sample.group_index, value)
     return ("position", sample.group_index, position)
 
 
@@ -315,13 +324,15 @@ def _compute_zero_std_metrics(args, all_samples: list[Sample]):
 
     def _is_zero_std(samples: list[Sample]):
         rewards = [sample.get_reward_value(args) for sample in samples]
+        if any(reward is None for reward in rewards):
+            return False
         return len(rewards) == 0 or all(rewards[0] == r for r in rewards)
 
     all_sample_groups = group_by(all_samples, lambda s: s.group_index)
     interesting_sample_groups = [g for g in all_sample_groups.values() if _is_zero_std(g)]
 
     uniform_rewards = [g[0].get_reward_value(args) for g in interesting_sample_groups]
-    interesting_rewards = [str(round(reward, 1)) for reward in uniform_rewards]
+    interesting_rewards = [str(round(reward, 1)) for reward in uniform_rewards if reward is not None]
 
     counts = {reward: len(items) for reward, items in group_by(interesting_rewards).items()}
     log_dict = {f"zero_std/count_{reward}": count for reward, count in counts.items()}
@@ -360,6 +371,31 @@ def _compute_spec_metrics(args, all_samples: list[Sample]):
     }
 
 
+def _compute_session_tree_metrics(all_samples: list[Sample]) -> dict[str, float]:
+    trees = {
+        carrier["session_id"]: carrier["metrics"]["tree"]
+        for sample in all_samples
+        if (carrier := sample.metadata.get(SESSION_ROLLOUT_METRICS_KEY)) is not None
+    }
+    if not trees:
+        return {}
+    log_dict = {
+        "session/roots_per_episode": np.mean([tree["roots"] for tree in trees.values()]).item(),
+        "session/leaves_per_episode": np.mean([tree["leaves"] for tree in trees.values()]).item(),
+    }
+    multi_turn = [tree for tree in trees.values() if tree["turns"] > 1]
+    if multi_turn:
+        split = sum(1 for tree in multi_turn if tree["roots"] == tree["turns"])
+        log_dict["session/one_turn_per_root_ratio"] = split / len(multi_turn)
+        if split * 2 > len(multi_turn):
+            logger.warning(
+                f"{split}/{len(multi_turn)} multi-turn sessions opened a new root on every turn, so each sample "
+                "holds one turn: the agent does not replay history as --session-message-matcher accepts it. "
+                "See 'Choose replay matching' in docs/user-guide/agentic-rollout.md."
+            )
+    return log_dict
+
+
 def _compute_prefix_cache_metrics(args, all_samples: list[Sample]):
     num_samples = len(all_samples)
     metrics = {}
@@ -369,6 +405,27 @@ def _compute_prefix_cache_metrics(args, all_samples: list[Sample]):
     metrics["prefix_cache_hit_rate"] = total_cached_tokens / total_prompt_tokens if total_prompt_tokens > 0 else 0.0
     metrics["avg_cached_tokens_per_sample"] = total_cached_tokens / num_samples
     return metrics
+
+
+def _compute_dataset_metrics(args, all_samples: list[Sample]) -> dict[str, float | int]:
+    """Reward, length and truncation per `--rollout-data-yaml-config` dataset."""
+    # only the mixer's own tag counts; a single-dataset row may carry an arbitrary `dataset_name` field
+    if args.rollout_data_yaml_config is None:
+        return {}
+    log_dict = {}
+    samples_of_dataset = group_by(
+        [s for s in all_samples if isinstance(s.metadata, dict) and "dataset_name" in s.metadata],
+        lambda s: s.metadata["dataset_name"],
+    )
+    for name, samples in samples_of_dataset.items():
+        dataset_metrics = _compute_training_sample_metrics(args, samples)
+        dataset_metrics["response_len/mean"] = np.mean([s.effective_response_length for s in samples]).item()
+        # status, not a length cap: a sample stopped by a lower per-sample budget counts too
+        dataset_metrics["truncated_ratio"] = np.mean(
+            [int(s.status == Sample.Status.TRUNCATED) for s in samples]
+        ).item()
+        log_dict |= dict_add_prefix(dataset_metrics, f"dataset/{name}/")
+    return log_dict
 
 
 def _compute_reward_cat_metrics(args, all_samples: list[Sample]):

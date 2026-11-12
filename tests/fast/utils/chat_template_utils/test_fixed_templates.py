@@ -36,6 +36,7 @@ _EXPECTED_FIXED_TEMPLATES = {
         {"preserve_thinking": True},
     ),
     TITOTokenizerType.QWENNEXT: ("qwen3_thinking_2507_and_next_fixed.jinja", {"clear_thinking": False}),
+    TITOTokenizerType.QWEN3_VL: (None, {}),
     TITOTokenizerType.GLM47: (None, {"clear_thinking": False}),
     TITOTokenizerType.GLM53: (None, {"clear_thinking": False, "enable_thinking": True}),
     TITOTokenizerType.NEMOTRON3: (None, {"truncate_history_thinking": False}),
@@ -44,9 +45,10 @@ _EXPECTED_FIXED_TEMPLATES = {
     TITOTokenizerType.MINIMAX_M25: ("minimax_m25_fixed.jinja", {"clear_thinking": False}),
     TITOTokenizerType.MINIMAX_M27: ("minimax_m27_fixed.jinja", {"clear_thinking": False}),
     TITOTokenizerType.DEEPSEEKV32: (None, {"drop_thinking": False}),
-    TITOTokenizerType.DEEPSEEKV4: (None, {"drop_thinking": False}),
-    TITOTokenizerType.DEEPSEEKV41: (None, {"drop_thinking": False}),
+    TITOTokenizerType.DEEPSEEKV4: (None, {}),
+    TITOTokenizerType.DEEPSEEKV41: (None, {}),
     TITOTokenizerType.INKLING: ("inkling_fixed.jinja", {}),
+    TITOTokenizerType.MUSE_SPARK: ("muse_spark_fixed.jinja", {}),
 }
 
 

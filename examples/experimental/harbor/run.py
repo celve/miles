@@ -58,10 +58,12 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     daytona_api_key_file: str = os.environ.get("DAYTONA_API_KEY_FILE", "")
     e2b_api_key_file: str = os.environ.get("E2B_API_KEY_FILE", "")
     modal_config_file: str = os.environ.get("MODAL_CONFIG_PATH", "")
+    novita_api_key_file: str = os.environ.get("NOVITA_API_KEY_FILE", "")
 
     # The host agents outside the cluster reach every session server on; passed as
     # --session-server-external-host, which also keeps the session servers on the head node.
     session_server_external_host: str = ""
+    agent_worker: str = ""
     miles_host_ip: str = os.environ.get("MILES_HOST_IP", "")
 
     # W&B settings
@@ -159,6 +161,7 @@ def execute(args: ScriptArgs):
         tito_model="glm47",
         session_server_workers=32,
         session_server_external_host=args.session_server_external_host,
+        agent_worker=args.agent_worker,
     )
     misc_args = (
         "--attention-dropout 0.0 "
@@ -186,7 +189,7 @@ def execute(args: ScriptArgs):
 
     extra_env_vars = {
         "PYTHONPATH": ":".join([args.megatron_path, *agentic_pythonpath_dirs(), str(command_utils.repo_base_dir)]),
-        **harbor_env_vars(args),
+        **harbor_env_vars(args, agent_worker=bool(args.agent_worker)),
     }
     if args.miles_host_ip:
         extra_env_vars["MILES_HOST_IP"] = args.miles_host_ip

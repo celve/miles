@@ -300,7 +300,7 @@ def test_cross_user_turn_thinking_prefix_mismatch(chat_template, enable_thinking
 # allowed_append_roles no longer participates in template resolution. Each
 # family/shape cell must either remain append-only or match its fixed-template
 # rejection contract.
-# DeepSeek V3.2/V4 ride the encoder bridge and are covered in their own files.
+# DeepSeek V3.2 / V4 / V4.1 ride the chat_template_utils.deepseek bridge and are covered in their own files.
 
 _APPEND_ROLE_FAMILIES = [
     (TITOTokenizerType.QWEN3, None),
@@ -309,6 +309,7 @@ _APPEND_ROLE_FAMILIES = [
     (TITOTokenizerType.QWEN38_SMALL, None),
     (TITOTokenizerType.QWEN4_EXP, None),
     (TITOTokenizerType.QWENNEXT, None),
+    (TITOTokenizerType.QWEN3_VL, "Qwen/Qwen3-VL-2B-Instruct"),
     (TITOTokenizerType.GLM47, "zai-org/GLM-4.7-Flash"),
     (TITOTokenizerType.GLM53, "zai-org/GLM-5.3"),
     (TITOTokenizerType.GLM53, "zai-org/GLM-5.3-Flash"),

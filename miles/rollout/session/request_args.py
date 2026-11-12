@@ -11,11 +11,14 @@ resolved request as ``turn_args``. A continuation supplies that history to the
 model resolver, which decides which fields inherit or must stay compatible.
 """
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
 import orjson
+from jinja2 import TemplateError
 
 from miles.rollout.generate_utils.rollout_topk_logprobs import configure_rollout_topk_logprobs_request
 from miles.rollout.generate_utils.sampling_mask import validate_sampling_support_request
@@ -44,6 +47,16 @@ def parse_chat_request(body: bytes) -> dict[str, Any]:
         raise MessageValidationError(f"invalid JSON body: {e}") from e
 
 
+@contextmanager
+def chat_template_errors_as_validation_errors() -> Iterator[None]:
+    try:
+        yield
+    except (TypeError, TemplateError, ValueError) as e:
+        if isinstance(e, ValueError) and not isinstance(e.__cause__, TemplateError):
+            raise
+        raise MessageValidationError(f"the chat template cannot render this request: {e}") from e
+
+
 @dataclass(frozen=True)
 class ClientResponseIntent:
     """What the client's own request asked the response to carry.
@@ -55,6 +68,8 @@ class ClientResponseIntent:
 
     stream: bool
     logprobs: bool
+    # The server asks for the expanded prompt of a request with media (token_space).
+    prompt_token_ids: bool = False
 
 
 @dataclass
@@ -65,6 +80,9 @@ class PreparedChatRequest:
     body: dict[str, Any]
     template_args: dict[str, Any]
     response_intent: ClientResponseIntent
+    # The rendered prompt in TITO's form, set by a session that then rewrites ``body["input_ids"]`` into the
+    # engine's form for a request with media (token_space.prepare_engine_request).
+    prompt_token_ids: list[int] | None = None
 
 
 def prepare_chat_request(
@@ -85,6 +103,11 @@ def prepare_chat_request(
     edit nested values in place, except ``messages``. They are most of the request, no rule
     resolves them, and they become the turn's recorded history, so they are shared read-only.
     """
+    if client_args.get("n") not in (None, 1):
+        raise MessageValidationError(
+            f"n={client_args['n']!r} is not supported: a session records one choice per request, "
+            "so send separate requests instead"
+        )
     owned_args = {key: value if key == "messages" else deepcopy(value) for key, value in client_args.items()}
     request_args, response_intent = resolve_request_args_by_config(owned_args, config, evaluation=evaluation)
     apply_session_sampling_defaults(request_args, sampling_defaults or {}, evaluation=evaluation)
@@ -151,6 +174,7 @@ def resolve_request_args_by_config(
     """
     # the client's own value decides whether its reply carries logprobs
     client_logprobs = bool(request_args.get("logprobs"))
+    client_prompt_token_ids = bool(request_args.get("return_prompt_token_ids"))
     # TITO needs these on every request: agent-side overrides would break token accumulation.
     request_args["logprobs"] = True
     request_args["return_meta_info"] = True
@@ -189,6 +213,12 @@ def resolve_request_args_by_config(
             f"routed_experts_start_len={value!r} is not accepted: R3 offsets are computed by the session server"
         )
     request_args.pop("routed_experts_start_len", None)
+    if (value := request_args.get("mm_token_expansion_start_len")) is not None:
+        raise MessageValidationError(
+            f"mm_token_expansion_start_len={value!r} is not accepted: media expansion offsets are computed by the "
+            "session server"
+        )
+    request_args.pop("mm_token_expansion_start_len", None)
     if (value := request_args.get("logprob_start_len")) is not None:
         raise MessageValidationError(
             f"logprob_start_len={value!r} is not accepted: not supported on the session chat path"
@@ -203,4 +233,6 @@ def resolve_request_args_by_config(
         raise MessageValidationError("chat_template_kwargs must be an object")
     if kwargs is not None and "tools" in kwargs:
         raise MessageValidationError("tools belongs at the top level of the request, not in chat_template_kwargs")
-    return request_args, ClientResponseIntent(stream=client_stream, logprobs=client_logprobs)
+    return request_args, ClientResponseIntent(
+        stream=client_stream, logprobs=client_logprobs, prompt_token_ids=client_prompt_token_ids
+    )

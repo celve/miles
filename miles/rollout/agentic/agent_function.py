@@ -1,4 +1,4 @@
-"""Call a custom agent function on the rollout loop or in a child process of its own.
+"""Call a custom agent function on the rollout loop, in a child process of its own, or in one on an agent worker.
 
 Every sample's agent function runs concurrently in the rollout process. On one
 event loop, a synchronous step in one episode (a large response to parse, a slow
@@ -23,16 +23,33 @@ from collections.abc import Awaitable, Callable
 from typing import Any, BinaryIO, NoReturn
 
 from miles.rollout.agentic import rollout_limits
+from miles.rollout.agentic.errors import InfraAbort, RemoteTraceback
+from miles.rollout.agentic.per_call_worker import StartFn, call_on_started_worker
+from miles.rollout.agentic.remote import SECRET_ENV_VAR, SECRET_FILE_ENV_VAR, call_on_worker
+from miles.utils.function_registry import load_function
 from miles.utils.logging_utils import configure_logger_raw
+from miles.utils.retry_utils import NonRetryableError
+
+__all__ = [
+    "AGENT_FUNCTION_MODES",
+    "InfraAbort",
+    "call_agent_function",
+    "cancel_calls",
+    "has_calls",
+    "report_to_caller",
+    "resolve_worker",
+    "rollout_abort_scope",
+]
 
 logger = logging.getLogger(__name__)
 
-AGENT_FUNCTION_MODES = ("subproc", "inline")
+AGENT_FUNCTION_MODES = ("subproc", "inline", "worker")
 
 # A cancelled agent gets this long to run its own cleanup (closing its sandbox) before its process exits.
 _CANCEL_GRACE_S = 120.0
 # Once the call is over, cleanup the agent left running (a thread closing a sandbox) gets this long.
 _LEFTOVER_CLEANUP_S = 600.0
+_ABORT_WAIT_S = 30.0
 
 # the child takes the rollout's import path before it imports anything from miles
 _CHILD_BOOTSTRAP = (
@@ -69,16 +86,7 @@ class _ResultPipe:
 # set in a ``subproc`` agent process only (see report_to_caller)
 _result_pipe: _ResultPipe | None = None
 
-
-class _RemoteTraceback(Exception):
-    """The agent process's traceback, chained under the error it raised, as concurrent.futures does."""
-
-    def __init__(self, tb: str):
-        super().__init__(tb)
-        self.tb = tb
-
-    def __str__(self) -> str:
-        return self.tb
+_calls: dict[asyncio.Task, dict[str, Any]] = {}
 
 
 def report_to_caller(item: Any) -> bool:
@@ -97,13 +105,92 @@ async def call_agent_function(
     *,
     mode: str,
     on_child_reports: Callable[[list[Any]], None] | None = None,
+    worker: str | None = None,
+    extra_env: dict[str, str] | None = None,
+    abort_scope: str | None = None,
     **kwargs: Any,
 ) -> Any:
-    """Await ``fn(**kwargs)`` on this loop (``inline``) or in a child process of its own (``subproc``).
+    """Await ``fn(**kwargs)`` on this loop (``inline``), in a child process of its own (``subproc``), or in one on
+    the agent worker ``worker`` names (``worker``, see ``resolve_worker`` and ``miles.rollout.agentic.worker``).
 
-    Under ``subproc``, ``on_child_reports`` receives each item the agent sends with ``report_to_caller``."""
+    Under ``subproc`` and ``worker``, ``on_child_reports`` receives each item the agent sends with
+    ``report_to_caller``, and ``extra_env`` is added to the agent process's environment. In every mode, a
+    ``cancel_calls`` that reaches ``abort_scope`` cancels the call, which then raises ``InfraAbort("Cancelled")``
+    however the agent ended."""
+    task = asyncio.ensure_future(_place(fn, mode, worker, on_child_reports, extra_env, kwargs))
+    call = _calls[task] = {"scope": abort_scope, "aborted": False}
+    try:
+        result = await task
+    except asyncio.CancelledError:
+        if not call["aborted"] or asyncio.current_task().cancelling():
+            raise
+    except Exception:
+        if not call["aborted"]:
+            raise
+    finally:
+        del _calls[task]
+    if call["aborted"]:
+        raise InfraAbort("Cancelled", "a rollout abort cancelled this agent call")
+    return result
+
+
+def has_calls() -> bool:
+    return bool(_calls_on_this_loop())
+
+
+def _calls_on_this_loop() -> dict[asyncio.Task, dict[str, Any]]:
+    loop = asyncio.get_running_loop()
+    return {task: call for task, call in list(_calls.items()) if task.get_loop() is loop}
+
+
+async def cancel_calls(scope: str | None = None) -> int:
+    """Cancel this loop's calls in ``scope`` (every call when None) and wait, within a bound, until their tasks have
+    ended; return how many. A cancelled ``subproc`` task ends once its child has SIGTERM, not once the child exits."""
+    calls = {
+        task: call for task, call in _calls_on_this_loop().items() if scope is None or call["scope"] in (None, scope)
+    }
+    for task, call in calls.items():
+        call["aborted"] = True
+        task.cancel()
+    if calls:
+        await asyncio.wait(list(calls), timeout=_ABORT_WAIT_S)
+    return len(calls)
+
+
+def rollout_abort_scope(args) -> str:
+    return f"{args.sglang_router_ip}:{args.sglang_router_port}"
+
+
+def resolve_worker(worker: str | None) -> str | StartFn:
+    """What ``--custom-agent-function-worker`` names: a fixed agent worker's URL, or a start function that starts one
+    for each call."""
+    if not worker:
+        raise NonRetryableError("--custom-agent-function-mode worker needs --custom-agent-function-worker")
+    if worker.startswith(("http://", "https://")):
+        return worker
+    try:
+        return load_function(worker, sync_required=True)
+    except Exception as exc:
+        raise NonRetryableError(
+            f"--custom-agent-function-worker must be an http(s) URL or a start function's module.fn, got {worker!r}: "
+            f"{exc!r}"
+        ) from exc
+
+
+async def _place(
+    fn: Callable[..., Awaitable[Any]],
+    mode: str,
+    worker: str | None,
+    on_child_reports: Callable[[list[Any]], None] | None,
+    extra_env: dict[str, str] | None,
+    kwargs: dict[str, Any],
+) -> Any:
     if mode == "inline":
         return await fn(**kwargs)
+    if mode == "worker":
+        target = resolve_worker(worker)
+        call = call_on_worker if isinstance(target, str) else call_on_started_worker
+        return await call(target, fn, kwargs, env=extra_env or {}, on_child_reports=on_child_reports)
     # pickled before the process starts, so an unpicklable argument fails here
     call = pickle.dumps(sys.path) + pickle.dumps((fn, kwargs, _CANCEL_GRACE_S, _LEFTOVER_CLEANUP_S))
     proc = await asyncio.create_subprocess_exec(
@@ -113,7 +200,15 @@ async def call_agent_function(
         str(os.getpid()),
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
-        env={**os.environ, rollout_limits.SCOPE_ENV_VAR: rollout_limits.current_scope()},
+        env={
+            name: value
+            for name, value in {
+                **os.environ,
+                rollout_limits.SCOPE_ENV_VAR: rollout_limits.current_scope(),
+                **(extra_env or {}),
+            }.items()
+            if name not in (SECRET_ENV_VAR, SECRET_FILE_ENV_VAR)
+        },
     )
     try:
         await _send_call(proc, call)
@@ -176,7 +271,7 @@ def _unpack_outcome(output: bytes) -> Any:
     if outcome[0] == "ok":
         return outcome[1]
     _, error, child_traceback = outcome
-    raise error from _RemoteTraceback(f'\n"""\n{child_traceback}"""')
+    raise error from RemoteTraceback(f'\n"""\n{child_traceback}"""')
 
 
 def _child_main(parent_pid: int) -> None:

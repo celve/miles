@@ -123,6 +123,17 @@ class DataBuffer(ABC):
     def load_state_dict(self, state: Any) -> None:
         raise NotImplementedError(f"{type(self).__name__} must implement load_state_dict() for checkpointing")
 
+    def admits(self, *, in_flight: int) -> bool:
+        """Whether the producer may submit one more group while ``in_flight`` groups are generating.
+
+        Asked again whenever a group finishes, a get() starts, or a group goes to the unused handler.
+        """
+        return True
+
+    def drop_saved_state(self, state: Any, *, reason: str) -> None:
+        """Instead of ``load_state_dict``: record the saved groups as dropped, e.g. after a data source reset."""
+        raise NotImplementedError(f"{type(self).__name__} must implement drop_saved_state() for a data reset")
+
 
 # ============================= one policy buffer ==============================
 
@@ -167,9 +178,9 @@ class DefaultDataBuffer(DataBuffer):
         self._dynamic_filter = load_function(args.dynamic_sampling_filter_path)
         self._cond = asyncio.Condition()
         self._current_version: int | None = None
+        self._get_pending = False
 
         self._metric_gatherer = MetricGatherer()
-        self._metric_aborted_groups = 0
         self._metric_stale_groups = 0
         self._metric_consumed_staleness: list[int] = []
         self._metric_selected_newest_lag: list[int] = []
@@ -192,7 +203,7 @@ class DefaultDataBuffer(DataBuffer):
     def _preput_filter(self, input: DataBufferInput) -> bool:
         output = apply_aborted_filter(self._args, input.group)
         if not output.keep:
-            self._metric_aborted_groups += 1
+            self._metric_gatherer.on_dynamic_filter_drop(reason=output.reason)
             # Before the handler: a retry resets the prompt group, plans included.
             record_dropped_samples([input.prompt_group, input.group])
             self._unused_handler_fn(input.prompt_group, UnusedReason.ABORTED)
@@ -219,6 +230,13 @@ class DefaultDataBuffer(DataBuffer):
         return True
 
     async def get(self, *, num_groups: int, current_version: int | None = None, **_) -> list[DataBufferInput]:
+        self._get_pending = True
+        try:
+            return await self._take(num_groups=num_groups, current_version=current_version)
+        finally:
+            self._get_pending = False
+
+    async def _take(self, *, num_groups: int, current_version: int | None) -> list[DataBufferInput]:
         if current_version is not None:
             self._current_version = current_version
         async with self._cond:
@@ -296,11 +314,23 @@ class DefaultDataBuffer(DataBuffer):
             else:
                 self._buffer.append(entry)
 
+    def admits(self, *, in_flight: int) -> bool:
+        if not self._args.async_submit_within_staleness:
+            return True
+        # get() hands out groups in completion order, one weight version per call, so a group that enters the
+        # buffer is trained at most max_weight_staleness versions later.
+        window = self._args.max_weight_staleness + int(self._get_pending)
+        return len(self._buffer) + in_flight < window * self._args.rollout_batch_size
+
+    def drop_saved_state(self, state: list[DataBufferInput], *, reason: str) -> None:
+        record_dropped_samples([[entry.prompt_group, entry.group] for entry in state])
+        samples = [sample for entry in state for sample in entry.prompt_group]
+        SampleOwnershipRecorder.log_dropped_samples(args=self._args, samples=samples, reason=reason)
+
     def get_metrics(self, trainer_model_id: str | None = None) -> dict[str, float]:
         prefix = "rollout/fully_async/"
         metrics = {
             f"{prefix}queue_size": len(self._buffer),
-            f"{prefix}aborted_groups_filtered": self._metric_aborted_groups,
             f"{prefix}stale_groups_filtered": self._metric_stale_groups,
             **self._metric_gatherer.collect(),
         }
@@ -336,7 +366,7 @@ class DefaultDataBuffer(DataBuffer):
         self._metric_selected_versioned_tokens = 0
         self._metric_selected_samples = 0
         self._metric_selected_versioned_samples = 0
-        self._metric_aborted_groups = self._metric_stale_groups = 0
+        self._metric_stale_groups = 0
         return metrics
 
 
@@ -377,6 +407,9 @@ class DefaultMultiDataBuffer(DataBuffer):
         return []
 
     def load_state_dict(self, state: Any) -> None:
+        logger.warning(MULTI_POLICY_CHECKPOINT_UNSUPPORTED)
+
+    def drop_saved_state(self, state: Any, *, reason: str) -> None:
         logger.warning(MULTI_POLICY_CHECKPOINT_UNSUPPORTED)
 
     def _inner_of(self, trainer_model_id: str | None) -> DataBuffer:

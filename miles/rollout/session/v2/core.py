@@ -14,7 +14,7 @@ from miles.rollout.session.core import (
     _chat_client_response,
     _render_json,
     _samples_response,
-    extract_completion,
+    extract_flagged_completion,
     proxy_result_to_response,
 )
 from miles.rollout.session.errors import OutputStoreContractError, SessionNotFoundError, TokenizationError
@@ -49,6 +49,7 @@ class SessionCoreV2(SessionCore):
         *,
         use_addition_r3=False,
         output_store=None,
+        image_token_counter=None,
     ):
         super().__init__(
             backend,
@@ -57,6 +58,7 @@ class SessionCoreV2(SessionCore):
             session_server_instance_id,
             use_addition_r3=use_addition_r3,
             output_store=output_store,
+            image_token_counter=image_token_counter,
         )
         # Import-path only in production: function_registry is process-local.
         self.sample_picker = load_function(config.session_sample_picker_path, sync_required=True)
@@ -78,6 +80,7 @@ class SessionCoreV2(SessionCore):
         metadata["max_trim_tokens"] = self.registry.tito_tokenizer.max_trim_tokens
         metadata["tree"] = tree_metadata(session)
         metadata["turn_args"] = filter_turn_args(latest.turn_args) if latest is not None else {}
+        metadata["last_model_call_failed"] = session.last_model_call_failed
         return metadata
 
     async def get_session(self, session_id: str) -> Response:
@@ -178,8 +181,9 @@ class SessionCoreV2(SessionCore):
             return _samples_response(encode_samples([], metadata, empty_reason="all_truncated", fields=fields))
         # Hooks may inspect or mutate session metadata, so publish the
         # authoritative server-owned value only at the wire boundary.
-        if self.config.sglang_speculative_algorithm is not None:
-            metadata[SESSION_ROLLOUT_METRICS_KEY] = build_session_rollout_metrics(session_id, session.tree.nodes)
+        metadata[SESSION_ROLLOUT_METRICS_KEY] = build_session_rollout_metrics(
+            session_id, session.tree, with_spec_info=self.config.sglang_speculative_algorithm is not None
+        )
         response = _samples_response(encode_samples(samples, metadata, fields=fields))
         session.store_refs.hand_over(samples)
         return response
@@ -204,7 +208,7 @@ class SessionCoreV2(SessionCore):
             if session.closing:
                 raise SessionNotFoundError(f"session not found: session_id={session_id}")
 
-            client_args = parse_chat_request(body)
+            client_args = self._store_message_media(parse_chat_request(body))
             prepared, attach_parent = prepare_token_ids_and_request_args(
                 session,
                 client_args,
@@ -218,8 +222,11 @@ class SessionCoreV2(SessionCore):
             prompt_token_ids = request_body["input_ids"]
             logger.debug("Using TITO input_ids: %d tokens", len(prompt_token_ids))
 
-            checkpoint_token_ids = attach_parent.token_ids if attach_parent is not None else []
-            self._maybe_request_addition_r3(request_body, checkpoint_token_ids, prompt_token_ids)
+            self._prepare_engine_request(
+                request_body,
+                checkpoint_token_ids=attach_parent.token_ids if attach_parent is not None else [],
+                checkpoint_record=attach_parent.record if attach_parent is not None else None,
+            )
             _add_session_extra_key(request_body, session)
 
             # orjson: the body carries the whole prompt's input_ids on every turn.
@@ -233,12 +240,14 @@ class SessionCoreV2(SessionCore):
         )
         await self._take_store_ref(session, request_body, result)
 
+        completion = extract_flagged_completion(session, result)
         # Non-200 (e.g. 400 context too long) passes through unrecorded so the
         # agent can retry or handle the error.
-        if result["status_code"] != 200:
+        if completion is None:
             return proxy_result_to_response(result)
 
-        response, choice, assistant_message, completion_token_ids = extract_completion(result)
+        response, choice, assistant_message, completion_token_ids = completion
+        self._check_engine_prompt(request_body, choice)
         assistant_message = tito_tokenizer.postprocess_completion(
             choice=choice,
             assistant_message=assistant_message,

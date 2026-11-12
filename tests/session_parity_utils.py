@@ -26,6 +26,7 @@ from miles.rollout.generate_utils.openai_endpoint_utils import OpenAIEndpointTra
 from miles.rollout.session.samples.codec import SamplesReply
 from miles.rollout.session.server import SessionServer
 from miles.rollout.session.types import SessionServerInstance
+from miles.rollout.session.v2.metrics import SESSION_ROLLOUT_METRICS_KEY
 from miles.utils import http_utils
 from miles.utils.http_utils import find_available_port
 from miles.utils.test_utils.uvicorn_thread_server import UvicornThreadServer
@@ -136,7 +137,7 @@ async def _run_and_collect(
                     }
                 )
                 generate_input = GenerateFnInput(
-                    state=SimpleNamespace(args=args),
+                    state=SimpleNamespace(args=args, aborted=False),
                     sample=input_sample,
                     sampling_params={
                         "model": hf_checkpoint,
@@ -201,8 +202,14 @@ def assert_agentic_retry_trajectory_parity(v1: SessionParityRun, v2: SessionPari
         assert v1.samples[0].metadata[key] == value
         assert v2.samples[0].metadata[key] == value
     assert v1.samples[0].metadata["max_trim_tokens"] == v2.session_metadata["max_trim_tokens"]
+    assert isinstance(v1.samples[0].metadata["session_id"], str)
+    assert isinstance(v2.samples[0].metadata["session_id"], str)
 
-    v2_linear_metadata = {key: value for key, value in v2.session_metadata.items() if key not in ("agent", "tree")}
+    v2_linear_metadata = {
+        key: value
+        for key, value in v2.session_metadata.items()
+        if key not in ("agent", "tree", SESSION_ROLLOUT_METRICS_KEY)
+    }
     _assert_bits_equal(v1.session_metadata, v2_linear_metadata, path="session_metadata")
     assert_sample_bitwise_equal(
         v1.samples[0],
@@ -251,6 +258,8 @@ def _serve_session(*, backend_url: str, hf_checkpoint: str, version: str) -> Ite
         rollout_temperature=1.0,
         pause_generation_mode="retract",
         session_server_ip="127.0.0.1",
+        sglang_router_ip="127.0.0.1",
+        sglang_router_port=port,
         session_server_instances=[SessionServerInstance(addr=session_addr, instance_id=instance_id)],
         save_debug_trajectory_data=None,
         custom_agent_function_path="miles.utils.test_utils.session_verify_agent.run_agent",
@@ -289,6 +298,10 @@ def _training_metadata_projection(metadata: dict[str, Any]) -> dict[str, Any]:
     projected = deepcopy(metadata)
     projected.pop("leaf", None)
     projected.pop("max_trim_tokens", None)
+    # each path opens its own session, so the ids differ by construction
+    if "session_id" in projected:
+        projected["session_id"] = "<session>"
+    projected.pop(SESSION_ROLLOUT_METRICS_KEY, None)
     lifecycle = projected.get("lifecycle")
     if lifecycle is not None:
         segments = lifecycle if isinstance(lifecycle, list) else [lifecycle]

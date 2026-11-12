@@ -16,16 +16,25 @@ stateless `/generate` interface.
 
 <Warning>
 
-**No VLM support yet.** Currently the TITO session path cannot carry image or video inputs. For vision-language models, use the
-[Generate Endpoint](/user-guide/generate-endpoint) path instead.
+**Media need `--multimodal-token-space-processing` and `--use-miles-router`.** With them, a chat request may carry images, audio or video
+parts (data URLs or shared paths). The server writes each item once under the run's directory in
+`--shared-media-dir`, which is removed when the run ends, named by content, and stores the path in the session.
+TITO renders one placeholder per item. Each turn sends the stored turns as the
+expanded IDs SGLang returned for them, sets `mm_token_expansion_start_len` to their length, and SGLang expands the
+placeholders after it. The collected sample carries the expanded tokens and the media paths
+(`multimodal_inputs`); the trainer rebuilds the processor inputs from them. Without the flag, a request with
+media is refused with a 400. With `--tito-model qwen3_vl`, the server counts each new image's tokens and refuses a
+turn whose expanded prompt differs from its own expansion. The retry picker compares the prompts' media as well as
+their tokens. Needs an SGLang whose chat endpoint keeps the message media of an `input_ids`
+request at `mm_token_expansion_start_len` 0.
 
 </Warning>
 
 ## Configure the wrapper
 
 Select `agentic_tool_call.generate` as the custom generate function. The wrapper
-registers `--custom-agent-function-path` and `--max-seq-len`, creates a TITO
-session for each rollout, invokes your agent, and collects the resulting samples.
+creates a TITO session for each rollout, invokes the function named by
+`--custom-agent-function-path`, and collects the resulting samples.
 
 ```bash
 AGENTIC_ARGS=(
@@ -81,10 +90,74 @@ async def run_agent(base_url, prompt, request_kwargs, metadata, **kwargs):
 - `metadata` contains the sample metadata, session identifiers, and configured
   `max_seq_len`. Forward only the fields your environment needs.
 - Return a dictionary to merge rewards, reports, or metrics into each output
-  sample's metadata, or return `None` when there is nothing to add.
+  sample's metadata, or return `None` when there is nothing to add. Either way,
+  and also when the function raises, the recorded session becomes a sample the
+  reward model scores.
+- Raise `miles.rollout.agentic.agent_function.InfraAbort(exit_status)` to
+  discard the sample instead. Its group is dropped before any dynamic-sampling
+  filter runs and counted in
+  `rollout/dynamic_filter/drop_group_has_aborted_<exit_status>`. Evaluation
+  scores the attempt 0, like any other with no reward, and counts it in
+  `eval/<dataset>-none_reward_ratio`.
+
+The function owns one episode and these rules:
+
+- One call is one episode. Miles opens the session before the call and collects
+  its samples once the call returns.
+- The returned dictionary is the episode's verdict, merged as above.
+- Raise `InfraAbort` only on signals the policy cannot write, such as the
+  harness's own result event or the session's count of backend failures. An exit
+  code alone does not count, and neither does error text that an agent with a
+  shell could print. The next section says which failures qualify.
+- A cancelled call stops and cleans up: free the sandbox, then let
+  `asyncio.CancelledError` propagate. Every mode delivers the cancel, and a
+  rollout abort sends one (see below). A harness that cannot honour it runs
+  under `subproc`, whose SIGTERM and backstop kill end it. An adapter that
+  spawns a CLI also stops the CLI's descendants, since a tool can sit in its own
+  process group.
+- Run blocking code with `asyncio.to_thread`, or the event loop cannot deliver
+  the cancel while it runs.
+- Hold a wall-clock cap, such as `asyncio.timeout`, around the episode, because
+  a harness's retry loop need not end by itself. A timeout after the agent
+  started is the policy's: return `reward: 0`. Give a CLI its stdin from
+  `/dev/null`, or it can wait on it forever.
 
 For structured parsing, the payload may use SGLang's
 `ChatCompletionRequest`-compatible fields, which extend the OpenAI format.
+
+### Which failures to discard
+
+A discarded sample contributes no gradient, so the policy is never penalized for
+whatever led to it. Discard only what the policy cannot bring about; anything it
+can, it would learn to trigger to escape a low reward.
+
+| Outcome | Can the policy cause it? | Do |
+|---|---|---|
+| The sandbox was never ready, or the harness could not be set up, before the agent started | No | raise `InfraAbort` |
+| The model service or the environment host became unreachable | No | raise `InfraAbort` |
+| A remote agent service could not be reached, or ended the episode before its sandbox or verifier gave an outcome | No | raise `InfraAbort` |
+| A wall-clock timeout after the agent started | Yes, by stalling | return `reward: 0` |
+| A step or turn limit, or `max_seq_len` | Yes | return `reward: 0` |
+| The sandbox was lost mid-episode, or the verifier crashed | Yes, the agent controls the sandbox | return `reward: 0` |
+
+Miles itself discards a session that recorded no model call (`NoModelCalls`),
+whose samples could not be collected (`CollectFailed`), or whose last model call
+failed at the engine with a 5xx or a transport error (`ModelCallFailed`), whatever
+the agent function returned. A failed call the agent retried successfully does
+not count, and a 4xx, whether the engine's context-length error or the session
+rejecting the request, is the policy's own outcome.
+
+### What the session URL accepts
+
+The session server trains only on what it records, so it refuses what it cannot record instead of passing it through. An agent framework or CLI pointed at `base_url` must fit these rules; where it does not by default, the agent function configures it.
+
+- **Dialects.** `POST /v1/chat/completions` (OpenAI chat) and `POST /v1/messages` (Anthropic Messages) are recorded. `GET /v1/models`, `GET /get_model_info` and `POST /v1/messages/count_tokens` are forwarded to the engine unrecorded, since they generate nothing. Any other path returns HTTP 404 naming these routes, so a client that speaks OpenAI Responses or Gemini `generateContent` needs a conversion to chat.
+- **Streaming.** `stream: true` gets the complete reply as one block in that dialect's stream format, ending with its terminal event.
+- **Refusals.** Each is a client error, since resending the same request cannot succeed: `n` other than 1 is HTTP 400, as the session records one choice per request; a request the chat template cannot render, such as `system` content given as parts to a template that expects a string, is HTTP 400; on v2, a request to a session that already holds 1,024 tree nodes is HTTP 400.
+- **History.** Send the full history on every request; see [Leave token ownership to Miles](#leave-token-ownership-to-miles). Use v2 for anything that is not strictly one linear conversation, such as subagents, parallel conversations, side calls or compaction; v1 is for strictly linear agents only. See [Choose the session behavior](#choose-the-session-behavior).
+- **Matcher and picker.** A recipe names its `--session-message-matcher` when its client re-serializes tool-call arguments or drops `reasoning_content` ([Choose replay matching](#choose-replay-matching)), and its `--session-sample-picker-path` when the client makes side calls, such as title requests, that cannot be turned off. A picker is specific to a harness.
+- **Sampling.** The rollout owns sampling: pass `request_kwargs` through, and keep the client from setting its own `temperature`, `top_p` or `top_k`. A training request whose temperature differs from the session's, or whose `top_p` or `top_k` is bounded without sampling-support replay, is HTTP 400.
+- **Other traffic.** Turn the client's telemetry and tracing off. A model the client uses for anything other than the policy, such as a judge or a memory model, goes to another endpoint, not to `base_url`.
 
 
 ### Where the agent runs
@@ -112,6 +185,49 @@ a sandbox still runs; an agent still running two minutes later is stopped.
 `--custom-agent-function-mode inline` runs the agent on the rollout's event loop,
 as before; use it for debugging and for agents that keep state across calls.
 
+`--custom-agent-function-mode worker` runs the same child process on an agent
+worker on another host, so the agents' CPU work leaves the rollout host. Start one
+with `python -m miles.rollout.agentic.worker --port 11100` and name it with
+`--custom-agent-function-worker http://<host>:11100`. The agent function must be
+importable on the worker under the same module path, and its arguments and return
+value must be JSON-serializable. Each call carries each sandbox provider's key-file
+and address variables and the env vars matching the patterns in a `WORKER_ENV`
+tuple the agent function's module may expose beside it; credentials are never sent
+by value, and paths among them must exist on the worker. A worker that cannot be reached, or that no longer knows the call, discards
+the sample (`exit_status` `WorkerUnreachable` or `WorkerLost`). A worker cancels a
+call nobody has polled for two minutes. To keep anyone else from submitting calls,
+set the same secret on the worker and on the rollout host, in
+`MILES_AGENT_WORKER_SECRET` or in a file named by `MILES_AGENT_WORKER_SECRET_FILE`,
+as one line of printable ASCII;
+the worker then refuses requests without it, and a call it refuses discards the
+sample (`exit_status` `WorkerUnauthorized`). Without a secret the worker accepts
+any request, so run it on a private network.
+
+`--custom-agent-function-worker` also takes a start function's `module.fn`, which
+gives each call a worker of its own, so nothing a call leaves behind reaches the
+next. Anything but an `http://` or `https://` URL is loaded as one, and a path that
+does not load fails at startup. It has the shape `fn(label, "") -> (close_fn,
+worker_url)`, runs on the rollout host, and may block. Miles waits up to two
+minutes for the worker's `/health`, runs the call there, and runs `close_fn` however
+the call ends. A failed start or a worker that never turns healthy discards the
+sample (`exit_status` `SandboxWorkerUnavailable`), and a rollout abort during the
+start cancels it, closes the worker and discards the sample (`Cancelled`). Agents on
+these workers cannot use `rollout_semaphore` or `rollout_lock`: the locks would limit
+one worker, so they raise. `examples/experimental/agent_sandbox/` has an E2B start
+function and a local-process one.
+
+A rollout abort, such as the one that ends an oversampled round, cancels this
+rollout's calls in every mode and discards their samples (`exit_status`
+`Cancelled`), however the agent then ends; an episode whose session opens after
+the abort never starts its agent. Under `subproc` the abort does not wait for
+the agent process's cleanup, which runs beside the next round to the deadlines
+above, and under `worker` it waits only until the worker has the cancel. An
+`inline` agent's cleanup runs on the rollout's loop: the abort hook
+waits up to 30 seconds for it before running the teardown hook below, and the
+rollout then waits for the episode to end, however long its cleanup takes. An
+evaluation on its own engines (`--eval-num-gpus`) keeps its calls through a
+training abort.
+
 ### Optional teardown hook
 
 The module named by `--custom-agent-function-path` may expose an `abort` function
@@ -123,11 +239,12 @@ async def abort(args) -> None:
 ```
 
 Miles calls this hook in the rollout process during oversampling abort after it
-stops in-flight SGLang generation, so under `subproc` it cannot reach the agent
-calls' module state; tell the external backend to stop, as below. Use it when the
-agent drives an external sandbox or agent server that would otherwise keep issuing
-completion requests until its own length limit or timeout. The hook is optional;
-modules without it continue to work.
+stops in-flight SGLang generation and cancels the agent calls, so under `subproc`
+it cannot reach their module state; tell the external backend to stop, as below.
+Use it when the agent drives an external sandbox or agent server whose work outlives
+the cancelled call and would otherwise keep issuing completion requests until its
+own length limit or timeout. The hook is optional; modules without it continue to
+work.
 
 See [`swe_agent_function.abort`](https://github.com/radixark/miles/blob/main/examples/swe-agent-harbor-docker/swe_agent_function.py)
 for an implementation that flushes the Harbor agent server.
@@ -192,8 +309,16 @@ replay, every pause mode except `retract` requests only additional R3 rows.
 `retract` returns full R3 data on every turn and emits a warning because the
 payloads can become very large.
 
-Set `--max-seq-len` to cap the context length. Miles also includes this value in the
-metadata passed to your agent so an external environment can stop early.
+The session server leaves the harness's control flow alone. It never lowers a turn's
+`max_tokens`, refuses a turn for its length, or cuts a turn short: how long an episode runs
+is the harness's decision. A request the session cannot serve, such as one that sets
+`input_ids`, fails loud with an HTTP error.
+
+`--max-seq-len` follows this rule. Miles passes it to your agent as
+`metadata["max_seq_len"]` and truncates each collected trajectory to it after the episode,
+so samples fit training memory. It does not stop the agent: a harness that reads the value
+can end the episode there, and one that does not runs on past it. The agentic generator
+logs a warning once when the limit is set.
 
 ### Pick your `--tito-model`
 
@@ -215,6 +340,7 @@ but treat it as best-effort until it passes the checks below.
 | Qwen3.8-27B | `qwen38small` |
 | Qwen3.8-Flash-Next | `qwen4exp` |
 | Qwen3-Thinking-2507 / Qwen3-Next | `qwennext` |
+| Qwen3-VL Instruct | `qwen3_vl` |
 | GLM-4.7 / 5 / 5.2 | `glm47` |
 | GLM-5.3 / GLM-5.3-Flash (text sessions) | `glm53` |
 | NVIDIA Nemotron 3 Nano / Super / Ultra | `nemotron3` |
@@ -255,6 +381,7 @@ Some agent harnesses do not replay model messages verbatim: they may reserialize
 |---|---|
 | `strict` | Preserves the existing comparison of `role`, `content`, `reasoning_content`, and `tool_calls`, including empty-value and tool-call `index` normalization. |
 | `loose_tool_call` | Accepts everything `strict` accepts, plus equivalent JSON-object representations of `tool_calls[].function.arguments`. Call IDs, types, function names, order, unknown fields, and `reasoning_content` still have to match. |
+| `loose_tool_call_ignore_reasoning` | Accepts everything `loose_tool_call` accepts, and leaves `reasoning_content` out of the comparison, so a replay that drops or rewrites it still matches. Content, tool calls and call IDs still have to match. |
 | `role_content_only` | Compares only normalized `role` and `content`. **High risk:** different tool-call or reasoning histories can collapse into one session lineage. |
 | dotted import path | Loads a trusted synchronous custom matcher; see [Customization](/user-guide/customization#session-message-matcher). |
 
@@ -262,6 +389,14 @@ The matcher only decides whether the message a client replays and the message st
 
 - On a mismatch, the existing paths apply: v1 rolls back (or rejects), v2 branches.
 - On a match, the stored messages and token snapshot stay authoritative inside the reusable prefix; only the suffix beyond it is tokenized anew from the client input.
+
+Under v2 a replay the matcher rejects is still answered with a 200 and the session branches; a client that rewrites every assistant turn opens a new root on each turn, so each turn trains as its own sample. Rollout metrics report `rollout/session/roots_per_episode`, `rollout/session/leaves_per_episode` and `rollout/session/one_turn_per_root_ratio` (multi-turn sessions in which every turn opened a root), and the rollout logs a warning when that ratio passes one half. A clean single conversation is one root and one leaf.
+
+Choose the matcher for the agent framework a recipe runs:
+
+- Keep `strict` for a client that replays model messages verbatim.
+- Choose `loose_tool_call` for a client that re-serializes tool-call arguments, for example to compact JSON.
+- Choose `loose_tool_call_ignore_reasoning` when the engine runs a reasoning parser and the client resends assistant turns without `reasoning_content`. The stored reasoning stays in the training tokens.
 
 Miles does not reconcile tool-call IDs across that boundary: deployments choosing `role_content_only` must themselves keep a stored call ID `A` followed by a replayed tool result referencing `B` protocol-compatible.
 

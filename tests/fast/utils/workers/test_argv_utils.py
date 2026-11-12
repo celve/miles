@@ -109,6 +109,7 @@ class TestConfigToArgv:
             max_connections=256,
             timeout=None,
             health_check_interval=10.0,
+            health_check_timeout=30.0,
             health_check_failure_threshold=3,
         )
         assert parse_config_argv(MilesRouterConfig, config_to_argv(router_config)) == router_config
@@ -123,6 +124,7 @@ class TestConfigToArgv:
             hf_checkpoint="/fake/model",
             chat_template_path=None,
             tito_model="qwen3",
+            allow_stop_token_replace=False,
             apply_chat_template_kwargs={"enable_thinking": False},
             use_rollout_routing_replay=True,
             use_rollout_indexer_replay=False,
@@ -144,6 +146,8 @@ class TestConfigToArgv:
             rollout_sampling_logprobs_mode="selected",
             rollout_temperature=0.7,
             output_store_backend_config={"master_server_address": "10.0.0.1:50051", "local_hostname": None},
+            multimodal_token_space_processing=True,
+            run_media_dir="/shared/media",
         )
         assert parse_config_argv(SessionServerConfig, config_to_argv(session_config)) == session_config
 

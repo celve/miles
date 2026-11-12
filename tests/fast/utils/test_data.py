@@ -79,6 +79,37 @@ def test_mixed_dataset_uses_processor_only_for_structured_prompts(tmp_path) -> N
     assert processor.prompts == [multimodal_prompt]
 
 
+def test_token_space_dataset_keeps_ordered_media_refs_without_a_processor(tmp_path) -> None:
+    first, second = tmp_path / "first.png", tmp_path / "second.png"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    multimodal_prompt = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": str(second)},
+                {"type": "text", "text": "Compare it with"},
+                {"type": "image", "image": f"file://{first}"},
+            ],
+        }
+    ]
+    prompt_path = tmp_path / "prompts.jsonl"
+    prompt_path.write_text(json.dumps({"prompt": multimodal_prompt}) + "\n")
+
+    dataset = Dataset(
+        str(prompt_path),
+        tokenizer=None,
+        processor=None,
+        max_length=None,
+        prompt_key="prompt",
+        apply_chat_template=False,
+        token_space_processing=True,
+    )
+
+    assert dataset.samples[0].prompt == multimodal_prompt
+    assert dataset.samples[0].multimodal_inputs == {"images": [str(second), str(first)]}
+
+
 def _ref(payload: Any) -> StoreObjectRef:
     return _MooncakeStoreObjectRef(payload=payload)
 
@@ -180,6 +211,7 @@ def _delay_split_args(**overrides: Any) -> Namespace:
         balance_data=False,
         balance_by_flops=False,
         allow_partial_train_step=False,
+        pad_steps_for_dp_alignment=False,
         multi_lora=False,
     )
     fields.update(overrides)
@@ -328,15 +360,19 @@ class TestProcessRolloutData:
         for shard in shards:
             assert shard["seq_witness_ids"] == [1000 + i for i in shard["sample_indices"]]
 
-    @pytest.mark.parametrize("raw", [_multimodal_batch(), _batch_without_rollout_ids()])
-    def test_unschedulable_batches_fall_back_to_the_strided_split(self, raw: dict[str, Any]):
-        """Multimodal batches and batches without rollout_ids keep the legacy training-side split."""
-        shards = _shards_of_every_rank(raw=raw)
+    def test_batches_without_rollout_ids_fall_back_to_the_strided_split(self):
+        shards = _shards_of_every_rank(raw=_batch_without_rollout_ids())
 
         for dp_rank, shard in enumerate(shards):
             assert "micro_batch_indices" not in shard
             assert "num_rollouts" not in shard
             assert shard["sample_indices"] == list(range(dp_rank, _NUM_SAMPLES, _DP_SIZE))
+
+    def test_multimodal_batches_take_the_rollout_side_schedule(self):
+        shards = _shards_of_every_rank(raw=_multimodal_batch())
+
+        assert all("micro_batch_indices" in shard and "num_rollouts" in shard for shard in shards)
+        assert sorted(i for shard in shards for i in shard["sample_indices"]) == list(range(_NUM_SAMPLES))
 
     def test_a_pre_split_rollout_must_carry_one_shard_per_cell(self):
         """Without the delayed split the rollout side already fixed the shard count, which must match dp_size."""

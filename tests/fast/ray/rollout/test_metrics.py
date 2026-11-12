@@ -5,10 +5,12 @@ import pytest
 from tests.fast.ray.rollout.conftest import make_args, make_sample, make_samples_grouped
 
 from miles.ray.rollout.metrics import (
+    _compute_dataset_metrics,
     _compute_episode_response_length_metrics,
     _compute_metrics_from_samples,
     _compute_passrate_from_samples,
     _compute_perf_metrics_from_samples,
+    _compute_session_tree_metrics,
     _compute_spec_metrics,
     _compute_training_sample_metrics,
     _compute_zero_std_metrics,
@@ -16,6 +18,7 @@ from miles.ray.rollout.metrics import (
     log_rollout_data,
 )
 from miles.rollout.session.v2.metrics import SESSION_ROLLOUT_METRICS_KEY
+from miles.utils.eval_config import EvalDatasetConfig
 from miles.utils.types import Sample, WeightVersionSpan, WeightVersionsPerCall
 
 
@@ -199,6 +202,16 @@ class TestComputeZeroStdMetrics:
         assert out["zero_std/all_zero_percentage"] == 1.0
         assert out["zero_std/all_one_percentage"] == 0.0
 
+    def test_unrewarded_group_gets_no_reward_bucket(self):
+        """An aborted episode carries no reward; rounding it crashed the whole eval log."""
+        args = make_args(advantage_estimator="grpo", reward_key=None)
+        samples = [make_sample(group_index=0, reward=None), make_sample(group_index=1, reward=1.0)]
+
+        out = _compute_zero_std_metrics(args, samples)
+
+        assert out["zero_std/count_1.0"] == 1
+        assert not any(key.startswith("zero_std/count_None") for key in out)
+
     def test_returns_empty_for_ppo_regardless_of_reward_distribution(self):
         args = make_args(advantage_estimator="ppo")
         out = _compute_zero_std_metrics(args, make_samples_grouped(2, 4, rewards=[1.0] * 8))
@@ -323,6 +336,49 @@ class TestComputeSpecMetrics:
             "spec_accept_rate": pytest.approx(3 / 5),
             "spec_accept_length": pytest.approx(5 / 2),
         }
+
+
+def _session_member(session_id, *, roots, leaves, turns):
+    sample = Sample()
+    sample.metadata[SESSION_ROLLOUT_METRICS_KEY] = {
+        "session_id": session_id,
+        "metrics": {"tree": {"roots": roots, "leaves": leaves, "turns": turns}},
+    }
+    return sample
+
+
+def test_no_session_carrier_emits_no_session_keys():
+    out = _compute_metrics_from_samples(make_args(advantage_estimator="ppo"), [make_sample(index=0)])
+
+    assert not any(key.startswith("session/") for key in out)
+
+
+def test_session_tree_counts_each_session_once_and_ignores_single_turn_sessions_in_the_ratio(caplog):
+    samples = [
+        _session_member("split", roots=3, leaves=3, turns=3),
+        _session_member("split", roots=3, leaves=3, turns=3),
+        _session_member("clean", roots=1, leaves=1, turns=3),
+        _session_member("one-call", roots=1, leaves=1, turns=1),
+    ]
+
+    out = _compute_session_tree_metrics(samples)
+
+    assert out == {
+        "session/roots_per_episode": pytest.approx(5 / 3),
+        "session/leaves_per_episode": pytest.approx(5 / 3),
+        "session/one_turn_per_root_ratio": 0.5,
+    }
+    assert "opened a new root on every turn" not in caplog.text
+
+
+def test_session_tree_warns_once_when_most_multi_turn_sessions_split(caplog):
+    samples = [_session_member(f"sid-{i}", roots=3, leaves=3, turns=3) for i in range(2)]
+    samples.append(_session_member("clean", roots=1, leaves=1, turns=3))
+
+    out = _compute_session_tree_metrics(samples)
+
+    assert out["session/one_turn_per_root_ratio"] == pytest.approx(2 / 3)
+    assert caplog.text.count("2/3 multi-turn sessions opened a new root on every turn") == 1
 
 
 class TestTitoMismatchMetrics:
@@ -771,6 +827,30 @@ class TestEvalMetrics:
         assert payload["eval/gsm8k"] == 0.5
         assert not any(key.startswith("alpha/") for key in payload)
 
+    def test_a_dataset_whose_every_attempt_aborted_scores_zero(self, monkeypatch):
+        samples = [
+            make_sample(index=i, reward=None, status=Sample.Status.ABORTED, response_length=0) for i in range(2)
+        ]
+
+        payload = _log_eval(monkeypatch, {"osworld": _eval_dataset(samples)})
+
+        assert payload["eval/osworld"] == 0.0
+        assert payload["eval/osworld-none_reward_ratio"] == 1.0
+
+    def test_pass_at_k_groups_attempts_by_the_dataset_s_own_sample_count(self, monkeypatch):
+        samples = [make_sample(index=i, reward=1.0 if i in (0, 4) else 0.0) for i in range(8)]
+
+        payload = _log_eval(
+            monkeypatch,
+            {"osworld": _eval_dataset(samples)},
+            log_passrate=True,
+            n_samples_per_eval_prompt=3,
+            eval_datasets=[EvalDatasetConfig(name="osworld", path="osworld.jsonl", n_samples_per_eval_prompt=4)],
+        )
+
+        assert payload["eval/osworld-pass@1"] == 0.25
+        assert payload["eval/osworld-pass@4"] == 1.0
+
 
 class TestObservedGpuThroughput:
     @pytest.mark.parametrize("gpu_count", [0, 4])
@@ -793,3 +873,78 @@ class TestObservedGpuThroughput:
         else:
             assert "tokens_per_gpu_per_sec" not in metrics
             assert "effective_tokens_per_gpu_per_sec" not in metrics
+
+
+class TestDatasetMetrics:
+    def test_each_mixed_dataset_gets_its_own_reward_length_and_truncation(self):
+        samples = [
+            make_sample(index=0, reward=1.0, response_length=4, metadata={"dataset_name": "math"}),
+            make_sample(index=1, reward=0.0, response_length=8, metadata={"dataset_name": "math"}),
+            make_sample(
+                index=2,
+                reward=0.5,
+                response_length=6,
+                status=Sample.Status.TRUNCATED,
+                metadata={"dataset_name": "agentic"},
+            ),
+        ]
+
+        out = _compute_dataset_metrics(make_args(rollout_data_yaml_config="mix.yaml"), samples)
+
+        assert out["dataset/math/episode_raw_reward"] == pytest.approx(0.5)
+        assert out["dataset/math/response_len/mean"] == pytest.approx(6.0)
+        assert out["dataset/math/truncated_ratio"] == 0.0
+        assert out["dataset/agentic/episode_raw_reward"] == pytest.approx(0.5)
+        assert out["dataset/agentic/truncated_ratio"] == 1.0
+        assert out["dataset/agentic/num_training_samples"] == 1
+
+    @pytest.mark.parametrize("row_dataset_name", [None, "from_the_jsonl", ["unhashable"]])
+    def test_a_single_dataset_run_logs_no_dataset_metrics(self, row_dataset_name):
+        """A row's own dataset_name field must not create metric keys or crash grouping outside a mixed run."""
+        metadata = {} if row_dataset_name is None else {"dataset_name": row_dataset_name}
+        out = _compute_dataset_metrics(make_args(), [make_sample(index=0, metadata=metadata)])
+
+        assert not any(key.startswith("dataset/") for key in out)
+
+    def test_the_training_log_carries_the_dataset_metrics(self, monkeypatch):
+        args = make_args(
+            rollout_data_yaml_config="mix.yaml", advantage_estimator="ppo", ci_test=False, log_passrate=False
+        )
+        samples = make_samples_grouped(1, 2)
+        for sample in samples:
+            sample.metadata = {"dataset_name": "math"}
+        logged = {}
+        monkeypatch.setattr(
+            "miles.ray.rollout.metrics.tracking.log",
+            lambda _args, metrics, **_kwargs: logged.update(metrics),
+        )
+
+        log_rollout_data(0, args, samples, None, 1.0)
+
+        assert logged["rollout/dataset/math/num_training_samples"] == 2
+
+    @pytest.mark.parametrize("row_dataset_name", ["from_the_jsonl", ["unhashable"]])
+    def test_eval_samples_in_a_mixed_run_log_no_dataset_metrics(self, row_dataset_name):
+        """Eval shares the per-sample metrics, but an eval row's dataset_name is its own field, not the mixer's tag."""
+        args = make_args(rollout_data_yaml_config="mix.yaml")
+        out = _compute_metrics_from_samples(args, [make_sample(index=0, metadata={"dataset_name": row_dataset_name})])
+
+        assert not any(key.startswith("dataset/") for key in out)
+
+
+def _eval_dataset(samples: list[Sample]) -> dict:
+    return {
+        "rewards": [s.reward for s in samples],
+        "truncated": [s.status == Sample.Status.TRUNCATED for s in samples],
+        "samples": samples,
+    }
+
+
+def _log_eval(monkeypatch, data: dict, **overrides) -> dict:
+    payloads: list[dict] = []
+    monkeypatch.setattr(
+        "miles.ray.rollout.metrics.tracking.log", lambda _args, payload, step_key: payloads.append(payload)
+    )
+    log_eval_rollout_data(0, make_args(**{"log_passrate": False, **overrides}), data)
+    [payload] = payloads
+    return payload

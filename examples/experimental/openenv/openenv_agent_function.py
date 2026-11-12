@@ -53,11 +53,15 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+import openenv_sandbox_common as common
 from openai import AsyncOpenAI
 
+from miles.rollout.agentic.agent_function import InfraAbort
 from miles.rollout.agentic.session import openai_session_url
 
 logger = logging.getLogger(__name__)
+
+WORKER_ENV = common.WORKER_ENV
 
 # Env slots are finite: hosted spaces admit one session at a time
 # (CAPACITY_REACHED) and the docker-mode tbench2 server caps concurrent envs
@@ -108,7 +112,7 @@ MESSAGE_TIMEOUT_S = float(os.getenv("OPENENV_MESSAGE_TIMEOUT_S", "1200"))
 # generation) and stall the whole rollout batch (a step finishes only when the
 # slowest of all concurrent episodes returns). An episode exceeding this cap is
 # terminated (its coroutine cancelled) and scored reward 0.
-_MAX_ROLLOUT_TIME_S = float(os.getenv("OPENENV_MAX_ROLLOUT_TIME_SECONDS", "3600"))
+MAX_ROLLOUT_TIME_S = float(os.getenv("OPENENV_MAX_ROLLOUT_TIME_SECONDS", "3600"))
 
 
 def _is_retryable_env_error(e: BaseException) -> bool:
@@ -415,7 +419,7 @@ async def run_for_training(
     request_kwargs: dict[str, Any] | None,
     metadata: dict[str, Any] | None,
     run_episode_fn: Callable[..., Any],
-) -> dict[str, Any] | None:
+) -> dict[str, Any]:
     """miles-side wrapper around one episode: session-server policy wiring plus
     training failure semantics (timeout -> reward 0, no verdict -> drop sample).
 
@@ -437,10 +441,10 @@ async def run_for_training(
         # during cancellation cleanup.
         reward, agent_metrics = await asyncio.wait_for(
             run_episode_fn(policy, model_name, messages, request_kwargs, metadata),
-            timeout=_MAX_ROLLOUT_TIME_S,
+            timeout=MAX_ROLLOUT_TIME_S,
         )
     except asyncio.TimeoutError:
-        logger.warning(f"OpenEnv tbench2 episode exceeded {_MAX_ROLLOUT_TIME_S:.0f}s; " "terminating with reward 0")
+        logger.warning(f"OpenEnv tbench2 episode exceeded {MAX_ROLLOUT_TIME_S:.0f}s; " "terminating with reward 0")
         # eval_report empty: the episode was cancelled before evaluate ever
         # ran, so there is no pytest report to surface.
         return {
@@ -451,7 +455,7 @@ async def run_for_training(
         }
     except Exception as e:
         logger.error(f"OpenEnv tbench2 episode failed: {e}", exc_info=True)
-        return None
+        raise InfraAbort("EpisodeFailed", f"OpenEnv tbench2 episode failed: {e!r}") from e
     finally:
         await policy.close()
 
@@ -460,8 +464,7 @@ async def run_for_training(
     # sample: returning it as reward 0.0 would inject a false negative into
     # training.
     if reward is None:
-        logger.warning("OpenEnv tbench2 episode produced no canonical reward; dropping sample")
-        return None
+        raise InfraAbort("NoVerdict", "OpenEnv tbench2 episode produced no canonical reward")
 
     # eval_report is intentionally empty: the server's evaluate reports only
     # the scalar reward (plus the harness marker). The detailed pytest CTRF
@@ -482,6 +485,6 @@ async def run(
     request_kwargs: dict[str, Any] | None = None,
     metadata: dict[str, Any] | None = None,
     **kwargs,
-) -> dict[str, Any] | None:
+) -> dict[str, Any]:
     """Run one OpenEnv tbench2 episode via the trained policy (shared env server)."""
     return await run_for_training(base_url, prompt, request_kwargs, metadata, run_episode)

@@ -170,10 +170,15 @@ Sections mirror the launch-script argument groups.
 | Flag | Type | Default | Notes |
 |---|---|---|---|
 | `--prompt-data` | str | – | Path to a single JSONL file. |
+| `--rollout-data-yaml-config` | str | – | YAML of several datasets mixed by weight; replaces `--prompt-data`. See [Mixing Datasets](/user-guide/mixing-datasets). |
 | `--input-key` | str | `input` | JSONL key to `Sample.prompt`. |
 | `--label-key` | str | `None` | JSONL key to `Sample.label`. |
 | `--metadata-key` | str | `metadata` | JSONL key to `Sample.metadata`. |
 | `--apply-chat-template` | flag | off | Apply tokenizer chat template. |
+| `--shared-media-dir` | path | – | Token space only: directory shared with every SGLang engine and every trainer rank; media that is not a file path yet (data URL, bytes, PIL image) is written under `<dir>/<run_uuid>`, which is removed when the run ends. |
+| `--multimodal-token-space-processing` | flag | off | SGLang expands media placeholders and the trainer builds the processor inputs (models with an SGLang token-space strategy); Megatron backend only for now. Needs `--sglang-enable-token-space-processor` on every engine that serves Miles's multimodal prompts (a frozen reward or reference engine group that serves its own requests may override it off); the trainer builds its processor from the actor engines' server args, so external engines, `--sglang-rl-on-policy-target`, `--sglang-true-on-policy-contract` and `--sglang-decrypted-config-file` are rejected. `--rollout-max-prompt-len` counts text tokens only. |
+| `--trainer-mm-processor-worker-num` | int | 1 | Workers each trainer rank processes multimodal inputs with: threads building token-space inputs, and the SGLang processor's media workers. |
+| `--trainer-mm-io-worker-num` | int | 0 | Media I/O threads (decoding) of each trainer rank's SGLang processor; 0 lets SGLang choose. |
 | `--rollout-shuffle` | flag | on | Shuffle prompts once per epoch (seeded by `--rollout-seed`). `--no-rollout-shuffle` keeps file order. |
 | `--num-rollout` | int | – | Total rollout iterations. If unset, derived from dataset size. |
 | `--rollout-batch-size` | int | – | Prompts per rollout. |
@@ -188,6 +193,7 @@ Sections mirror the launch-script argument groups.
 | Flag | Type | Default | Notes |
 |---|---|---|---|
 | `--rollout-max-response-len` | int | – | Max tokens per response. |
+| `--max-seq-len` | int | – | Total tokens per session, including prompts, completions, and environment responses. Sample assembly truncates each collected trajectory to it, and the agent receives it in `metadata`; Miles does not stop the agent at it (see [Choose the session behavior](/user-guide/agentic-rollout#choose-the-session-behavior)). On `/generate`, each request's `max_new_tokens` is capped to fit it, and a request with no room left stops the sample as `TRUNCATED`. Defaults `--rollout-max-prompt-len` to one less. |
 | `--rollout-temperature` | float | `1.0` | Sampling temperature. |
 | `--rollout-top-p` | float | `1.0` | Top-p truncation. Values below `1` require bounded [sampling-support replay](/advanced/sampling-support-replay). |
 | `--rollout-top-k` | int | `-1` | Top-k truncation (`-1` disables). Positive values enable [sampling-support replay](/advanced/sampling-support-replay). |
@@ -225,6 +231,7 @@ Sections mirror the launch-script argument groups.
 | `--sequence-parallel` | flag | off | Enable Megatron sequence parallel. |
 | `--use-dynamic-batch-size` | flag | off | Pack varlen samples. Recommended for varlen workloads. |
 | `--max-tokens-per-gpu` | int | – | Token budget per micro-batch per GPU. Required when dynamic batching is on. |
+| `--pad-steps-for-dp-alignment` | flag | off | Add zero-loss two-token samples to the optimizer steps the rollout-side schedule cannot split into a multiple of the DP size (every sample over half of `--max-tokens-per-gpu`). Needs dynamic batching; refused with `--calculate-per-token-loss` or `--use-output-store`. |
 | `--micro-batch-size` | int | `1` | Ignored when dynamic batching is on. |
 | `--recompute-granularity` | enum | Megatron default | `full` or `selective`. |
 | `--recompute-method` | enum | Megatron default | `uniform` or `block`. |
@@ -317,10 +324,11 @@ contract, session behavior, and model-family selection.
 |---|---|---|---|
 | `--custom-generate-function-path` | `<module>.<fn>` | – | Set to `miles.rollout.generate_hub.agentic_tool_call.generate` for the built-in agentic wrapper. |
 | `--custom-agent-function-path` | `<module>.<fn>` | – | Async agent-environment loop. Registered after selecting the built-in agentic wrapper. |
-| `--custom-agent-function-mode` | `subproc` / `inline` | `subproc` | Where each agent call runs: a child process of its own, or the rollout's event loop. See [Where the agent runs](/user-guide/agentic-rollout#where-the-agent-runs). |
+| `--custom-agent-function-mode` | `subproc` / `inline` / `worker` | `subproc` | Where each agent call runs: a child process of its own, the rollout's event loop, or a child process on an agent worker. See [Where the agent runs](/user-guide/agentic-rollout#where-the-agent-runs). |
+| `--custom-agent-function-worker` | URL or `<module>.<fn>` | – | The agent worker for `--custom-agent-function-mode worker`: a fixed worker's URL, or a start function that starts one for each call. |
 | `--use-session-server` | optional `v1` / `v2` | off | Bare flag (or `v1`) selects the linear append-only server; `v2` selects tree serving. Requires `--hf-checkpoint`. |
 | `--tito-model` | enum | `default` | TITO model family. Named families load their registered fixed template; `default` is best-effort with a checkpoint-native or custom template. |
-| `--max-seq-len` | int | – | Total tokens per session, including prompts, completions, and environment responses. Registered with the agentic wrapper. |
+| `--allow-stop-token-replace` / `--no-allow-stop-token-replace` | bool | family default | Whether the session server may replace the sampled stop token with the first token of the appended render (GLM stopping at `<\|observation\|>` before a non-tool message). Allowed replacements log a warning; otherwise the request gets HTTP 400. Allowed by default only for `glm47` and `glm53`. Allowing it cannot be combined with `--sglang-enable-streaming-session`. |
 | `--session-server-ip` | str | router IP | Session-server bind address. |
 | `--session-server-external-host` | str | – | Host that peers outside the cluster reach every session server on. Keeps the session servers on the head node. Leave unset when each node sets `MILES_NODE_EXTERNAL_IP`. |
 | `--session-server-port` | int | auto | First port for standalone session-server instances. When unset, each worker port is auto-allocated. |

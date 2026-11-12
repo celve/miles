@@ -35,6 +35,7 @@ from miles.rollout.session.anthropic_adapter import (
     _parse_anthropic_request,
     _restore_anthropic_reasoning_history,
     _strip_anthropic_reasoning_history,
+    _unescape_anthropic_tool_arguments,
 )
 from miles.rollout.session.anthropic_adapter import (
     _validate_anthropic_content_block as _validate_anthropic_content_block,
@@ -43,7 +44,16 @@ from miles.rollout.session.anthropic_adapter import _validate_anthropic_features
 from miles.rollout.session.config import SessionServerConfig
 from miles.rollout.session.core import JSON_MEDIA_TYPE, SessionCore, _render_json
 from miles.rollout.session.errors import SessionError
+from miles.rollout.session.image_expansion import build_image_token_counter
 from miles.rollout.session.linear_trajectory import SessionRegistry
+from miles.rollout.session.responses_adapter import (
+    _chat_to_response,
+    _responses_error_message,
+    _responses_error_response,
+    _responses_sse_body,
+    _responses_to_chat_body,
+    responses_adapter_available,
+)
 from miles.rollout.session.types import CreateSessionRequest
 from miles.utils.chat_template_utils import get_tito_tokenizer
 from miles.utils.chat_template_utils.message_matcher_hub import (
@@ -54,6 +64,19 @@ from miles.utils.output_store.config import connect_output_store
 from miles.utils.processing_utils import load_tokenizer
 
 logger = logging.getLogger(__name__)
+
+_RECORDED_ROUTES = (("POST", "v1/chat/completions"), ("POST", "v1/messages"))
+_FORWARDED_ROUTES = (("GET", "v1/models"), ("GET", "get_model_info"), ("POST", "v1/messages/count_tokens"))
+
+
+def _unrecorded_route_error(method: str, path: str) -> str:
+    def routes(pairs):
+        return ", ".join(f"{route_method} /{route_path}" for route_method, route_path in pairs)
+
+    return (
+        f"{method} /{path} is not served by the session server: it records only {routes(_RECORDED_ROUTES)} "
+        f"and forwards only {routes(_FORWARDED_ROUTES)}"
+    )
 
 
 def setup_session_routes(app, backend, config: SessionServerConfig, *, use_addition_r3: bool = False):
@@ -73,6 +96,10 @@ def setup_session_routes(app, backend, config: SessionServerConfig, *, use_addit
         tokenizer,
         tokenizer_type=config.tito_model,
         chat_template_kwargs=config.apply_chat_template_kwargs,
+        allow_stop_token_replace=config.allow_stop_token_replace,
+    )
+    logger.info(
+        "[session] tito_model=%r allow_stop_token_replace=%s", config.tito_model, config.allow_stop_token_replace
     )
     merge_inline_system = not detect_inline_system_support(
         getattr(tokenizer, "chat_template", None)
@@ -83,6 +110,7 @@ def setup_session_routes(app, backend, config: SessionServerConfig, *, use_addit
         else connect_output_store(config.output_store_backend_config)
     )
 
+    image_token_counter = build_image_token_counter(config, tokenizer)
     use_v2 = config.use_session_server == "v2"
     if use_v2:
         from miles.rollout.session.v2.core import SessionCoreV2
@@ -96,6 +124,7 @@ def setup_session_routes(app, backend, config: SessionServerConfig, *, use_addit
             config.instance_id,
             use_addition_r3=use_addition_r3,
             output_store=output_store,
+            image_token_counter=image_token_counter,
         )
     else:
         registry = SessionRegistry(tokenizer, tito_tokenizer=tito_tokenizer, message_matcher=message_matcher)
@@ -106,6 +135,7 @@ def setup_session_routes(app, backend, config: SessionServerConfig, *, use_addit
             config.instance_id,
             use_addition_r3=use_addition_r3,
             output_store=output_store,
+            image_token_counter=image_token_counter,
         )
 
     @app.exception_handler(SessionError)
@@ -146,13 +176,18 @@ def setup_session_routes(app, backend, config: SessionServerConfig, *, use_addit
     @app.post("/sessions/{session_id}/v1/chat/completions")
     async def chat_completions(request: Request, session_id: str):
         body = await request.body()
-        return await core.chat_completions(
-            session_id,
-            method=request.method,
-            query=request.url.query,
-            headers=dict(request.headers),
-            body=body,
-        )
+        try:
+            return await core.chat_completions(
+                session_id,
+                method=request.method,
+                query=request.url.query,
+                headers=dict(request.headers),
+                body=body,
+            )
+        except SessionError as exc:
+            if exc.status_code < 500:
+                core.record_rejected_call(session_id)
+            raise
 
     # Keep before session_proxy: Starlette's first match must not bypass session/TITO.
     @app.post("/sessions/{session_id}/v1/messages")
@@ -197,9 +232,11 @@ def setup_session_routes(app, backend, config: SessionServerConfig, *, use_addit
                 mode="json", exclude_none=True, exclude_unset=True, by_alias=True
             )
             _restore_anthropic_reasoning_history(openai_body_dict, reasoning_history)
+            _unescape_anthropic_tool_arguments(openai_body_dict)
             openai_body = _render_json(openai_body_dict)
         except ValueError as exc:
             # Parsing and JSON encoding failures are invalid Anthropic requests.
+            core.record_rejected_call(session_id)
             return _anthropic_error_response(400, _render_json({"error": str(exc)}))
 
         anthropic_stream = bool(anthropic_request.stream)
@@ -213,6 +250,8 @@ def setup_session_routes(app, backend, config: SessionServerConfig, *, use_addit
                 body=openai_body,
             )
         except SessionError as exc:
+            if exc.status_code < 500:
+                core.record_rejected_call(session_id)
             return _anthropic_error_response(exc.status_code, _render_json({"error": str(exc)}))
         except Exception:
             # Preserve Anthropic error framing; cancellation still propagates.
@@ -245,6 +284,48 @@ def setup_session_routes(app, backend, config: SessionServerConfig, *, use_addit
             logger.exception("Anthropic response conversion failed for session %s", session_id)
             return _anthropic_error_response(500, b"")
 
+    @app.post("/sessions/{session_id}/v1/responses")
+    async def openai_responses(request: Request, session_id: str):
+        if not responses_adapter_available():
+            return _responses_error_response(501, "The installed SGLang does not support the Responses adapter")
+        try:
+            responses_request, chat_body, custom_names = _responses_to_chat_body(
+                await request.body(), merge_inline_system=merge_inline_system
+            )
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            return _responses_error_response(400, str(exc))
+
+        try:
+            core_response = await core.chat_completions(
+                session_id,
+                method=request.method,
+                query=request.url.query,
+                headers=dict(request.headers),
+                body=_render_json(chat_body),
+            )
+        except SessionError as exc:
+            return _responses_error_response(exc.status_code, str(exc))
+        except Exception:
+            logger.exception("Responses chat processing failed for session %s", session_id)
+            return _responses_error_response(500, "internal error")
+
+        if core_response.status_code != 200:
+            return _responses_error_response(core_response.status_code, _responses_error_message(core_response.body))
+
+        try:
+            response = _chat_to_response(json.loads(core_response.body), responses_request, custom_names)
+            if responses_request.get("stream"):
+                return Response(
+                    content=_responses_sse_body(response),
+                    status_code=200,
+                    headers={"cache-control": "no-cache", "x-accel-buffering": "no"},
+                    media_type="text/event-stream",
+                )
+            return Response(content=_render_json(response), status_code=200, media_type=JSON_MEDIA_TYPE)
+        except Exception:
+            logger.exception("Responses conversion failed for session %s", session_id)
+            return _responses_error_response(500, "internal error")
+
     @app.post("/sessions/{session_id}/samples")
     async def collect_samples(request: Request, session_id: str):
         # Starlette matches routes in registration order; keep this before session_proxy.
@@ -259,6 +340,8 @@ def setup_session_routes(app, backend, config: SessionServerConfig, *, use_addit
 
     @app.api_route("/sessions/{session_id}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
     async def session_proxy(request: Request, session_id: str, path: str):
+        if (request.method, path) not in _FORWARDED_ROUTES:
+            return JSONResponse(status_code=404, content={"error": _unrecorded_route_error(request.method, path)})
         body = await request.body()
         return await core.proxy(
             session_id,

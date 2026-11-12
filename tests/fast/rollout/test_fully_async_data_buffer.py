@@ -136,9 +136,9 @@ class TestPerPolicyMetrics:
 
         await buffer.put(DataBufferInput(prompt_group=group, group=group))
 
-        assert buffer.get_metrics("solver")["rollout/raw_reward_unfiltered"] == 1.0
-        assert buffer.get_metrics("verifier")["rollout/raw_reward_unfiltered"] == 3.0
-        assert "rollout/raw_reward_unfiltered" not in buffer.get_metrics("verifier")
+        assert buffer.get_metrics("solver")["rollout/raw_reward"] == 1.0
+        assert buffer.get_metrics("verifier")["rollout/raw_reward"] == 3.0
+        assert "rollout/raw_reward" not in buffer.get_metrics("verifier")
 
 
 # ================================ test setup ================================
@@ -491,15 +491,15 @@ class TestMetricWindows:
         await _get_one(under_test.buffer, current_version=9)
 
         first = under_test.buffer.get_metrics()
-        assert first["rollout/fully_async/aborted_groups_filtered"] == 1
+        assert first["rollout/dynamic_filter/drop_group_has_aborted_unknown"] == 1
         assert first["rollout/fully_async/stale_groups_filtered"] == 1
-        assert first["rollout/raw_reward_unfiltered"] == 1.0
+        assert first["rollout/raw_reward"] == 1.0
 
         second = under_test.buffer.get_metrics()
-        assert second["rollout/fully_async/aborted_groups_filtered"] == 0
+        assert "rollout/dynamic_filter/drop_group_has_aborted_unknown" not in second
         assert second["rollout/fully_async/stale_groups_filtered"] == 0
         assert "rollout/fully_async/avg_staleness" not in second
-        assert "rollout/raw_reward_unfiltered" not in second
+        assert "rollout/raw_reward" not in second
 
     async def test_the_queue_size_metric_survives_the_window_reset(self) -> None:
         """Queue depth is a snapshot of what is held, not something accumulated since the last step."""
@@ -522,7 +522,19 @@ class TestPutTimeFilters:
         await _put(under_test.buffer, group)
 
         assert under_test.unused == [(group, UnusedReason.ABORTED)]
-        assert under_test.buffer.get_metrics()["rollout/fully_async/aborted_groups_filtered"] == 1
+        assert under_test.buffer.get_metrics()["rollout/dynamic_filter/drop_group_has_aborted_unknown"] == 1
+
+    async def test_an_aborted_group_is_counted_under_the_cause_it_recorded(self) -> None:
+        under_test = _make_buffer()
+        group = _make_finished_group(1)
+        group[0].status = Sample.Status.ABORTED
+        group[0].metadata = {"exit_status": "SandboxUnavailable"}
+
+        await _put(under_test.buffer, group)
+
+        metrics = under_test.buffer.get_metrics()
+        assert metrics["rollout/dynamic_filter/drop_group_has_aborted_SandboxUnavailable"] == 1
+        assert "rollout/fully_async/aborted_groups_filtered" not in metrics
 
     async def test_a_group_with_one_aborted_sample_among_finished_ones_is_refused_whole(self) -> None:
         """The group is the training unit, so a partial one is not something the trainer can use."""

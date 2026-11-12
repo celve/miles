@@ -28,6 +28,7 @@ from miles.rollout.session.errors import (
     UpstreamGenerationAbortedError,
     UpstreamResponseError,
 )
+from miles.rollout.session.image_expansion import ImageTokenCounter, assert_engine_expansion_matches
 from miles.rollout.session.linear_trajectory import LinearTrajectory, SessionRegistry
 from miles.rollout.session.request_args import ClientResponseIntent, filter_turn_args, parse_chat_request
 from miles.rollout.session.samples.codec import COMPUTED_FIELDS, ROLLOUT_SAMPLING_MASK_FIELDS, encode_samples
@@ -38,6 +39,7 @@ from miles.rollout.session.samples.merge import (
     truncate_samples_by_total_tokens,
 )
 from miles.rollout.session.store_refs import response_store_ref
+from miles.rollout.session.token_space import check_engine_prompt, engine_token_ids, lcp_len, store_message_media
 from miles.rollout.session.types import GetSessionResponse, SessionRecord
 from miles.utils.output_store.plan import StorePlanError
 
@@ -64,15 +66,6 @@ class ProxyRequest:
 def _render_json(payload) -> bytes:
     """Encode like Starlette's JSONResponse (compact, non-ASCII preserved)."""
     return json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
-
-
-def _lcp_len(a: list[int], b: list[int]) -> int:
-    """Length of the longest common prefix of two token-ID lists."""
-    n = min(len(a), len(b))
-    for i in range(n):
-        if a[i] != b[i]:
-            return i
-    return n
 
 
 def _samples_response(payload: bytes) -> Response:
@@ -111,12 +104,16 @@ def _response_to_stream_chunk(response: dict) -> dict:
 
 
 def _client_response_body(response: dict, response_intent: ClientResponseIntent) -> dict:
-    """The non-streaming reply without ``meta_info``, and without ``logprobs`` unless the client asked.
+    """The non-streaming reply without ``meta_info``, and without ``logprobs`` or ``prompt_token_ids``
+    unless the client asked.
 
     The session server asks for logprobs on every turn for TITO, and top-k logprobs for training make
     one long reply very large. A client that never asked for them would still have to parse them.
     """
     omitted = {"meta_info"} if response_intent.logprobs else {"meta_info", "logprobs"}
+    if not response_intent.prompt_token_ids:
+        # The server asks for the expanded prompt of a request with media (token_space).
+        omitted.add("prompt_token_ids")
     return {
         **response,
         "choices": [{k: v for k, v in choice.items() if k not in omitted} for choice in response.get("choices", [])],
@@ -201,6 +198,20 @@ def extract_completion(result: dict) -> tuple:
     return response, choice, assistant_message, completion_token_ids
 
 
+def extract_flagged_completion(session, result: dict) -> tuple | None:
+    try:
+        completion = extract_completion(result) if result["status_code"] == 200 else None
+    except Exception:
+        _record_model_call(session, failed=True)
+        raise
+    _record_model_call(session, failed=result["status_code"] >= 500)
+    return completion
+
+
+def _record_model_call(session, *, failed: bool) -> None:
+    session.last_model_call_failed = failed
+
+
 class SessionCore:
     """HTTP session operations over one ``SessionRegistry``."""
 
@@ -213,6 +224,7 @@ class SessionCore:
         *,
         use_addition_r3=False,
         output_store=None,
+        image_token_counter: ImageTokenCounter | None = None,
     ):
         self.backend = backend
         self.registry = registry
@@ -225,6 +237,7 @@ class SessionCore:
         self.use_addition_r3 = use_addition_r3
         # The output store client deleting what this server's sessions did not hand over; None without one.
         self._output_store = output_store
+        self.image_token_counter = image_token_counter
 
     async def _take_store_ref(self, session, request_body: dict, result: dict) -> None:
         """Record the output store ref of a proxied response before anything can drop the response."""
@@ -268,13 +281,15 @@ class SessionCore:
         (v1: the post-rollback checkpoint; v2: the positioned attach node). The
         checkpoint's N - 1 rows must remain a causal prefix of the new prompt,
         so every persisted patch starts exactly where the previous one ended.
+        Both lists are in the engine's form (``token_space``), with media
+        placeholders expanded, as the engine counts rows.
         """
         if not (self.use_addition_r3 and request_body.get("return_routed_experts")):
             return
         previous_rows = max(0, len(checkpoint_token_ids) - 1)
         assert prompt_token_ids[:previous_rows] == checkpoint_token_ids[:previous_rows], (
             f"additional R3 requires {previous_rows} stable prefix tokens, "
-            f"got {_lcp_len(checkpoint_token_ids, prompt_token_ids)}"
+            f"got {lcp_len(checkpoint_token_ids, prompt_token_ids)}"
         )
         request_body["routed_experts_start_len"] = previous_rows
 
@@ -295,6 +310,11 @@ class SessionCore:
         )
         return Response(content=_render_json({"session_id": session_id}), status_code=200, media_type=JSON_MEDIA_TYPE)
 
+    def record_rejected_call(self, session_id: str) -> None:
+        session = self.registry.sessions.get(session_id)
+        if session is not None:
+            _record_model_call(session, failed=False)
+
     def _session_metadata(self, session_id: str, session) -> dict:
         """The per-session assembly/inspection metadata dict, shared by
         `get_session` (records debug dump) and `collect_samples` (samples op)
@@ -310,6 +330,7 @@ class SessionCore:
         metadata["accumulated_token_ids"] = session.token_ids
         metadata["max_trim_tokens"] = self.registry.tito_tokenizer.max_trim_tokens
         metadata["turn_args"] = filter_turn_args(session.turn_args)
+        metadata["last_model_call_failed"] = session.last_model_call_failed
         return metadata
 
     async def get_session(self, session_id: str) -> Response:
@@ -350,7 +371,7 @@ class SessionCore:
                 self.config,
                 session.records,
                 tokenizer,
-                accumulated_token_ids=metadata.get("accumulated_token_ids"),
+                accumulated_token_ids=engine_token_ids(session.token_ids, session.records[-1]),
                 max_trim_tokens=metadata.get("max_trim_tokens", 0),
                 use_addition_r3=self.use_addition_r3,
                 evaluation=session.evaluation,
@@ -412,7 +433,7 @@ class SessionCore:
             if session.closing:
                 raise SessionNotFoundError(f"session not found: session_id={session_id}")
 
-            client_args = parse_chat_request(body)
+            client_args = self._store_message_media(parse_chat_request(body))
             prepared = session.prepare_token_ids_and_request_args(
                 client_args,
                 config=self.config,
@@ -422,12 +443,19 @@ class SessionCore:
             request_body, tito_tokenizer = prepared.body, self.registry.tito_tokenizer
             response_intent = prepared.response_intent
             request_messages = request_body.get("messages", [])
-            prompt_token_ids = request_body["input_ids"]
+            prompt_token_ids = prepared.prompt_token_ids  # TITO's form; the body may hold the engine's
             logger.debug("Using TITO input_ids: %d tokens", len(prompt_token_ids))
 
             # prepare_token_ids_and_request_args applied any retry rollback, so token_ids is
             # the checkpoint this request builds on.
-            self._maybe_request_addition_r3(request_body, session.token_ids, prompt_token_ids)
+            # It also rewrote a request with media into the engine's form (token_space).
+            checkpoint_record = session.records[-1] if session.records else None
+            # R3 rows count the tokens the engine runs: the offset uses the engine's form.
+            self._maybe_request_addition_r3(
+                request_body,
+                engine_token_ids(session.token_ids, checkpoint_record),
+                request_body["input_ids"],
+            )
 
             # orjson: the body carries the whole prompt's input_ids on every turn.
             proxy_body = orjson.dumps(request_body)
@@ -441,12 +469,14 @@ class SessionCore:
         )
         await self._take_store_ref(session, request_body, result)
 
+        completion = extract_flagged_completion(session, result)
         # Non-200 (e.g. 400 context too long) passes through unrecorded so the
         # agent can retry or handle the error.
-        if result["status_code"] != 200:
+        if completion is None:
             return proxy_result_to_response(result)
 
-        response, choice, assistant_message, completion_token_ids = extract_completion(result)
+        response, choice, assistant_message, completion_token_ids = completion
+        self._check_engine_prompt(request_body, choice)
         assistant_message = tito_tokenizer.postprocess_completion(
             choice=choice,
             assistant_message=assistant_message,
@@ -493,6 +523,35 @@ class SessionCore:
         # --- lock released ---
 
         return _chat_client_response(result, response, response_intent)
+
+    def _prepare_engine_request(
+        self, request_body: dict, *, checkpoint_token_ids: list[int], checkpoint_record: SessionRecord | None
+    ) -> None:
+        prepare_engine_request(
+            request_body,
+            checkpoint_token_ids=checkpoint_token_ids,
+            checkpoint_record=checkpoint_record,
+            token_space=self.config.multimodal_token_space_processing,
+        )
+        # R3 rows count the tokens the engine runs: the offset uses the engine's form.
+        self._maybe_request_addition_r3(
+            request_body,
+            engine_token_ids(checkpoint_token_ids, checkpoint_record),
+            request_body["input_ids"],
+        )
+
+    def _check_engine_prompt(self, request_body: dict, choice: dict) -> None:
+        if self.image_token_counter is None:
+            check_engine_prompt(request_body, choice)
+        else:
+            assert_engine_expansion_matches(request_body, choice, self.image_token_counter)
+
+    def _store_message_media(self, client_args: dict) -> dict:
+        return store_message_media(
+            client_args,
+            token_space=self.config.multimodal_token_space_processing,
+            media_dir=self.config.run_media_dir,
+        )
 
     def _with_routing_key(self, headers: dict, session_id: str) -> dict:
         header = self.config.routing_key_header

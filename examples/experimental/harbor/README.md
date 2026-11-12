@@ -29,7 +29,7 @@ with the extra for your backend:
 ```bash
 # uv, not pip: the branch carries a uv-workspace dependency pip cannot resolve
 uv pip install "harbor[e2b] @ git+https://github.com/harbor-framework/harbor@harbor-miles-v0.20.0"
-# or harbor[daytona], harbor[modal], ...
+# or harbor[daytona], harbor[modal], harbor[novita], ...
 ```
 
 ## 2. Provision the sandbox backend
@@ -55,7 +55,7 @@ servers on the head node. On a multi-node job see the network note in
 ranges must route from the sandbox network: one
 session-server port per worker starting at `--session-server-port` (30000-30031
 for `run.py`'s 32 workers) and the SGLang router's 31000. Host-process agents
-(terminus-2) call the model from the worker and need no sandbox egress.
+(terminus-2, computer-1) call the model from the worker and need no sandbox egress.
 
 ## 3. Prepare data
 
@@ -105,6 +105,45 @@ keep the requested CPU guarantee while allowing burst capacity.
 Every remaining knob — timeouts and their layering, failure semantics, the
 full env-var reference — is documented in `harbor_agent_function.py`'s header,
 next to the code that reads it.
+
+Harbor's `computer-1` screenshot agent trains with Qwen3-VL when the launcher
+passes `agentic_train_args(..., tito_model="qwen3_vl", session_images=True)`,
+which selects `--use-session-server v2 --multimodal-token-space-processing`, and also passes
+the `--sglang-enable-token-space-processor`, `--shared-media-dir` and
+`--use-miles-router` that session images require. Qwen3-VL clicks on a 0-999 grid while
+computer-1's generic provider reads pixels, so set `HARBOR_CUA_COORDINATE_SPACE=normalized_0_999`,
+which patches that provider to prompt for and rescale a 0-999 grid. Other computer-1 settings,
+such as the desktop size, go in `HARBOR_AGENT_KWARGS`. computer-1 starts its own Xvfb, XFCE
+and Chromium; to drive a desktop the task image already runs on `:1` instead, set
+`HARBOR_CUA_DESKTOP=existing`, with `HARBOR_CUA_SETTLE_SEC`, `HARBOR_CUA_SCREENSHOT_SIZE` and
+`HARBOR_CUA_KEEP_SCREENSHOTS` as `harbor_agent_function.py`'s header describes. The image needs
+ImageMagick's `import` and `convert` and `xdotool` on its PATH.
+
+## 5. Optional: run the trials on a CPU box
+
+Host-process harnesses (`computer-1`, `terminus-2`) and their verifiers use the rollout host's CPUs, one Python
+process per trial. To move that work off the GPU box, run an agent worker on a CPU machine:
+
+```bash
+python -m miles.rollout.agentic.worker --host 0.0.0.0 --port 11100 --keep-env HARBOR_TASKS_DIR E2B_API_KEY_FILE
+```
+
+Then launch with `--agent-worker http://<cpu-box>:11100`, which passes `--custom-agent-function-mode worker` and
+`--custom-agent-function-worker`.
+Each trial still runs this example's agent function through the `subproc` path, now as a child of the worker. Its
+reports and verdict come back to the rollout, and cancelling the rollout's call cancels the trial.
+
+- **Environment.** Each call carries the sandbox providers' key-file and address vars, this example's `HARBOR_*` and
+  `AGENT_*`, and the `WORKER_ENV` tuple of each module `HARBOR_AGENT_IMPORT_PATH` and `HARBOR_VERIFIER_IMPORT_PATH`
+  name. A recipe whose agent or verifier reads its own vars, such as `LITE_*`, declares them there:
+  `WORKER_ENV = ("LITE_*",)` beside its verifier class. Name the vars whose value differs on the worker host, such as
+  the task dir and key file paths, in the worker's `--keep-env`.
+- **Imports.** The worker host needs this checkout and the agent and verifier modules on its `PYTHONPATH`. It needs no
+  torch, sglang or ray. The rollout host needs harbor and the modules those two vars name as well: it imports them to
+  read their `WORKER_ENV`, and a module that does not import there stops the rollout with an error naming it.
+- **Network.** A host-process harness calls the session servers at `--session-server-external-host` from the worker
+  host, so that host needs the route. An installed agent (mini-swe-agent, claude-code) still calls them from its
+  sandbox, so the sandbox needs it, as without a worker.
 
 ## Validation
 

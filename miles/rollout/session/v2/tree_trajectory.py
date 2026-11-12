@@ -8,6 +8,7 @@ concurrency, and tokenization live one layer up in ``session_state``.
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from miles.rollout.session.errors import MessageValidationError
 from miles.rollout.session.types import SessionRecord
 from miles.utils.chat_template_utils.message_matcher_hub import SessionMessageMatcher, strict_message_matches
 
@@ -20,7 +21,7 @@ class TrajectoryNode:
 
     delta_messages: list[dict[str, Any]]
     token_ids: list[int]  # full root->node snapshot
-    completion_span: tuple[int, int]  # this node's sampled completion within token_ids
+    completion_span: tuple[int, int]  # this node's completion, in the engine's form of token_ids (token_space)
     seq: int  # per-session logical commit order — THE ordering key
     committed_at: float  # wall clock, decoration only (NTP-unsafe; never order by this)
     response_id: str  # upstream response id: the agent-branch <-> leaf join key
@@ -80,6 +81,14 @@ class SessionTree:
                 parent.children.append(copied)
         return tree
 
+    def check_node_cap(self) -> None:
+        if len(self.nodes) >= MAX_NODES:
+            raise MessageValidationError(
+                f"node cap reached ({MAX_NODES}): the session cannot branch or extend "
+                f"further — this almost always means the harness is not replaying "
+                f"history verbatim"
+            )
+
     def create_node(
         self,
         parent: TrajectoryNode | None,
@@ -93,12 +102,7 @@ class SessionTree:
         finish_reason: str,
         turn_args: dict[str, Any] | None = None,
     ) -> TrajectoryNode:
-        if len(self.nodes) >= MAX_NODES:
-            raise ValueError(
-                f"node cap reached ({MAX_NODES}): the session cannot branch or extend "
-                f"further — this almost always means the harness is not replaying "
-                f"history verbatim"
-            )
+        self.check_node_cap()
         node = TrajectoryNode(
             delta_messages=list(delta_messages),
             token_ids=list(token_ids),

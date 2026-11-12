@@ -51,32 +51,67 @@ Env vars (read on the rollout worker):
                          same meaning as on the agent server
   HARBOR_OVERRIDE_STORAGE_MB
                          per-sandbox disk, Harbor's ``override_storage_mb``
+  HARBOR_AGENT_IMPORT_PATH
+                         ``module:Class`` Harbor builds instead of the agent
+                         registered under ``agent_name``
+  HARBOR_AGENT_KWARGS    JSON object added to ``AgentConfig.kwargs``; a key the
+                         binding sets is refused
+  HARBOR_VERIFIER_IMPORT_PATH / HARBOR_VERIFIER_KWARGS
+                         a Harbor verifier class, and its JSON kwargs, run in
+                         place of the task's ``tests/``
+  HARBOR_CUA_COORDINATE_SPACE
+                         ``normalized_0_999`` makes Harbor's generic computer
+                         provider prompt for, and rescale, clicks on a 0..999
+                         grid; unset leaves Harbor as it is
+  HARBOR_CUA_DESKTOP     ``existing`` makes computer-1 drive the desktop its
+                         image already runs on ``:1``: no Xvfb, XFCE, VNC or
+                         Chromium, liveness from the X socket, PNG screenshots,
+                         and zoom and the browser actions refused; unset leaves
+                         Harbor as it is. With it:
+    HARBOR_CUA_SETTLE_SEC
+                         seconds to wait after each screen-changing action
+                         (default 2.0)
+    HARBOR_CUA_SCREENSHOT_SIZE
+                         ``WIDTHxHEIGHT`` the screenshot is resized to in the
+                         sandbox (default: the desktop's own size)
+    HARBOR_CUA_KEEP_SCREENSHOTS
+                         most screenshots one request carries, the current
+                         one included (default: Harbor's own trimming)
 
-Failure semantics: a verdict is returned as-is; every episode that ends
-without one scores 0 with a named ``exit_status`` (``TimeLimitExceeded``,
+Failure semantics: a verdict is returned as-is. A trial the policy cannot have
+failed is discarded with ``InfraAbort``: one that failed before its agent
+started (``SandboxUnavailable``, ``AgentSetupFailed``), or one whose in-process
+agent lost the model service (``ServerUnreachable``). Every other episode that ends
+without a verdict scores 0 with a named ``exit_status`` (``TimeLimitExceeded``,
 ``SequenceLengthLimitExceeded``, ``AgentError``), matching the agent-server
 path. Configuration errors (missing task dir, bad env vars) raise instead:
 they would fail every sample, and a loud stop beats training on silent
-all-zero rewards. Nothing is discarded here yet; see the tracking issue for
-wiring the platform-side Harbor exceptions to ``InfraAbort`` once that
-contract lands.
+all-zero rewards.
 """
 
 import asyncio
+import importlib
 import json
 import logging
 import math
 import os
 import re
+import shlex
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 from typing import Any
 
+from miles.rollout.agentic.agent_function import InfraAbort
 from miles.rollout.agentic.credentials import PROVIDER_CREDENTIALS, resolve_provider_api_key
 from miles.rollout.agentic.session import openai_session_url
+from miles.utils.retry_utils import NonRetryableError
 
 logger = logging.getLogger(__name__)
+
+_OWN_WORKER_ENV = ("HARBOR_*", "AGENT_*")
+_MODULE_IMPORT_PATH_VARS = ("HARBOR_AGENT_IMPORT_PATH", "HARBOR_VERIFIER_IMPORT_PATH")
 
 _DEFAULT_AGENT_TRIAL_TIMEOUT_S = 7200
 _SAFE_INSTANCE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -84,6 +119,27 @@ _SAFE_INSTANCE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # Harbor exception class names -> the exit_status vocabulary the reward path reads.
 _TIMEOUT_EXCEPTIONS = {"AgentTimeoutError", "VerifierTimeoutError", "EnvironmentStartTimeoutError"}
 _OUTPUT_LIMIT_EXCEPTIONS = {"MaxSeqLenExceededError", "SingleTurnMaxSeqLenExceededError"}
+_MODEL_SERVICE_EXCEPTIONS = {"APIConnectionError", "ServiceUnavailableError"}
+
+
+def __getattr__(name: str) -> tuple[str, ...]:
+    if name != "WORKER_ENV":
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return (*_OWN_WORKER_ENV, *(p for var in _MODULE_IMPORT_PATH_VARS for p in _imported_worker_env(var)))
+
+
+def _imported_worker_env(var: str) -> tuple[str, ...]:
+    module_name = os.getenv(var, "").strip().partition(":")[0]
+    if not module_name:
+        return ()
+    try:
+        module = importlib.import_module(module_name)
+    except ImportError as exc:
+        raise NonRetryableError(
+            f"{var} names {module_name}, which does not import in this process: {exc!r}. "
+            "In worker mode the rollout host needs harbor and the agent and verifier modules too."
+        ) from exc
+    return tuple(getattr(module, "WORKER_ENV", ()))  # config-access-exempt: a recipe module may declare no env
 
 
 def _trial_timeout_s() -> int:
@@ -102,6 +158,204 @@ def _env_int(var: str) -> int | None:
 
 def _allowed_hosts(var: str) -> list[str]:
     return [host for host in re.split(r"[,\s]+", os.getenv(var, "")) if host]
+
+
+_NORMALIZED_GRID = 1000
+_coordinate_space_applied = False
+
+
+def apply_coordinate_space() -> None:
+    """Patch Harbor's generic computer provider for the coordinate space in ``HARBOR_CUA_COORDINATE_SPACE``."""
+    global _coordinate_space_applied
+    space = os.getenv("HARBOR_CUA_COORDINATE_SPACE", "").strip()
+    if not space or _coordinate_space_applied:
+        return
+    if space != "normalized_0_999":
+        raise ValueError(f"HARBOR_CUA_COORDINATE_SPACE={space!r}; the only supported value is normalized_0_999")
+    from harbor.agents.computer_1.providers.generic import GenericJsonProvider
+    from harbor.agents.computer_1.runtime import CoordinateSpace
+
+    from_agent = GenericJsonProvider.from_agent.__func__
+    parse = GenericJsonProvider.parse
+
+    def from_agent_on_grid(cls, agent):
+        provider = from_agent(cls, agent)
+        provider.desktop_width = provider.desktop_height = _NORMALIZED_GRID
+        return provider
+
+    def parse_on_grid(self, llm_response):
+        step = parse(self, llm_response)
+        if step.action is not None:
+            step.action.source = CoordinateSpace.NORMALIZED_0_999.value
+        return step
+
+    GenericJsonProvider.from_agent = classmethod(from_agent_on_grid)
+    GenericJsonProvider.parse = parse_on_grid
+    _coordinate_space_applied = True
+
+
+_BROWSER_ACTIONS = frozenset({"zoom", "navigate", "go_back", "go_forward"})
+_BROWSER_PROMPT_LINES = (
+    " zoom, navigate,",
+    '\n    "url": <string, optional, used by navigate>,',
+    '\n    "zoom_region": <[x0, y0, x1, y1] in desktop pixels, optional, used by zoom>,',
+    '\n- For "zoom": provide "zoom_region" as [x0, y0, x1, y1] in desktop pixels.'
+    "\n  The NEXT screenshot is cropped (no resize) to that region, then auto-resets."
+    "\n  Use this to inspect a small UI area at native pixel density.",
+    '\n- For "navigate": provide the destination URL in "url".',
+)
+_desktop_applied = False
+
+
+def _screenshot_size() -> tuple[int, int] | None:
+    raw = os.getenv("HARBOR_CUA_SCREENSHOT_SIZE", "").strip()
+    if not raw:
+        return None
+    match = re.fullmatch(r"([1-9]\d*)x([1-9]\d*)", raw)
+    if match is None:
+        raise ValueError(f"HARBOR_CUA_SCREENSHOT_SIZE={raw!r}; expected WIDTHxHEIGHT")
+    return int(match[1]), int(match[2])
+
+
+def _images_in(prompt: Any) -> int:
+    turns = [prompt] if isinstance(prompt, dict) else prompt if isinstance(prompt, list) else []
+    return sum(
+        isinstance(part, dict) and part.get("type") == "image_url"
+        for turn in turns
+        if isinstance(turn, dict) and isinstance(turn.get("content"), list)
+        for part in turn["content"]
+    )
+
+
+def apply_existing_desktop() -> None:
+    """Patch Harbor's computer-1 to drive the desktop its image runs when ``HARBOR_CUA_DESKTOP=existing``."""
+    global _desktop_applied
+    desktop = os.getenv("HARBOR_CUA_DESKTOP", "").strip()
+    if not desktop or _desktop_applied:
+        return
+    if desktop != "existing":
+        raise ValueError(f"HARBOR_CUA_DESKTOP={desktop!r}; the only supported value is existing")
+    settle_sec = float(os.getenv("HARBOR_CUA_SETTLE_SEC", "2.0"))
+    size = _screenshot_size()
+    keep = _env_int("HARBOR_CUA_KEEP_SCREENSHOTS")
+    if keep is not None and keep < 1:
+        raise ValueError("HARBOR_CUA_KEEP_SCREENSHOTS must be at least 1: the request needs the current screen")
+    _patch_desktop_prompt()
+    _patch_desktop_session(settle_sec=settle_sec, size=size)
+    if keep is not None:
+        _patch_screenshot_history(keep=keep)
+    _desktop_applied = True
+
+
+def _patch_desktop_prompt() -> None:
+    from harbor.agents.computer_1.providers import generic
+
+    template = (generic._TEMPLATES_DIR / "computer-1-json.txt").read_text()
+    for line in _BROWSER_PROMPT_LINES:
+        if template.count(line) != 1:
+            raise ValueError(f"computer-1's prompt template no longer holds {line!r} exactly once")
+        template = template.replace(line, "")
+    from_agent = generic.GenericJsonProvider.from_agent.__func__
+
+    def from_agent_on_desktop(cls, agent):
+        provider = from_agent(cls, agent)
+        provider._prompt_template = template
+        provider.screenshot_format = "png"
+        return provider
+
+    generic.GenericJsonProvider.from_agent = classmethod(from_agent_on_desktop)
+
+
+def _patch_desktop_session(*, settle_sec: float, size: tuple[int, int] | None) -> None:
+    from harbor.agents.computer_1 import runtime
+
+    session = runtime.Computer1Session
+    execute = session.execute
+    unchanged_screen = frozenset({"wait", "sleep", *runtime.TERMINAL_ACTION_TYPES})
+
+    async def start(self) -> None:
+        if self._started:
+            return
+        dirs = " ".join(shlex.quote(d) for d in (runtime._RUNTIME_DIR, runtime._SCREENSHOT_DIR, str(self._agent_dir)))
+        await self._exec(
+            runtime._bash_inline(f"mkdir -p {dirs}"), timeout_sec=60, label="mkdir runtime dirs", retries=2
+        )
+        await self._wait_for_x11()
+        self._started = True
+
+    async def is_session_alive(self) -> bool:
+        try:
+            result = await self._raw_exec("test -S /tmp/.X11-unix/X1 && echo ok || echo down", timeout_sec=5)
+        except Exception:
+            return False
+        return "ok" in (result.stdout or "")
+
+    async def reset(self) -> None:
+        raise RuntimeError("a desktop session has no browser to relaunch")
+
+    async def no_recovery(self, action_type: str, exc: Exception) -> None:
+        return None
+
+    async def execute_and_settle(self, action) -> dict[str, Any]:
+        if action.type in _BROWSER_ACTIONS:
+            raise runtime.RuntimeRequestError(action.type, 400, f"{action.type!r} is not available on this desktop")
+        result = await execute(self, action)
+        if action.type not in unchanged_screen and settle_sec > 0:
+            await asyncio.sleep(settle_sec)
+        return result
+
+    async def fetch_screenshot(self, env_path) -> str:
+        target = str(env_path)
+        if PurePosixPath(target).suffix.lower() != ".png":
+            raise ValueError(f"a desktop session writes PNG screenshots, not {target!r}")
+        png = shlex.quote(f"{runtime._SCREENSHOT_DIR}/latest.png")
+        resize = f" && convert {png} -resize {size[0]}x{size[1]}! {png}" if size else ""
+        script = (
+            f"set -e; export DISPLAY={runtime._DEFAULT_DISPLAY}; "
+            f"mkdir -p {shlex.quote(runtime._SCREENSHOT_DIR)} {shlex.quote(str(PurePosixPath(target).parent))}; "
+            f"import -window root {png}{resize}; cp {png} {shlex.quote(target)}"
+        )
+        await self._exec(
+            runtime._bash_inline(script), timeout_sec=max(30, self._request_timeout_sec), label="screenshot"
+        )
+        return target
+
+    session.start = start
+    session.is_session_alive = is_session_alive
+    session.reset = reset
+    session._recover_chromium_if_needed = no_recovery
+    session.execute = execute_and_settle
+    session.fetch_screenshot = fetch_screenshot
+
+
+def _patch_screenshot_history(*, keep: int) -> None:
+    from harbor.agents.computer_1.computer_1 import Computer1
+
+    query = Computer1._query_litellm
+    fallback_history = Computer1._fallback_message_history
+
+    def trim(agent, messages: list[Any], prompt_images: int) -> None:
+        holder = SimpleNamespace(messages=messages)
+        agent._compactor._trim_old_screenshots(holder, keep_last=max(0, keep - prompt_images))
+
+    async def query_trimmed(self, chat, prompt, *args, **kwargs):
+        trim(self, chat.messages, _images_in(prompt))
+        return await query(self, chat, prompt, *args, **kwargs)
+
+    def fallback_history_trimmed(self):
+        history = fallback_history(self)
+        trim(self, history, int(self._enable_images and self._latest_screenshot_path is not None))
+        return history
+
+    Computer1._query_litellm = query_trimmed
+    Computer1._fallback_message_history = fallback_history_trimmed
+
+
+def _env_json_object(var: str) -> dict[str, Any]:
+    value = json.loads(os.getenv(var, "") or "{}")
+    if not isinstance(value, dict):
+        raise ValueError(f"{var} must be a JSON object, got {type(value).__name__}")
+    return value
 
 
 # --- harness bindings -------------------------------------------------------
@@ -127,6 +381,7 @@ class HarnessBinding:
     env: Callable[[str, str], dict[str, str]]
     # the model name Harbor passes to the harness
     model_name: Callable[[str], str] = lambda model: model
+    accepts_max_seq_len: bool = True
 
 
 def _terminus_kwargs(
@@ -253,6 +508,25 @@ def _opencode_env(session_url: str, api_key: str) -> dict[str, str]:
     return {"OPENAI_BASE_URL": session_url, "OPENAI_API_BASE": session_url, "OPENAI_API_KEY": api_key}
 
 
+def _computer_1_kwargs(
+    session_url: str, api_key: str, sampling_params: dict[str, Any], model: str, max_seq_len: int | None
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "api_base": session_url,
+        "temperature": sampling_params.get("temperature"),
+        "llm_kwargs": {**{k: v for k, v in sampling_params.items() if k != "temperature"}, "api_key": api_key},
+        "provider": "litellm",
+        "enable_images": True,
+    }
+    if max_turns := _env_int("HARBOR_AGENT_MAX_ITERATIONS"):
+        kwargs["max_turns"] = max_turns
+    return kwargs
+
+
+def _no_env(session_url: str, api_key: str) -> dict[str, str]:
+    return {}
+
+
 HARNESS_BINDINGS: dict[str, HarnessBinding] = {
     "terminus-2": HarnessBinding(kwargs=_terminus_kwargs, env=_openai_env),
     "terminus-1": HarnessBinding(kwargs=_terminus_kwargs, env=_openai_env),
@@ -264,6 +538,7 @@ HARNESS_BINDINGS: dict[str, HarnessBinding] = {
         model_name=lambda model: "/".join(_opencode_provider_model(model)),
     ),
     "mini-swe-agent": HarnessBinding(kwargs=_no_kwargs, env=_mini_swe_agent_env),
+    "computer-1": HarnessBinding(kwargs=_computer_1_kwargs, env=_no_env, accepts_max_seq_len=False),
 }
 # Any other installed agent that speaks OpenAI chat completions.
 _DEFAULT_BINDING = HarnessBinding(kwargs=_no_kwargs, env=_openai_env)
@@ -318,6 +593,16 @@ def _environment_config():
                 f"auto_stop_interval_mins={kwargs['auto_stop_interval_mins']} would stop a Daytona sandbox "
                 f"mid-trial: AGENT_TRIAL_TIMEOUT allows {trial_min} minutes"
             )
+    elif env_type == EnvironmentType.E2B:
+        # renewals keep a sandbox alive as long as Harbor runs; servers that read this end it soon after
+        # the trial cap (the 30 minutes of slack is an estimate)
+        trial_s = _trial_timeout_s()
+        kwargs.setdefault("max_lifetime_secs", trial_s + 30 * 60)
+        if int(kwargs["max_lifetime_secs"]) <= trial_s:
+            raise ValueError(
+                f"max_lifetime_secs={kwargs['max_lifetime_secs']} would end an E2B sandbox mid-trial: "
+                f"AGENT_TRIAL_TIMEOUT allows {trial_s} seconds"
+            )
     overrides = {}
     for field, var in (
         ("override_cpus", "HARBOR_OVERRIDE_CPUS"),
@@ -356,12 +641,26 @@ def build_trial_config(metadata: dict[str, Any], session_url: str, request_kwarg
         "input_cost_per_token": 0.0,
         "output_cost_per_token": 0.0,
     }
-    if max_seq_len is not None:
+    if max_seq_len is not None and binding.accepts_max_seq_len:
         agent_kwargs["max_seq_len"] = max_seq_len
+    extra_agent_kwargs = _env_json_object("HARBOR_AGENT_KWARGS")
+    if clash := sorted(set(extra_agent_kwargs) & set(agent_kwargs)):
+        raise ValueError(f"HARBOR_AGENT_KWARGS sets {clash}, which the {agent_name} binding owns")
+    agent_kwargs.update(extra_agent_kwargs)
+    import_path = os.getenv("HARBOR_AGENT_IMPORT_PATH", "").strip() or None
 
     extra: dict[str, Any] = {}
-    if verifier_timeout := os.getenv("HARBOR_VERIFIER_TIMEOUT_SEC"):
-        extra["verifier"] = VerifierConfig(override_timeout_sec=float(verifier_timeout))
+    verifier_timeout = os.getenv("HARBOR_VERIFIER_TIMEOUT_SEC")
+    verifier_import_path = os.getenv("HARBOR_VERIFIER_IMPORT_PATH", "").strip() or None
+    verifier_kwargs = _env_json_object("HARBOR_VERIFIER_KWARGS")
+    if verifier_kwargs and verifier_import_path is None:
+        raise ValueError("HARBOR_VERIFIER_KWARGS needs HARBOR_VERIFIER_IMPORT_PATH")
+    if verifier_timeout or verifier_import_path:
+        extra["verifier"] = VerifierConfig(
+            override_timeout_sec=float(verifier_timeout) if verifier_timeout else None,
+            import_path=verifier_import_path,
+            kwargs=verifier_kwargs,
+        )
     if build_mult := os.getenv("HARBOR_ENV_BUILD_TIMEOUT_MULTIPLIER"):
         extra["environment_build_timeout_multiplier"] = float(build_mult)
 
@@ -369,7 +668,8 @@ def build_trial_config(metadata: dict[str, Any], session_url: str, request_kwarg
     return TrialConfig(
         task=TaskConfig(path=_task_path(tasks_dir, str(metadata.get("instance_id", "")))),
         agent=AgentConfig(
-            name=agent_name,
+            name=None if import_path else agent_name,
+            import_path=import_path,
             model_name=binding.model_name(model),
             override_timeout_sec=float(agent_timeout) if agent_timeout else None,
             env=binding.env(session_url, api_key),
@@ -469,6 +769,35 @@ def _failed(exit_status: str) -> dict[str, Any]:
     return {"reward": 0.0, "exit_status": exit_status, "eval_report": {}, "agent_metrics": {}}
 
 
+def _discard_cause(result) -> tuple[str, Any] | None:
+    steps = (
+        getattr(result, "step_results", None) or []
+    )  # config-access-exempt: only multi-step Harbor trials record step results
+    failures = [
+        exc
+        for exc in (
+            getattr(result, "exception_info", None),
+            *(getattr(step, "exception_info", None) for step in steps),
+        )
+        if exc is not None
+    ]  # config-access-exempt: Harbor results without an exception omit exception details
+    if not failures:
+        return None
+    if not _agent_started(result, steps):
+        setup = getattr(
+            result, "agent_setup", None
+        )  # config-access-exempt: Harbor results may omit timings for phases that did not run
+        return ("SandboxUnavailable" if setup is None else "AgentSetupFailed"), failures[0]
+    lost = next((exc for exc in failures if exc.exception_type in _MODEL_SERVICE_EXCEPTIONS), None)
+    return ("ServerUnreachable", lost) if lost is not None else None
+
+
+def _agent_started(result, steps: list) -> bool:
+    return getattr(result, "agent_execution", None) is not None or any(
+        getattr(step, "agent_execution", None) is not None for step in steps
+    )  # config-access-exempt: Harbor results may omit timings for phases that did not run
+
+
 # --- entry -----------------------------------------------------------------
 
 
@@ -492,6 +821,8 @@ async def run(
     # fail every sample the same way; raising beats training on silent all-zero
     # rewards.
     _ensure_provider_key()
+    apply_coordinate_space()
+    apply_existing_desktop()
     config = build_trial_config(metadata, session_url, request_kwargs)
 
     try:
@@ -506,6 +837,10 @@ async def run(
     except Exception as e:
         logger.error(f"Harbor trial for {instance_id} failed: {e}", exc_info=True)
         return _failed("AgentError")
+
+    if (discard := _discard_cause(result)) is not None:
+        cause, exc = discard
+        raise InfraAbort(cause, f"Harbor trial for {instance_id}: {exc.exception_type}: {exc.exception_message}")
 
     out = trial_result_to_metadata(result)
     out["trial_dir"] = str(trial.paths.trial_dir)

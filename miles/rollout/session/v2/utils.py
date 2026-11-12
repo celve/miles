@@ -11,7 +11,9 @@ from miles.rollout.session.samples.merge import (
     merge_samples_with_addition_r3,
     truncate_samples_by_total_tokens,
 )
+from miles.rollout.session.token_space import engine_token_ids
 from miles.rollout.session.v2.session_state import SessionRegistryV2, SessionStateV2
+from miles.utils.media_refs import collect_media_refs
 from miles.utils.types import Sample
 
 logger = logging.getLogger(__name__)
@@ -75,7 +77,7 @@ def build_leaf_material(
             args,
             records,
             registry.tokenizer,
-            accumulated_token_ids=leaf.token_ids,
+            accumulated_token_ids=engine_token_ids(leaf.token_ids, leaf.record),
             max_trim_tokens=registry.tito_tokenizer.max_trim_tokens,
             use_addition_r3=use_addition_r3,
             evaluation=state.evaluation,
@@ -90,7 +92,7 @@ def build_leaf_material(
             sample = merge_samples(turns, registry.tokenizer)
         adopt_session_records(sample, records)
         flat: dict[str, Any] = {
-            "accumulated_token_ids": list(leaf.token_ids),
+            "accumulated_token_ids": engine_token_ids(leaf.token_ids, leaf.record),
             "turn_args": filter_turn_args(leaf.turn_args),
             "leaf": {
                 "node_id": leaf.seq,
@@ -99,6 +101,11 @@ def build_leaf_material(
                 "response_id": leaf.response_id,
             },
         }
+        prompt_media_refs = {
+            str(node.seq): collect_media_refs(node.record.request.get("messages") or [], None) for node in path
+        }
+        if any(prompt_media_refs.values()):
+            flat["prompt_media_refs"] = prompt_media_refs
         if computed_mismatch is not None and leaf.seq in computed_mismatch:
             mismatch = computed_mismatch[leaf.seq]
         else:

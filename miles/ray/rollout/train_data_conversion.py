@@ -3,6 +3,7 @@ from typing import Any
 
 import torch
 
+from miles.backends.training_utils.data.multimodal import trained_total_lengths
 from miles.rollout.generate_utils.rollout_topk_logprobs import validate_rollout_topk_logprobs_sample
 from miles.rollout.reward_shaping import (
     apply_length_penalty,
@@ -12,8 +13,9 @@ from miles.rollout.reward_shaping import (
 )
 from miles.utils.args.custom_view import compute_custom_function_config
 from miles.utils.audit_utils.sample_ownership.recorder import SampleOwnershipRecorder
-from miles.utils.dp_schedule import TrainParallelConfig, build_dp_schedule
+from miles.utils.dp_schedule import PAD_ROW_LENGTH, TrainParallelConfig, build_dp_schedule
 from miles.utils.lora.utils import is_multi_lora_enabled
+from miles.utils.media_refs import has_media
 from miles.utils.object_store import ValueSpec
 from miles.utils.output_store.dropped import has_inline_replay
 from miles.utils.output_store.plan import FIELDS, SamplingMaskSegments, StorePlanError
@@ -55,6 +57,7 @@ ROLLOUT_DATA_VALUE_SPEC: dict[str, ValueSpec] = {
     "rollout_ids": ValueSpec(codec="ndarray", dtype="int64"),
     "rollout_mask_sums": ValueSpec(codec="ndarray", dtype="int64"),
     "multimodal_train_inputs": ValueSpec(codec="ragged_tensor_dict"),
+    "multimodal_inputs": ValueSpec(codec="msgpack_ragged"),
     "prompt": ValueSpec(codec="msgpack_ragged"),
     "metadata": ValueSpec(codec="msgpack_ragged"),
     "weight_versions": ValueSpec(codec="msgpack_ragged"),
@@ -80,7 +83,7 @@ def convert_samples_to_train_data(
     """
     if (f := custom_convert_samples_to_train_data_func) is not None:
         fn_args = compute_custom_function_config(args, args.custom_convert_samples_to_train_data_path)
-        return f(fn_args, samples)
+        return _refuse_dense_alongside_refs(f(fn_args, samples))
 
     # Finalize masks before shaping: only tokens used by the training loss count.
     loss_masks = []
@@ -209,6 +212,9 @@ def convert_samples_to_train_data(
 
     if any(sample.multimodal_train_inputs is not None for sample in samples):
         train_data["multimodal_train_inputs"] = [sample.multimodal_train_inputs for sample in samples]
+    if any(has_media(sample.multimodal_inputs) for sample in samples) and args.multimodal_token_space_processing:
+        # The trainer rebuilds the processor tensors from these references.
+        train_data["multimodal_inputs"] = [sample.multimodal_inputs for sample in samples]
 
     if any(sample.weight_versions for sample in samples):
         train_data["weight_versions"] = [[call.to_dict() for call in sample.weight_versions] for sample in samples]
@@ -227,6 +233,16 @@ def convert_samples_to_train_data(
     if x is not None:
         train_data["dynamic_global_batch_size"] = x
 
+    return _refuse_dense_alongside_refs(train_data)
+
+
+def _refuse_dense_alongside_refs(train_data: dict) -> dict:
+    if "multimodal_inputs" in train_data and "multimodal_train_inputs" in train_data:
+        raise ValueError(
+            "train data carries both media references and dense multimodal_train_inputs; with "
+            "--multimodal-token-space-processing the trainer rebuilds the tensors from the references, so a "
+            "sample builder must leave multimodal_train_inputs unset"
+        )
     return train_data
 
 
@@ -419,7 +435,7 @@ def can_precompute_dp_schedule(
         return False
     if is_multi_lora_enabled(args):
         return False
-    if "multimodal_train_inputs" in data:
+    if "multimodal_inputs" in data:
         return False
     if "rollout_ids" not in data:
         return False
@@ -431,17 +447,18 @@ def split_train_data_by_dp_scheduled_raw(
     args: Any, data: dict[str, Any], *, train_parallel_config: TrainParallelConfig
 ) -> list[dict[str, Any]]:
     """DP split with the micro-batch schedule precomputed on the rollout side."""
-    total_lengths = [len(t) for t in data["tokens"]]
-    data["total_lengths"] = total_lengths
-
     global_batch_size = data.get("dynamic_global_batch_size", args.global_batch_size)
-    partitions, micro_batch_indices, num_microbatches, num_rollouts = build_dp_schedule(
+    partitions, micro_batch_indices, num_microbatches, num_rollouts, pad_templates = build_dp_schedule(
         args,
         train_parallel_config,
-        total_lengths,
+        trained_total_lengths(data["tokens"], data.get("multimodal_train_inputs")),
         global_batch_size=global_batch_size,
         rollout_indices=data["rollout_ids"],
     )
+    if pad_templates:
+        data = _append_pad_rows(data, pad_templates)
+    total_lengths = [len(t) for t in data["tokens"]]
+    data["total_lengths"] = total_lengths
 
     _log_dp_schedule_trim(args=args, data=data, partitions=partitions)
 
@@ -456,6 +473,43 @@ def split_train_data_by_dp_scheduled_raw(
         shard["micro_batch_indices"] = micro_batch_indices[rank]
         shard["num_rollouts"] = num_rollouts
     return shards
+
+
+_PAD_ROW_FIELDS = {
+    "tokens": lambda row: [0] * PAD_ROW_LENGTH,
+    "multimodal_train_inputs": lambda row: None,
+    "multimodal_inputs": lambda row: None,
+    "response_lengths": lambda row: 1,
+    "rewards": lambda row: 0.0,
+    "truncated": lambda row: 0,
+    "loss_masks": lambda row: [0],
+    "rollout_log_probs": lambda row: [0.0],
+    "teacher_log_probs": lambda row: [0.0],
+    "opd_reverse_kl": lambda row: [0.0],
+    "loss_weights": lambda row: [0.0],
+    "advantages": lambda row: [0.0],
+    "target_tokens": lambda row: [0],
+    "weight_versions": lambda row: [],
+    "rollout_topk_token_ids": lambda row: row["rollout_topk_token_ids"][:1],
+    "rollout_topk_lengths": lambda row: row["rollout_topk_lengths"][:1],
+    "rollout_topk_log_probs": lambda row: row["rollout_topk_log_probs"][:1],
+    "rollout_sampling_mask_ids": lambda row: row["rollout_sampling_mask_ids"][
+        : row["rollout_sampling_mask_offsets"][1]
+    ],
+    "rollout_sampling_mask_offsets": lambda row: row["rollout_sampling_mask_offsets"][:2],
+    "rollout_routed_experts": lambda row: row["rollout_routed_experts"][: PAD_ROW_LENGTH - 1],
+    "rollout_indexer_topk": lambda row: row["rollout_indexer_topk"][: PAD_ROW_LENGTH - 1],
+}
+
+
+def _append_pad_rows(data: dict[str, Any], pad_templates: list[int]) -> dict[str, Any]:
+    keys = [key for key in _PER_SAMPLE_SHARD_KEYS if key in data]
+    rows = [{key: data[key][template] for key in keys} for template in pad_templates]
+    padded = {
+        key: list(data[key]) + [_PAD_ROW_FIELDS[key](row) if key in _PAD_ROW_FIELDS else row[key] for row in rows]
+        for key in keys
+    }
+    return data | padded
 
 
 def _log_dp_schedule_trim(*, args, data: dict[str, Any], partitions: list[list[int]]) -> None:
@@ -480,7 +534,9 @@ def split_train_data_by_dp_raw(args, data: dict[str, Any], *, dp_size: int) -> l
     data["total_lengths"] = total_lengths
 
     if args.balance_data:
-        partitions = get_seqlen_balanced_partitions(total_lengths, dp_size, equal_size=True)
+        partitions = get_seqlen_balanced_partitions(
+            trained_total_lengths(data["tokens"], data.get("multimodal_train_inputs")), dp_size, equal_size=True
+        )
     else:
         partitions = [range(i, len(total_lengths), dp_size) for i in range(dp_size)]
 
@@ -490,7 +546,66 @@ def split_train_data_by_dp_raw(args, data: dict[str, Any], *, dp_size: int) -> l
     if adapter_slots is not None:
         partitions = [sorted(p, key=lambda i: adapter_slots[i]) for p in partitions]
 
-    return _package_shards(args, data, partitions)
+    shards = _package_shards(args, data, partitions)
+    if (num_rollouts := _num_rollouts_of_single_step(args, data)) is not None:
+        for shard in shards:
+            shard["num_rollouts"] = num_rollouts
+    return shards
+
+
+def _num_rollouts_of_single_step(args, data: dict[str, Any]) -> list[int] | None:
+    if is_multi_lora_enabled(args) or "rollout_ids" not in data:
+        return None
+    num_samples = len(data["tokens"])
+    num_rollouts = len(set(data["rollout_ids"]))
+    if num_rollouts == num_samples:
+        return None
+    global_batch_size = data.get("dynamic_global_batch_size", args.global_batch_size)
+    if global_batch_size != num_samples:
+        raise ValueError(
+            f"{num_rollouts} rollouts arrived as {num_samples} samples, but this split counts --global-batch-size "
+            f"({global_batch_size}) in samples, so it would cut rollouts across optimizer steps and divide the loss "
+            "by samples. Train where the rollout-side schedule applies (can_precompute_dp_schedule; it also needs "
+            "at least --global-batch-size rollouts per round), or emit a fixed number of samples per rollout and "
+            "set --global-batch-size to the round's sample count."
+        )
+    return [num_rollouts]
+
+
+_PER_SAMPLE_SHARD_KEYS = (
+    "tokens",
+    "multimodal_train_inputs",
+    "multimodal_inputs",
+    "response_lengths",
+    "rewards",
+    "truncated",
+    "loss_masks",
+    "round_number",
+    "sample_indices",
+    "lineage_source_sample_indices",
+    "lineage_output_indices",
+    "lineage_output_counts",
+    "rollout_ids",
+    "rollout_mask_sums",
+    "rollout_log_probs",
+    "rollout_topk_token_ids",
+    "rollout_topk_lengths",
+    "rollout_topk_log_probs",
+    "rollout_sampling_mask_ids",
+    "rollout_sampling_mask_offsets",
+    "rollout_routed_experts",
+    "rollout_indexer_topk",
+    "rollout_store_plan",
+    "prompt",
+    "teacher_log_probs",
+    "opd_reverse_kl",
+    "seq_witness_ids",
+    "weight_versions",
+    "adapter_slots",
+    "loss_weights",
+    "advantages",
+    "target_tokens",
+)
 
 
 def _package_shards(args, data: dict[str, Any], partitions) -> list[dict[str, Any]]:
@@ -501,39 +616,7 @@ def _package_shards(args, data: dict[str, Any], partitions) -> list[dict[str, An
         rollout_data = {}
         partition = partitions[i]
         rollout_data["partition"] = partition
-        for key in [
-            "tokens",
-            "multimodal_train_inputs",
-            "response_lengths",
-            "rewards",
-            "truncated",
-            "loss_masks",
-            "round_number",
-            "sample_indices",
-            "lineage_source_sample_indices",
-            "lineage_output_indices",
-            "lineage_output_counts",
-            "rollout_ids",
-            "rollout_mask_sums",
-            "rollout_log_probs",
-            "rollout_topk_token_ids",
-            "rollout_topk_lengths",
-            "rollout_topk_log_probs",
-            "rollout_sampling_mask_ids",
-            "rollout_sampling_mask_offsets",
-            "rollout_routed_experts",
-            "rollout_indexer_topk",
-            "rollout_store_plan",
-            "prompt",
-            "teacher_log_probs",
-            "opd_reverse_kl",
-            "seq_witness_ids",
-            "weight_versions",
-            "adapter_slots",
-            "loss_weights",
-            "advantages",
-            "target_tokens",
-        ]:
+        for key in _PER_SAMPLE_SHARD_KEYS:
             if key not in data:
                 continue
             val = [data[key][j] for j in partition]

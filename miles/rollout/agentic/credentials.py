@@ -75,6 +75,20 @@ PROVIDER_CREDENTIALS = {
         "forward": ("MODAL_PROFILE", "MODAL_ENVIRONMENT", "OPENENV_MODAL_APP"),
         "target": ("MODAL_ENVIRONMENT", "workspace environment", "the profile's default"),
     },
+    "novita": {
+        "provider": "Novita",
+        "key_env_vars": ("NOVITA_API_KEY",),
+        "file_env_var": "NOVITA_API_KEY_FILE",
+        "arg_attr": "novita_api_key_file",
+        "default_path": "~/.config/novita/api_key",
+        "provision_hint": "mkdir -p ~/.config/novita && echo <key> > ~/.config/novita/api_key",
+        "sdk": "novita_sandbox",
+        "sdk_hint": "pip install -e '<miles>[novita]'",
+        "sdk_min_version": "2.0.7",
+        # region (NOVITA_DOMAIN) and endpoint overrides, read by the SDK itself
+        "forward": ("NOVITA_DOMAIN", "NOVITA_API_URL", "NOVITA_SANDBOX_URL"),
+        "target": ("NOVITA_DOMAIN", "region domain", "us-phx-1.sandbox.novita.ai (default)"),
+    },
 }
 
 
@@ -189,7 +203,8 @@ def preflight_sdk(module: str, install_hint: str, min_version: str | None = None
         return
     try:
         # Looking the distribution up by the module name assumes the two match,
-        # which holds for every backend that sets a floor today (e2b).
+        # which holds for every backend that sets a floor today (e2b, modal, and
+        # novita_sandbox, whose dist-info is found under the module name too).
         installed = importlib.metadata.version(module)
     except importlib.metadata.PackageNotFoundError:
         # Importable but no dist-info (a vendored copy): the version cannot be
@@ -240,20 +255,22 @@ def resolve_provider_api_key(env_var: str, file_env_var: str, default_path: str)
     return key
 
 
-def provision_provider(env: dict[str, str], spec: dict, *, arg_path: str = "") -> None:
+def provision_provider(env: dict[str, str], spec: dict, *, arg_path: str = "", remote: bool = False) -> None:
     """One provider's whole launcher-side provisioning, from its PROVIDER_CREDENTIALS spec:
     key supply (the file's path, never the value), SDK preflight, forwarding the
-    address-like vars by value, and echoing which endpoint is in effect."""
-    sandbox_key_supply(
-        env,
-        provider=spec["provider"],
-        key_env_vars=spec["key_env_vars"],
-        file_env_var=spec["file_env_var"],
-        arg_path=arg_path,
-        default_path=spec["default_path"],
-        provision_hint=spec["provision_hint"],
-    )
-    preflight_sdk(spec["sdk"], spec["sdk_hint"], spec.get("sdk_min_version"))
+    address-like vars by value, and echoing which endpoint is in effect. With ``remote``, an agent
+    worker holds the key and the SDK, so only the address-like vars are forwarded."""
+    if not remote:
+        sandbox_key_supply(
+            env,
+            provider=spec["provider"],
+            key_env_vars=spec["key_env_vars"],
+            file_env_var=spec["file_env_var"],
+            arg_path=arg_path,
+            default_path=spec["default_path"],
+            provision_hint=spec["provision_hint"],
+        )
+        preflight_sdk(spec["sdk"], spec["sdk_hint"], spec.get("sdk_min_version"))
     for var, default in spec.get("env_defaults", {}).items():
         forward_address(env, var, os.environ.get(var, "").strip() or default)
     for var in spec["forward"]:
@@ -262,3 +279,12 @@ def provision_provider(env: dict[str, str], spec: dict, *, arg_path: str = "") -
     if spec["target"]:
         var, label, default_desc = spec["target"]
         print(f"{spec['provider']} {label}: {env.get(var, default_desc)}", flush=True)
+
+
+def provider_env_names() -> tuple[str, ...]:
+    """Every env var a provider's sandboxes are configured by: key file paths and address-like vars, never a key."""
+    return tuple(
+        name
+        for spec in PROVIDER_CREDENTIALS.values()
+        for name in (spec["file_env_var"], *spec.get("env_defaults", {}), *spec["forward"])
+    )

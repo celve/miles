@@ -320,6 +320,7 @@ class TestComputeSpecRouterLaunchCommand:
             miles_router_timeout=None,
             miles_router_health_check_failure_threshold=3,
             rollout_health_check_interval=10.0,
+            rollout_health_check_timeout=30.0,
         )
         spec = _compute_spec_router(args, model_idx=0, model_cfg=_make_model_cfg("regular"))
         argv = shlex.split(spec.launch_command(_make_router_ctx(spec.args)))
@@ -344,6 +345,7 @@ class TestComputeSpecSessionServer:
             miles_router_timeout=None,
             chat_template_path=None,
             tito_model="default",
+            allow_stop_token_replace=False,
             apply_chat_template_kwargs=None,
             use_rollout_indexer_replay=False,
             sglang_speculative_algorithm=None,
@@ -412,6 +414,7 @@ def _make_session_server_args(**overrides) -> Namespace:
         miles_router_timeout=None,
         chat_template_path=None,
         tito_model="default",
+        allow_stop_token_replace=False,
         apply_chat_template_kwargs=None,
         lora_adapter_path=None,
         **overrides,
@@ -828,6 +831,7 @@ def _make_pin_args(*, pinned: bool):
         session_server_workers=1,
         chat_template_path=None,
         tito_model="default",
+        allow_stop_token_replace=False,
         apply_chat_template_kwargs=None,
         use_rollout_indexer_replay=False,
         sglang_speculative_algorithm=None,
