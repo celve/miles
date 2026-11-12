@@ -617,3 +617,172 @@ def test_anchors_are_each_requests_one_shot_clip_placed_by_request_and_checked(t
         arms.main(["check-anchors", str(heldout), "--anchor-dir", str(anchors)])
     (anchors / anchor_name("a tv")).write_bytes(b"clip")
     arms.main(["check-anchors", str(heldout), "--anchor-dir", str(anchors)])
+
+
+class _Planner:
+    """A served planner's ``/v1/chat/completions`` answering each request with ``answer(payload)``."""
+
+    def __init__(self, answer):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        self.asked = []
+        asked = self.asked
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                asked.append(payload)
+                body = json.dumps({"choices": [{"message": {"content": answer(payload)}}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        self.server = HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.server.server_port}"
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.server.shutdown()
+
+
+def _made(path: str) -> dict:
+    return json.loads(Image.open(path).text["request"])
+
+
+def test_bo3_lets_the_planner_pick_among_three_keyframes_the_first_of_which_is_b0_refs(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_VIDEO_GEN_FAKE_DIR", str(tmp_path / "made"))
+    with _Planner(lambda payload: "Image 2 shows it best.") as planner:
+        (row,) = asyncio.run(arms.keyframes("bo3", ["a fox"], planner.url, FakeImageGenerator()))
+        (b0_ref,) = asyncio.run(
+            arms.generate([arms.one_shot_row("a fox", "reference")], FakeClipGenerator(), FakeImageGenerator())
+        )
+
+    seed = request_seed("a fox")
+    assert [_made(path)["seed"] for path in row["candidates"]] == [seed, seed + 1, seed + 2]
+    assert row["candidates"][0] == b0_ref["reference_paths"][0]
+    assert (row["pick"], row["reference_paths"], row["prompt"], row["seed"]) == (
+        1,
+        [row["candidates"][1]],
+        "a fox",
+        seed,
+    )
+    (payload,) = planner.asked
+    shown = payload["messages"][-1]["content"]
+    assert [part["image_url"]["url"] for part in shown if part["type"] == "image_url"] == [
+        f"file://{path}" for path in row["candidates"]
+    ]
+    assert (payload["temperature"], payload["chat_template_kwargs"]) == (0, {"enable_thinking": False})
+    (made,) = asyncio.run(arms.generate([row], FakeClipGenerator()))
+    asked = json.loads(open(made["path"]).read())
+    assert (asked["reference_paths"], asked["prompt"], asked["seed"]) == ([row["candidates"][1]], "a fox", seed)
+
+
+def test_comp_key_composes_k0s_first_three_assets_into_the_clips_first_frame(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_VIDEO_GEN_FAKE_DIR", str(tmp_path / "made"))
+    assets = ["/i/fox.png", "/i/ball.png", "/i/tree.png", "/i/sun.png"]
+    video = {"prompt": "the fox chases the ball", "seed": 3, "image_path": None, "reference_paths": assets}
+    dump = _dump(tmp_path, "eval_0.pt", {"a fox": {"video": video}})
+    k0 = {row["request"]: row for row in arms.from_dump(dump, "K0", ["a fox", "a tv"])}
+    with _Planner(
+        lambda payload: " The fox in image 1 leaps at the ball in image 2 by the tree in image 3. "
+    ) as planner:
+        fox, tv = asyncio.run(
+            arms.keyframes(
+                "comp-key", ["a fox", "a tv"], planner.url, None, k0=k0, edit_generator=FakeImageGenerator()
+            )
+        )
+
+    composed = _made(fox["image_path"])
+    assert composed["image_paths"] == assets[:3] and composed["seed"] == request_seed("a fox")
+    assert composed["prompt"] == "The fox in image 1 leaps at the ball in image 2 by the tree in image 3."
+    assert (fox["prompt"], fox["reference_paths"]) == ("the fox chases the ball", assets)
+    (payload,) = planner.asked
+    assert [p["image_url"]["url"] for p in payload["messages"][-1]["content"] if p["type"] == "image_url"] == [
+        f"file://{path}" for path in assets[:3]
+    ]
+    assert tv["prompt"] is None
+    (made, missing) = asyncio.run(arms.generate([fox, tv], FakeClipGenerator()))
+    asked = json.loads(open(made["path"]).read())
+    assert (asked["image_path"], asked["reference_paths"]) == (fox["image_path"], assets)
+    assert missing["path"] is None
+
+
+def test_end_key_renders_the_planners_first_and_last_frames_for_dynamic_and_motion_requests_only(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("AGENT_VIDEO_GEN_FAKE_DIR", str(tmp_path / "made"))
+    plan = {"first": "a green leaf", "last": "a red leaf", "video": "the leaf turns red"}
+    answers = {"a leaf turns red": "```json\n" + json.dumps(plan) + "\n```", "a car drives left": "no idea"}
+    categories = {
+        "a leaf turns red": "dynamic_attribute_binding",
+        "a car drives left": "motion_binding",
+        "a red car": "consistent_attribute_binding",
+    }
+    with _Planner(
+        lambda payload: answers[payload["messages"][-1]["content"].split("\n")[0].split(": ", 1)[1]]
+    ) as planner:
+        leaf, car = asyncio.run(
+            arms.keyframes("end-key", list(categories), planner.url, FakeImageGenerator(), categories=categories)
+        )
+
+    seed = request_seed("a leaf turns red")
+    assert [(_made(leaf[key])["prompt"], _made(leaf[key])["seed"]) for key in ("image_path", "last_image_path")] == [
+        ("a green leaf", seed),
+        ("a red leaf", seed),
+    ]
+    assert leaf["prompt"] == "the leaf turns red" and "reference_paths" not in leaf
+    assert (car["request"], car["prompt"], car["planner_answer"]) == ("a car drives left", None, "no idea")
+    (made, _) = asyncio.run(arms.generate([leaf, car], FakeClipGenerator()))
+    asked = json.loads(open(made["path"]).read())
+    assert (asked["image_path"], asked["last_image_path"]) == (leaf["image_path"], leaf["last_image_path"])
+
+
+def test_a_pick_or_an_end_key_plan_the_planner_garbles_is_recorded_as_none():
+    assert [arms.parse_pick(answer, 3) for answer in ("3", "Image 1.", "the 4th", "none", "12")] == [
+        2,
+        0,
+        None,
+        None,
+        None,
+    ]
+    assert arms.parse_end_key('{"first": "a", "last": "b"}') is None
+    assert arms.parse_end_key('{"first": "a", "last": "b", "video": " "}') is None
+    assert arms.parse_end_key('Sure: {"first": "a", "last": "b", "video": "c"}') == {
+        "first": "a",
+        "last": "b",
+        "video": "c",
+    }
+
+
+def test_compare_holds_any_arm_against_the_baselines_and_keeps_the_win_bar_for_k(tmp_path, capsys):
+    rows = [
+        {
+            "arm": arm,
+            "request": f"r{i}",
+            "reward": reward + 0.01 * i,
+            "scores": {},
+            "frame_diff": 1.0,
+            "ocr_lines": 0,
+            "prompt_words": 3,
+        }
+        for i in range(6)
+        for arm, reward in (("bo3", 0.9), ("B0-ref", 0.5), ("B1-rewrite", 0.95))
+    ]
+    path = tmp_path / "scored.jsonl"
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    results = compare.compare(rows, "bo3")
+    compare.main([str(path), "--ours", "bo3", "--mode", "reference"])
+
+    assert (results["B0-ref"]["reward"]["wins"], results["B1-rewrite"]["reward"]["losses"]) == (6, 6)
+    out = capsys.readouterr().out
+    assert "| bo3 vs | metric |" in out and "| B0-ref | reward | 6 |" in out and "win" not in out.split("\n")[-2]
+    assert "beats" not in out

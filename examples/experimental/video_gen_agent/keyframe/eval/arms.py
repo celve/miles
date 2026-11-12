@@ -16,6 +16,18 @@
            image prompts joined and its references all its images in the order made, so it also differs from K in the
            composing prompt and in which assets, in which order, the video takes
 
+The survey's recipe changes (LIN-2864), untrained, from ``keyframes``, which serves nothing itself: it asks the served
+untrained planner (``--base-url``), makes images with ``AGENT_VIDEO_GEN_IMAGE_GENERATOR``, and writes rows ready for
+``generate``:
+
+  comp-key  K0's subject assets and video prompt, plus one opening-scene keyframe: the planner, shown its first three
+            assets, writes the editor's prompt, and the image editor (``--edit-url``, Qwen-Image-Edit-2509) composes
+            them; the keyframe is the clip's first frame and the assets stay its references
+  bo3       three keyframes of the raw request, the first at B0-ref's seed so it is B0-ref's own; the planner watches
+            them and picks one, which goes to the video model as B0-ref's does, with the raw request as the prompt
+  end-key   the planner writes a first frame, a last frame and a video prompt (dynamic-attribute and motion-binding
+            requests only); the image model renders both frames and the clip starts and ends on them
+
 Every arm takes Phase 0's per-request seed and the run's clip shape (832x480, by default 2 s at 16 fps: 33 frames;
 ``generate --seconds 4 --fps 24`` for an ``h3-ref`` run), so arms differ only in what the generator is asked; K0 and K keep the clip and seed their episode made as ``episode_path`` and
 ``episode_seed``. Generate every arm on one box, since clips differ across GPU types and parallel layouts. A held-out
@@ -28,6 +40,8 @@ row's ``metadata["category"]`` is copied onto its rows as ``category``, for ``co
   python -m examples.experimental.video_gen_agent.keyframe.eval.arms from-dump eval_0.pt --arm K0 --heldout heldout.jsonl \
       --out k0.jsonl
   python -m examples.experimental.video_gen_agent.keyframe.eval.arms generate prompts.jsonl k0.jsonl k.jsonl --out clips.jsonl
+  python -m examples.experimental.video_gen_agent.keyframe.eval.arms keyframes --arm comp-key --heldout heldout.jsonl \
+      --k0 k0.jsonl --base-url http://localhost:30000 --edit-url http://localhost:31200 --out comp_key.jsonl
 
 The pairwise reward (the launcher's ``--reward pairwise``) judges each clip against its request's one-shot clip, its
 anchor. ``keyframe.eval.anchors`` serves the run's generators and makes them; on generators already served, these
@@ -50,6 +64,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -59,6 +74,7 @@ import torch
 
 from examples.experimental.video_gen_agent.generator import ClipRequest, GeneratorUnavailable, ImageRequest
 from examples.experimental.video_gen_agent.keyframe.eval.compare import ONE_SHOT_ARMS
+from examples.experimental.video_gen_agent.keyframe.generator import RouterImageGenerator
 from examples.experimental.video_gen_agent.phase0.make_planner_data import SYSTEM_PROMPT
 from examples.experimental.video_gen_agent.phase0.reward import planner_prompt, request_seed
 from miles.rollout.rm_hub.video.pairwise import anchor_name
@@ -70,6 +86,23 @@ SHAPE = {"seconds": 2.0, "width": 832, "height": 480, "fps": 16}
 TRIES = 4
 RETRY_DELAY_S = 15.0
 ANCHORS = "make them with python -m examples.experimental.video_gen_agent.keyframe.eval.anchors and the run's flags"
+SURVEY_ARMS = ("comp-key", "bo3", "end-key")
+CANDIDATES = 3
+# Qwen-Image-Edit-2509 composes from one to three input images.
+COMPOSED_ASSETS = 3
+END_KEY_CATEGORIES = ("dynamic_attribute_binding", "motion_binding")
+PICK_PROMPT = (
+    "You choose the keyframe a video is made from. A video generator makes the user's requested video with the "
+    "chosen image as its reference, so choose the image that best shows what the request asks for, and looks best."
+)
+COMPOSE_PROMPT = (
+    "You write the prompt an image editor composes a video's opening frame from. The editor sees the asset images "
+    "you see, numbered in order, and makes one photo from them and your prompt."
+)
+END_KEY_PROMPT = (
+    "You plan a video by its first and last frames. An image generator makes each frame from your description, and "
+    "a video generator makes the video that starts on the first and ends on the last, following your video prompt."
+)
 
 
 def heldout_requests(path: Path) -> list[str]:
@@ -212,6 +245,7 @@ async def generate(
                     negative_prompt=row.get("negative_prompt") or "",
                     seed=row["seed"],
                     image_path=row.get("image_path"),
+                    last_image_path=row.get("last_image_path"),
                     reference_paths=tuple(row.get("reference_paths") or ()),
                     **shape,
                 ),
@@ -248,23 +282,137 @@ def from_dump(dump: Path, arm: str, requests: list[str]) -> list[dict]:
     return rows
 
 
+async def _chat(client: httpx.AsyncClient, base_url: str, system: str, user: str | list[dict]) -> str:
+    """The served planner's one-turn answer, with thinking off as Phase 0 trained it, and greedy as eval decodes."""
+    payload = {
+        "model": "default",
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        "temperature": 0,
+        "max_tokens": 2048,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    response = await client.post(f"{base_url}/v1/chat/completions", json=payload)
+    response.raise_for_status()
+    return response.json()["choices"][0]["message"]["content"]
+
+
 async def rewrite(requests: list[str], base_url: str, concurrency: int = 16) -> list[dict]:
-    """B1-rewrite's answers: the served planner's one-turn rewrite of each request under Phase 0's system prompt, with
-    thinking off as Phase 0 trained it, and greedy as eval decodes."""
+    """B1-rewrite's answers: the served planner's one-turn rewrite of each request under Phase 0's system prompt."""
     semaphore = asyncio.Semaphore(concurrency)
 
     async def one(client: httpx.AsyncClient, request: str) -> dict:
-        payload = {
-            "model": "default",
-            "messages": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": request}],
-            "temperature": 0,
-            "max_tokens": 2048,
-            "chat_template_kwargs": {"enable_thinking": False},
-        }
         async with semaphore:
-            response = await client.post(f"{base_url}/v1/chat/completions", json=payload)
-        response.raise_for_status()
-        return {"request": request, "answer": response.json()["choices"][0]["message"]["content"]}
+            return {"request": request, "answer": await _chat(client, base_url, SYSTEM_PROMPT, request)}
+
+    async with httpx.AsyncClient(timeout=600) as client:
+        return list(await asyncio.gather(*(one(client, request) for request in requests)))
+
+
+def _image_part(path: str) -> dict:
+    return {"type": "image_url", "image_url": {"url": f"file://{path}"}}
+
+
+def _shown(text: str, paths: list[str], ask: str) -> list[dict]:
+    return [{"type": "text", "text": text}, *map(_image_part, paths), {"type": "text", "text": ask}]
+
+
+def parse_pick(answer: str, candidates: int) -> int | None:
+    """The 0-based candidate a pick answer names by its 1-based number, or None when it names none."""
+    match = re.search(rf"\b([1-{candidates}])\b", answer)
+    return int(match.group(1)) - 1 if match else None
+
+
+def parse_end_key(answer: str) -> dict | None:
+    """An end-key answer's ``first``, ``last`` and ``video`` prompts, or None when it is not that JSON object."""
+    match = re.search(r"\{.*\}", answer, re.DOTALL)
+    try:
+        plan = json.loads(match.group(0)) if match else None
+    except json.JSONDecodeError:
+        return None
+    keys = ("first", "last", "video")
+    if not isinstance(plan, dict) or not all(isinstance(plan.get(key), str) and plan[key].strip() for key in keys):
+        return None
+    return {key: plan[key].strip() for key in keys}
+
+
+async def keyframes(
+    arm: str,
+    requests: list[str],
+    base_url: str,
+    image_generator,
+    *,
+    k0: dict[str, dict] | None = None,
+    edit_generator=None,
+    categories: dict[str, str] | None = None,
+    shape: dict | None = None,
+    concurrency: int = 8,
+) -> list[dict]:
+    """The rows of one of the survey's arms, with every image made and every planner answer recorded, ready for
+    ``generate``; a request the arm cannot serve (no K0 video, an unparsed end-key plan) gets prompt None."""
+    shape = shape or SHAPE
+    semaphore = asyncio.Semaphore(concurrency)
+    if arm == "end-key":
+        requests = [r for r in requests if (categories or {}).get(r) in END_KEY_CATEGORIES]
+
+    async def image(prompt: str, seed: int, generator=image_generator, inputs: tuple[str, ...] = ()) -> str:
+        request = ImageRequest(prompt, "", seed, shape["width"], shape["height"], image_paths=inputs)
+        return (await _retried(generator, request, RETRY_DELAY_S)).path
+
+    async def one(client: httpx.AsyncClient, request: str) -> dict:
+        seed = request_seed(request)
+        row = {"arm": arm, "request": request, "seed": seed}
+        async with semaphore:
+            if arm == "bo3":
+                # Candidate 0 is made at B0-ref's own seed, so it is B0-ref's keyframe and bo3 adds only the choice.
+                paths = [await image(request, (seed + k) % 2**32) for k in range(CANDIDATES)]
+                ask = f"Answer with the number of the best image, 1 to {CANDIDATES}, only."
+                answer = await _chat(client, base_url, PICK_PROMPT, _shown(f"The request: {request}", paths, ask))
+                pick = parse_pick(answer, CANDIDATES)
+                chosen = paths[0 if pick is None else pick]
+                return row | {
+                    "prompt": request,
+                    "reference_paths": [chosen],
+                    "candidates": paths,
+                    "pick": pick,
+                    "planner_answer": answer,
+                }
+            if arm == "comp-key":
+                video = (k0 or {}).get(request) or {}
+                if video.get("prompt") is None or not video.get("reference_paths"):
+                    return row | {"prompt": None}
+                assets = video["reference_paths"][:COMPOSED_ASSETS]
+                text = f"The video request: {request}\nThe video's prompt: {video['prompt']}\nThe assets:"
+                ask = (
+                    "Write the image editor's prompt for the video's opening frame, one photo: the setting and where "
+                    "each asset is in it. Name each asset as the thing it is, in image 1, image 2 and so on. Answer "
+                    "with the prompt only."
+                )
+                answer = await _chat(client, base_url, COMPOSE_PROMPT, _shown(text, assets, ask))
+                keyframe = await image(answer.strip(), seed, edit_generator, tuple(assets))
+                return row | {
+                    "prompt": video["prompt"],
+                    "reference_paths": video["reference_paths"],
+                    "image_path": keyframe,
+                    "compose_prompt": answer.strip(),
+                }
+            seconds = shape["seconds"]
+            ask = (
+                f"The video request: {request}\nThe video is {seconds:g} seconds. Describe its first frame and its "
+                "last frame, each as one photo in full, and write the video prompt for what changes and moves "
+                'between them and how the camera moves. Answer with JSON only: {"first": "...", "last": "...", '
+                '"video": "..."}'
+            )
+            answer = await _chat(client, base_url, END_KEY_PROMPT, ask)
+            plan = parse_end_key(answer)
+            if plan is None:
+                return row | {"prompt": None, "planner_answer": answer}
+            first, last = await asyncio.gather(image(plan["first"], seed), image(plan["last"], seed))
+            return row | {
+                "prompt": plan["video"],
+                "image_path": first,
+                "last_image_path": last,
+                "frame_prompts": [plan["first"], plan["last"]],
+            }
 
     async with httpx.AsyncClient(timeout=600) as client:
         return list(await asyncio.gather(*(one(client, request) for request in requests)))
@@ -318,6 +466,14 @@ def main(argv: list[str] | None = None) -> None:
     anchor_prompts.add_argument("requests", type=Path, nargs="+")
     anchor_prompts.add_argument("--mode", choices=sorted(ONE_SHOT_ARMS), required=True)
     anchor_prompts.add_argument("--out", type=Path, required=True)
+    survey = commands.add_parser("keyframes", help="the survey's arms' rows, images made, for generate")
+    survey.add_argument("--arm", choices=SURVEY_ARMS, required=True)
+    survey.add_argument("--heldout", type=Path, required=True)
+    survey.add_argument("--base-url", required=True, help="an OpenAI-compatible server of the untrained planner")
+    survey.add_argument("--k0", type=Path, help="from-dump's K0 rows, the assets and prompt comp-key composes from")
+    survey.add_argument("--edit-url", help="the image editor's router, which composes comp-key's keyframe")
+    survey.add_argument("--seconds", type=float, default=SHAPE["seconds"], help="the run's --seconds")
+    survey.add_argument("--out", type=Path, required=True)
     for name in ("place-anchors", "check-anchors"):
         anchors = commands.add_parser(name)
         anchors.add_argument("files", type=Path, nargs="+", help="generate's clips, or the request files to check")
@@ -343,6 +499,25 @@ def main(argv: list[str] | None = None) -> None:
             episodes(args.final_dump),
             mode=args.mode,
             rewrites=_answers(args.b1_rewrite, "answer"),
+        )
+        _write(args.out, _with_categories(rows, args.heldout))
+    elif args.command == "keyframes":
+        if args.arm == "comp-key" and not (args.k0 and args.edit_url):
+            parser.error("comp-key composes K0's assets: it needs --k0 and --edit-url")
+        k0 = None
+        if args.k0:
+            k0 = {r["request"]: r for r in map(json.loads, args.k0.read_text().splitlines()) if r["arm"] == "K0"}
+        rows = asyncio.run(
+            keyframes(
+                args.arm,
+                heldout_requests(args.heldout),
+                args.base_url,
+                load_function(os.environ["AGENT_VIDEO_GEN_IMAGE_GENERATOR"])(),
+                k0=k0,
+                edit_generator=RouterImageGenerator(args.edit_url) if args.edit_url else None,
+                categories=heldout_categories(args.heldout),
+                shape=SHAPE | {"seconds": args.seconds},
+            )
         )
         _write(args.out, _with_categories(rows, args.heldout))
     elif args.command == "rewrite":

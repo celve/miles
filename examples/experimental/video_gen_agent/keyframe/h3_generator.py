@@ -9,6 +9,10 @@ count their own jobs, since each episode runs in a process of its own. The MP4 k
 only its video stream. H3 refuses a negative prompt (its checkpoint is CFG-distilled, so one would do nothing, as in the
 other modes' CFG-1 generators) and a negative seed, both of which the planner may send, so neither reaches it as such.
 
+The eval arms ask for more than the env does. A request's ``image_path`` and ``last_image_path`` go to H3 as keyframes at
+its first and last frame, beside the references; with no reference the job is fl2va, and with neither t2va. FastH3 Omni
+serves ref2va alone, so fl2va and t2va need the base model's FL2VA partition (``--model-variant fl2va``).
+
 Options come from ``AGENT_VIDEO_GEN_*`` env vars, as the env's own do:
 
   AGENT_VIDEO_GEN_GENERATOR_URL        the video model's router, asked for its engines; ``generate.generate`` sets it
@@ -54,6 +58,16 @@ def aspect_ratio(width: int, height: int) -> str:
     return min(ASPECT_RATIOS, key=lambda name: abs(ratio(name) - width / height))
 
 
+def keyframes(request: ClipRequest) -> list[dict]:
+    """The request's first and last frames as H3 keyframe conditions, at frame 0 and -1, the two it takes."""
+    frames = ((0, request.image_path), (-1, request.last_image_path))
+    return [
+        {"type": "image", "role": "keyframe", "uri": f"file://{path}", "frame_index": index}
+        for index, path in frames
+        if path is not None
+    ]
+
+
 class H3ClipGenerator:
     def __init__(self):
         self.router_url = os.environ[URL_ENV]
@@ -62,8 +76,6 @@ class H3ClipGenerator:
         self.num_inference_steps = int(steps) if steps else None
 
     async def generate(self, request: ClipRequest) -> Clip:
-        if not request.reference_paths:
-            raise ValueError("H3's ref2va needs at least one reference image")
         low, high = SECONDS_RANGE
         if request.seconds not in range(low, high + 1):
             raise ValueError(f"H3 makes {low} to {high} whole-second clips, not {request.seconds:g}")
@@ -99,12 +111,13 @@ class H3ClipGenerator:
             after = page["last_id"]
 
     async def _generate_on(self, client: httpx.AsyncClient, engine: str, request: ClipRequest) -> Clip:
+        references = request.reference_paths
         body = {
-            "prompt": h3_prompt(request.prompt, len(request.reference_paths)),
-            "task": "ref2va",
-            "conditions": [
-                {"type": "image", "role": "reference", "uri": f"file://{path}"} for path in request.reference_paths
-            ],
+            "prompt": h3_prompt(request.prompt, len(references)) if references else request.prompt,
+            "task": "ref2va" if references else "fl2va" if keyframes(request) else "t2va",
+            # H3 numbers only the references as <Picture k>; keyframes go first, as its own clients send them.
+            "conditions": keyframes(request)
+            + [{"type": "image", "role": "reference", "uri": f"file://{path}"} for path in references],
             "target": {
                 "short_edge": min(request.width, request.height),
                 "aspect_ratio": aspect_ratio(request.width, request.height),
@@ -113,11 +126,12 @@ class H3ClipGenerator:
             "seconds": int(request.seconds),
             "seed": request.seed % 2**32,
             "num_outputs_per_prompt": 1,
-            # FastH3 Omni's default upscales each reference to a 2048 short edge, about 10 s of 2xB300 per reference
-            # with no gain in reward or subject fidelity (LIN-2860).
-            "reference_resize_mode": "match",
             "output_path": self.clip_dir,
         }
+        if references:
+            # FastH3 Omni's default upscales each reference to a 2048 short edge, about 10 s of 2xB300 per reference
+            # with no gain in reward or subject fidelity (LIN-2860).
+            body["reference_resize_mode"] = "match"
         if self.num_inference_steps is not None:
             body["num_inference_steps"] = self.num_inference_steps
         response = await client.post(f"{engine}/v1/videos", json=body)

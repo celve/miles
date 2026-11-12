@@ -28,6 +28,8 @@ class ClipRequest:
     fps: int
     # A frame to continue from, for image-to-video; None generates from text alone.
     image_path: str | None = None
+    # A frame to end on, for generators that take first and last frames; None leaves the end free.
+    last_image_path: str | None = None
     # Images the clip shows as subjects and look rather than starts from, for reference-to-video.
     reference_paths: tuple[str, ...] = ()
 
@@ -80,6 +82,8 @@ class ImageRequest:
     seed: int
     width: int
     height: int
+    # Images an editing model composes the result from; empty generates from text alone.
+    image_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

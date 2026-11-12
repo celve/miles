@@ -49,3 +49,17 @@ async def test_a_failing_image_generator_is_an_outage_not_a_policy_failure(monke
         await RouterImageGenerator().generate(
             ImageRequest(prompt="a", negative_prompt="", seed=0, width=48, height=32)
         )
+
+
+async def test_an_editors_router_gets_the_input_images_and_its_own_schedule(image_generator, monkeypatch):
+    _, seen, _ = image_generator
+    editor = RouterImageGenerator(os.environ[generator.URL_ENV])
+    monkeypatch.setenv(generator.URL_ENV, "http://127.0.0.1:1")
+
+    await editor.generate(
+        ImageRequest(prompt="both", negative_prompt="", seed=3, width=48, height=32, image_paths=("/a.png", "/b.png"))
+    )
+
+    (body,) = seen
+    assert body["extra_sampling_params"] == {"image_path": ["/a.png", "/b.png"]}
+    assert "num_inference_steps" not in body
