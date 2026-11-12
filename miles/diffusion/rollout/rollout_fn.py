@@ -36,7 +36,9 @@ class DiffusionRolloutFn(BaseRolloutFn):
         self.step_strategy = load_function(args.diffusion_step_strategy_path)
         self.sampling_params = build_sampling_params(args)
         self.semaphore: asyncio.Semaphore | None = None
-        self.reward_pool = OcrRewardPool(num_workers=args.diffusion_ocr_num_workers) if args.rm_type == "ocr" else None
+        # rm_hub runs --custom-rm-path ahead of --rm-type, so the OCR pool exists only when OCR actually scores.
+        uses_ocr = args.rm_type == "ocr" and args.custom_rm_path is None
+        self.reward_pool = OcrRewardPool(num_workers=args.diffusion_ocr_num_workers) if uses_ocr else None
         self.reward_kwargs = {"ocr_pool": self.reward_pool} if self.reward_pool is not None else {}
         self.client = httpx.AsyncClient(limits=httpx.Limits(max_keepalive_connections=0), timeout=httpx.Timeout(None))
 

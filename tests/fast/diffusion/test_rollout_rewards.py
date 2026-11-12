@@ -9,6 +9,8 @@ from tests.fast.fixtures.args_fixtures import parser_defaults
 from miles.diffusion.rollout import rollout_fn
 from miles.diffusion.types import DiffusionRollout
 from miles.rollout.base_types import RolloutFnConstructorInput
+from miles.utils.args.custom_function import CustomFunctionConfig
+from miles.utils.args.custom_view import ImmutableNamespace
 from miles.utils.types import Sample
 
 
@@ -78,3 +80,18 @@ async def test_rewards_come_from_rm_hub_per_microgroup_or_per_group(monkeypatch,
     assert reward_calls == calls
     assert [sample.reward for sample in group] == [float(len('write "abc"'))] * 4
     assert fn.reward_pool.scored == [(4, 4, 3)] * 4
+
+
+async def constant_reward(args, samples):
+    return [0.5] * len(samples)
+
+
+async def test_a_custom_reward_replaces_ocr_without_receiving_the_ocr_pool(monkeypatch):
+    fn, _ = _rollout(monkeypatch, custom_rm_path=CustomFunctionConfig(path=f"{__name__}.constant_reward"))
+    # rm_hub builds the hook's config from the run config, which iterates like the parsed one.
+    fn.args = ImmutableNamespace(**vars(fn.args))
+
+    group = await fn._generate_group(_group())
+
+    assert fn.reward_pool is None
+    assert [sample.reward for sample in group] == [0.5] * 4
