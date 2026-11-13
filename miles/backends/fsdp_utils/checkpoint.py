@@ -82,7 +82,7 @@ def _write_checkpoint_metadata(path: Path, metadata: dict[str, Any]) -> None:
 
 
 def _has_enabled_scaler(actor: Any) -> bool:
-    # Only the fp16 diffusion actor carries a GradScaler; its loss scale and growth tracker are training state.
+    # Only the fp16 diffusion actor carries a GradScaler; its loss scale and growth tracker follow the optimizer flags.
     return hasattr(actor, "scaler") and actor.scaler.is_enabled()  # config-access-exempt: optional actor attribute
 
 
@@ -172,7 +172,8 @@ def load(actor: Any) -> dict[str, Any] | None:
         rng_state = torch.load(rng_path, map_location="cpu")
 
     scaler_path = checkpoint_dir / GRAD_SCALER_FILENAME
-    scaler_state = torch.load(scaler_path, map_location="cpu") if scaler_path.exists() else None
+    load_scaler = not actor.args.backend.no_load_optim and _has_enabled_scaler(actor) and scaler_path.exists()
+    scaler_state = torch.load(scaler_path, map_location="cpu") if load_scaler else None
 
     metadata = _read_checkpoint_metadata(checkpoint_dir / "meta.json")
 
@@ -196,7 +197,7 @@ def finalize_load(actor: Any, checkpoint_payload: dict[str, Any] | None) -> None
         if torch.cuda.is_available() and "cuda" in rng_state:
             torch.cuda.set_rng_state_all(rng_state["cuda"])
 
-    if checkpoint_payload.get("grad_scaler") is not None and _has_enabled_scaler(actor):
+    if checkpoint_payload.get("grad_scaler") is not None:
         actor.scaler.load_state_dict(checkpoint_payload["grad_scaler"])
 
     metadata = checkpoint_payload.get("metadata") or {}
@@ -263,7 +264,7 @@ def save(actor: Any, iteration: int) -> None:
         rng_state = {"torch": torch.get_rng_state()}
         rng_state["cuda"] = torch.cuda.get_rng_state_all()
         torch.save(rng_state, checkpoint_dir / "rng.pt")
-        if _has_enabled_scaler(actor):
+        if save_optimizer_state and _has_enabled_scaler(actor):
             torch.save(actor.scaler.state_dict(), checkpoint_dir / GRAD_SCALER_FILENAME)
 
         metadata = {
