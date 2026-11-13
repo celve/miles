@@ -54,15 +54,37 @@ class DiffusionConfig(BaseConfig):
         int, Arg(help="Images per /rollout/generate request; a prompt's group is split into such requests.")
     ] = 8
     diffusion_dit_precision: A[str | None, Arg(help="Rollout DiT precision passed to the engine (fp16/bf16).")] = None
-    diffusion_ocr_num_workers: A[int, Arg(help="CPU PaddleOCR reward actors.")] = 4
+    diffusion_reward_pools: A[
+        list[str],
+        Arg(
+            type_parser=str,
+            nargs="+",
+            choices=["ocr", "pickscore"],
+            help="Reward pools to start besides --rm-type's own, for rewards that only some prompts select through "
+            "their metadata `rm_type`.",
+        ),
+    ] = []
+    diffusion_ocr_num_workers: A[int, Arg(help="Workers of the CPU PaddleOCR reward pool.")] = 4
     diffusion_pickscore_model_path: A[str | None, Arg(help="PickScore model (yuvalkirstain/PickScore_v1).")] = None
     diffusion_pickscore_processor_path: A[
         str | None, Arg(help="PickScore's CLIP processor (laion/CLIP-ViT-H-14-laion2B-s32B-b79K).")
     ] = None
-    diffusion_pickscore_num_workers: A[int, Arg(help="PickScore reward actors.")] = 1
+    diffusion_pickscore_num_workers: A[int, Arg(help="Workers of the PickScore reward pool.")] = 1
     diffusion_pickscore_num_gpus_per_worker: A[
-        float, Arg(help="GPUs per PickScore actor, scheduled outside the train and rollout GPUs.")
+        float,
+        Arg(
+            help="1 gives each PickScore worker its own GPU, appended to the placement group after the rollout GPUs; "
+            "0 scores on the CPU."
+        ),
     ] = 1.0
+    diffusion_pickscore_placement: A[
+        str,
+        Arg(
+            choices=["dedicated", "colocated"],
+            help="`dedicated` gives the PickScore workers GPUs of their own; `colocated` puts them on the first rollout "
+            "GPUs, sleeping while training holds them.",
+        ),
+    ] = "dedicated"
     diffusion_pickscore_batch_size: A[
         int, Arg(help="Samples per PickScore actor call, and frames per PickScore forward.")
     ] = 8

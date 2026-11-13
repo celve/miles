@@ -17,7 +17,8 @@ function, data source and converter hooks; Miles' default rollout and perf panel
 | Piece | Where |
 | --- | --- |
 | Engine | `sglang.multimodal_gen`, launched by the inference engine spec (`miles/backends/sglang_utils/sglang_diffusion_engine.py`) and served through the Miles router |
-| Rollout | `miles.rollout.diffusion_rollout.rollout_fn.DiffusionRolloutFn`: SDE-sampled trajectories from `/rollout/generate`, scored through `rm_hub` by `--rm-type ocr` (CPU PaddleOCR), `--rm-type pickscore` (PickScore actors on their own GPU) or a `--custom-rm-path`, per microgroup or per group under `--group-rm` |
+| Rollout | `miles.rollout.diffusion_rollout.rollout_fn.DiffusionRolloutFn`: SDE-sampled trajectories from `/rollout/generate`, scored through `rm_hub` by `--rm-type ocr` (CPU PaddleOCR), `--rm-type pickscore` (CLIP-H PickScore) or a `--custom-rm-path`, per microgroup or per group under `--group-rm` |
+| Reward pools | `miles/ray/specs/reward.py`: each built-in reward runs on the workers of a reward pool the rollout executor owns, one worker per cell. A GPU pool's workers take whole GPUs appended to the run's placement group after the rollout GPUs, the way `--eval-num-gpus` is placed; a CPU pool's take none. A colocated pool (`--diffusion-pickscore-placement colocated`) instead shares the first rollout GPUs and sleeps, by the engines' offload rule, while training holds them. The pool client restarts a worker that died and resends its batch. `--rm-type` declares its own pool; `--diffusion-reward-pools` declares the others a prompt's metadata `rm_type` may select. Ray deployments only |
 | Train data | `miles.rollout.diffusion_rollout.conversion`: rewards through the text runs' post-process boundary (`--reward-key`, `--custom-reward-post-process-path`, `--disable-rewards-normalization`), Flow-GRPO advantages, one train pair per SDE step, one row per image in the DP split |
 | Trainer | `miles.backends.fsdp_utils.diffusion.actor.DiffusionFSDPTrainRayActor`: one FSDP2 DiT per denoiser component with a PEFT LoRA adapter, Flow-GRPO loss, KL to the LoRA base |
 | Weight sync | LoRA A/B pairs over CUDA IPC, merged by the engine (`lora_merge`) |
@@ -31,7 +32,8 @@ makes it exact, the parity check on the recording image.
 ## Wan2.2-T2V-A14B
 
 Flow-GRPO with LoRA on both experts of Wan2.2-T2V-A14B, 5-frame 480x480 videos, PickScore reward, ported from
-miles_diffusion's 5-GPU recipe at `d608b4ec`: four GPUs run the trainer and the engines, a fifth runs PickScore.
+miles_diffusion's 5-GPU recipe at `d608b4ec`: four GPUs run the trainer and the engines, and the PickScore reward
+pool's one worker runs on a fifth, slot 4 of the placement group.
 
 ```bash
 python scripts/run_wan22_a14b_flow_grpo_pickscore.py --num-rollout 300

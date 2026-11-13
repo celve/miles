@@ -16,6 +16,7 @@ from miles.utils.args.configs.diffusion import DiffusionConfig
 from miles.utils.args.configs.reward_model import RewardModelRolloutOnlyConfig
 from miles.utils.args.configs.rollout import RolloutRelatedConfig, RolloutRelatedRolloutOnlyConfig
 from miles.utils.diffusion.algorithms import ALGORITHMS
+from miles.utils.diffusion.rewards import declared_reward_pool_names
 
 _HOOKS = {
     "rollout_function_path": "miles.rollout.diffusion_rollout.rollout_fn.DiffusionRolloutFn",
@@ -49,19 +50,42 @@ _UNSUPPORTED = [
         lambda a: a.custom_rm_path is None and a.rm_type not in ("ocr", "pickscore"),
     ),
     (
-        "--rm-type pickscore without --diffusion-pickscore-model-path and --diffusion-pickscore-processor-path",
-        lambda a: a.rm_type == "pickscore"
+        "the PickScore reward without --diffusion-pickscore-model-path and --diffusion-pickscore-processor-path",
+        lambda a: "pickscore" in declared_reward_pool_names(a)
         and not (a.diffusion_pickscore_model_path and a.diffusion_pickscore_processor_path),
     ),
     (
+        "a PickScore worker on a fraction of a GPU or several (--diffusion-pickscore-num-gpus-per-worker other than 0 "
+        "or 1); each worker scores on one whole GPU or on the CPU",
+        lambda a: "pickscore" in declared_reward_pool_names(a)
+        and a.diffusion_pickscore_num_gpus_per_worker not in (0, 1),
+    ),
+    (
+        "a colocated PickScore pool on the CPU (--diffusion-pickscore-placement colocated with "
+        "--diffusion-pickscore-num-gpus-per-worker 0); only a GPU worker shares a rollout GPU",
+        lambda a: a.diffusion_pickscore_placement == "colocated" and a.diffusion_pickscore_num_gpus_per_worker == 0,
+    ),
+    (
         "the OCR reward on video (--diffusion-output-num-frames > 1); it reads only the first frame",
-        lambda a: a.rm_type == "ocr" and a.diffusion_output_num_frames != 1,
+        lambda a: "ocr" in declared_reward_pool_names(a) and a.diffusion_output_num_frames != 1,
+    ),
+    (
+        "--diffusion-reward-pools with a global --custom-rm-path, which scores every sample, so no built-in pool starts",
+        lambda a: bool(a.diffusion_reward_pools) and a.custom_rm_path is not None,
     ),
     (
         "the output store or the Mooncake object store",
         lambda a: a.use_output_store or str(a.object_store_backend).lower().endswith("mooncake"),
     ),
     ("fault tolerance (--use-fault-tolerance)", lambda a: a.use_fault_tolerance),
+    (
+        # Reward batches are float video tensors (~110 MB for a Wan microgroup), never sent over the RPC transport.
+        "a reward pool outside one Ray deployment (--cluster-backend other than ray, --worker-comm-backend rpc, or "
+        "--deploy-component other than all)",
+        lambda a: a.custom_rm_path is None
+        and bool(declared_reward_pool_names(a))
+        and (a.cluster_backend != "ray" or a.worker_comm_backend == "rpc" or a.deploy_component != "all"),
+    ),
     ("--delay-split-train-data-by-dp", lambda a: a.delay_split_train_data_by_dp),
     ("independent data parallelism (--indep-dp)", lambda a: a.indep_dp),
     (
@@ -183,16 +207,16 @@ def validate_diffusion_args(args) -> None:
         )
     _derive_hooks(args)
     _check_step_strategy_flags(args)
-    if args.rm_type != "pickscore":
+    if "pickscore" not in declared_reward_pool_names(args):
         if unread_pickscore := [flag for flag in _PICKSCORE_FLAGS if vars(args)[flag] != _default(flag)]:
             raise ValueError(
-                "without --rm-type pickscore no PickScore pool is built, so these are never read: "
-                + ", ".join(f"--{flag.replace('_', '-')}" for flag in unread_pickscore)
+                "without --rm-type pickscore or --diffusion-reward-pools pickscore no PickScore pool starts, so these "
+                "are never read: " + ", ".join(f"--{flag.replace('_', '-')}" for flag in unread_pickscore)
             )
     if args.diffusion_lora_rank <= 0 or args.diffusion_num_sde_steps <= 0:
         raise ValueError("--diffusion-lora-rank and --diffusion-num-sde-steps must be positive")
 
-    # Local: shared code reaches into the trainer package only from inside a function (tests/fast/diffusion/test_layout.py).
+    # Local: shared code reaches into the trainer package only from inside a function (tests/fast/utils/diffusion/test_layout.py).
     from miles.backends.fsdp_utils.diffusion.pipeline_config import get_train_pipeline_config, resolve_model_family
 
     if args.diffusion_model_family is None:

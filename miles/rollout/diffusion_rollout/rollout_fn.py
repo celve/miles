@@ -17,9 +17,8 @@ from miles.rollout.base_types import (
 from miles.rollout.diffusion_rollout.response import parse_rollout_response
 from miles.rollout.inference_rollout.inference_rollout_train import get_worker_urls
 from miles.rollout.rm_hub import batched_async_rm
-from miles.rollout.rm_hub.ocr import OcrRewardPool
-from miles.rollout.rm_hub.pickscore import PickScorePool
 from miles.utils.diffusion.algorithms import get_algorithm
+from miles.utils.diffusion.rewards import BUILT_IN_REWARD_POOLS
 from miles.utils.function_registry import load_function
 from miles.utils.types import Sample
 
@@ -39,12 +38,11 @@ class DiffusionRolloutFn(BaseRolloutFn):
         self.algorithm = get_algorithm(args.loss_type)
         self.sampling_params = build_sampling_params(args)
         self.semaphore: asyncio.Semaphore | None = None
-        # rm_hub runs --custom-rm-path ahead of --rm-type, so built-in pools exist only when no global custom reward does.
-        self.reward_kwargs = (
-            {}
-            if args.custom_rm_path is not None
-            else _build_reward_pools(args, _selected_rm_types(args, self.data_source))
-        )
+        self.reward_pools = dict(input.reward_pools)
+        # rm_hub runs --custom-rm-path ahead of --rm-type, so a global custom reward reads no built-in pool.
+        if args.custom_rm_path is None:
+            _check_selected_rewards_have_pools(_selected_rm_types(args, self.data_source), declared=self.reward_pools)
+        self.reward_kwargs = {f"{name}_pool": pool for name, pool in self.reward_pools.items()}
         self.client = httpx.AsyncClient(limits=httpx.Limits(max_keepalive_connections=0), timeout=httpx.Timeout(None))
 
     async def __call__(self, input: RolloutFnInput) -> RolloutFnTrainOutput:
@@ -52,6 +50,7 @@ class DiffusionRolloutFn(BaseRolloutFn):
         if self.semaphore is None:
             num_engines = len(await get_worker_urls(self.args))
             self.semaphore = asyncio.Semaphore(self.args.sglang_server_concurrency * num_engines)
+        await asyncio.gather(*(pool.ensure_healthy() for pool in self.reward_pools.values()))
         groups = self.data_source.get_samples(self.args.rollout_batch_size)
         groups = await asyncio.gather(*(self._generate_group(group) for group in groups))
         for sample in (sample for group in groups for sample in group):
@@ -113,8 +112,6 @@ class DiffusionRolloutFn(BaseRolloutFn):
 
     async def dispose(self) -> None:
         await self.client.aclose()
-        for pool in self.reward_kwargs.values():
-            pool.shutdown()
 
 
 def _selected_rm_types(args: Namespace, data_source) -> set[str]:
@@ -125,22 +122,14 @@ def _selected_rm_types(args: Namespace, data_source) -> set[str]:
     return {args.rm_type} | overrides
 
 
-def _build_reward_pools(args: Namespace, rm_types: set[str]) -> dict[str, OcrRewardPool | PickScorePool]:
-    """The scorers of every built-in reward the run can select, owned by the rollout and handed to `rm_hub` through
-    its kwargs; each reward reads its own pool."""
-    pools: dict[str, OcrRewardPool | PickScorePool] = {}
-    if "ocr" in rm_types and args.diffusion_output_num_frames != 1:
-        raise ValueError("a prompt selects the OCR reward, which reads only the first frame, in a video run")
-    if "ocr" in rm_types:
-        pools["ocr_pool"] = OcrRewardPool(num_workers=args.diffusion_ocr_num_workers)
-    if "pickscore" in rm_types:
-        if args.rm_type != "pickscore":
-            raise ValueError(
-                "a prompt selects the PickScore reward, whose flags only --rm-type pickscore accepts; launch with "
-                "--rm-type pickscore and let the other prompts override it"
-            )
-        pools["pickscore_pool"] = PickScorePool(args)
-    return pools
+def _check_selected_rewards_have_pools(rm_types: set[str], *, declared: dict) -> None:
+    """Reward pools start at launch, before the prompts are read, so every built-in reward a prompt selects must have
+    been declared."""
+    if missing := sorted((rm_types & set(BUILT_IN_REWARD_POOLS)) - set(declared)):
+        raise ValueError(
+            f"prompts select the {', '.join(missing)} reward, whose pool this run does not start; launch with "
+            f"--diffusion-reward-pools {' '.join(missing)}"
+        )
 
 
 def build_sampling_params(args: Namespace) -> dict[str, Any]:

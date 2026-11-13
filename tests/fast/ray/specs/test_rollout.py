@@ -4,6 +4,7 @@ from tests.fast.fixtures.capability_fixtures import FakeBackendCapability
 from tests.fast.ray.rollout.conftest import make_rollout_config
 from tests.fast.utils.external_utils.command_utils.helm_backend.launcher.values.utils import SCALING
 
+from miles.ray.rollout.reward_pool import RewardPoolClient
 from miles.ray.rollout.rollout_executor import RolloutExecutor
 from miles.ray.specs.entrypoint import SERVE_SPEC_CLASSES
 from miles.ray.specs.rollout import (
@@ -13,6 +14,7 @@ from miles.ray.specs.rollout import (
     rollout_executor_cell_id,
     rollout_executor_worker_name,
 )
+from miles.utils.args.configs.reward_pool import RewardPoolConfig
 from miles.utils.external_utils.command_utils.helm_backend.launcher.values.builder import (
     build_values,
     compute_static_connections,
@@ -78,6 +80,7 @@ class TestRolloutExecutorSpec:
         assert sorted(kwargs) == [
             "args",
             "inference_controller_provider",
+            "reward_pools",
             "router_providers",
             "session_server_provider",
         ]
@@ -120,6 +123,19 @@ class TestRolloutExecutorSpec:
 
         assert kwargs["inference_controller_provider"] is capability.static_provider
         assert "inference-controller" in capability.requested_static_pool_ids
+
+    def test_the_executor_owns_one_client_per_declared_reward_pool_and_none_for_a_run_without_pools(self):
+        """Reward pools reach the rollout through the executor, which holds their clients for its whole life."""
+        capability = FakeBackendCapability(static_provider=object())
+        spec = spec_rollout_executor()
+        pool = RewardPoolConfig(
+            name="pickscore", scorer_path="x.Y", num_workers=1, uses_gpu=True, batch_size=8, num_gpus_per_node=8
+        )
+        with_pool = RolloutExecutorSpec.create(spec.args.model_copy(update={"reward_pools": [pool]}))
+
+        assert spec.ctor_kwargs(_context(spec, capability))["reward_pools"] == {}
+        clients = with_pool.ctor_kwargs(_context(with_pool, capability))["reward_pools"]
+        assert list(clients) == ["pickscore"] and isinstance(clients["pickscore"], RewardPoolClient)
 
     def test_the_worker_and_cell_names_are_stable(self):
         """The driver looks the executor up by name, so these names are part of the release's contract."""
