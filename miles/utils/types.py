@@ -309,8 +309,14 @@ class Sample:
 
     prefix_cache_info: PrefixCacheInfo = field(default_factory=PrefixCacheInfo)
 
+    # Denoising trajectory of a --model-kind diffusion sample (miles.utils.diffusion.types.DiffusionRollout); last, so
+    # positional construction is unchanged, and left out of to_dict when unset, so text dicts are too.
+    diffusion: Any = None
+
     def to_dict(self):
         value = self.__dict__.copy()
+        if value["diffusion"] is None:
+            del value["diffusion"]
         value["lineage"] = asdict(self.lineage) if self.lineage is not None else None
         value["status"] = self.status.value
         value["spec_info"] = self.spec_info.to_dict()

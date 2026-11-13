@@ -20,7 +20,7 @@ from miles.backends.sglang_utils.arguments import sglang_attention_dp_enabled
 from miles.backends.sglang_utils.sglang_api_client import SGLangApiClient
 from miles.backends.training_utils.parallel import ParallelState
 from miles.backends.training_utils.weight_update.conn_status import ConnStatusManager
-from miles.backends.training_utils.weight_update.protocol import get_weight_transfer_protocol
+from miles.backends.training_utils.weight_update.protocol import WeightTransferProtocol, get_weight_transfer_protocol
 from miles.backends.training_utils.weight_update.receiver_pool import ReceiverPools
 from miles.backends.training_utils.weight_update.rollout_cell_updater import _RolloutCellUpdater
 from miles.backends.training_utils.weight_update.session import (
@@ -57,10 +57,11 @@ class WeightUpdater:
         parallel_state: ParallelState,
         is_lora: bool,
         lora_sync_config: dict | None = None,
+        protocol: WeightTransferProtocol | None = None,
     ) -> None:
         self.args = args
         self.parallel_state = parallel_state
-        self.protocol = get_weight_transfer_protocol(args)
+        self.protocol = protocol if protocol is not None else get_weight_transfer_protocol(args)
         self.conn_status = ConnStatusManager()
         assert (
             not is_lora or self.protocol.supports_lora

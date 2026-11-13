@@ -36,3 +36,32 @@ class TestExplicitShardingConfig:
             apply_fsdp2(torch.nn.Linear(2, 2))
 
         assert calls == []
+
+
+class TestCallerChosenBlocksAndInputCasting:
+    def test_block_classes_and_input_casting_reach_every_fully_shard_call(self, monkeypatch: pytest.MonkeyPatch):
+        model = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.ReLU())
+        model._no_split_modules = ["Linear"]
+        calls: list[tuple[torch.nn.Module, dict]] = []
+        monkeypatch.setattr(fsdp, "fully_shard", lambda module, **kwargs: calls.append((module, kwargs)))
+
+        apply_fsdp2(
+            model,
+            args=SimpleNamespace(backend=SimpleNamespace(fp16=False)),
+            block_classes=["ReLU"],
+            cast_forward_inputs=False,
+        )
+
+        assert [module for module, _ in calls] == [model[1], model]
+        assert not any(kwargs["mp_policy"].cast_forward_inputs for _, kwargs in calls)
+
+    def test_text_callers_keep_casting_forward_inputs(self, monkeypatch: pytest.MonkeyPatch):
+        model = torch.nn.Sequential(torch.nn.Linear(2, 2))
+        model._no_split_modules = ["Linear"]
+        model.config = SimpleNamespace(tie_word_embeddings=True)
+        calls: list[dict] = []
+        monkeypatch.setattr(fsdp, "fully_shard", lambda module, **kwargs: calls.append(kwargs))
+
+        apply_fsdp2(model, args=SimpleNamespace(backend=SimpleNamespace(fp16=False)))
+
+        assert all(kwargs["mp_policy"].cast_forward_inputs for kwargs in calls)

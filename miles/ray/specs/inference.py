@@ -6,6 +6,10 @@ from typing_extensions import Self
 
 from miles.backends.sglang_utils.sglang_api_client import WorkerType
 from miles.backends.sglang_utils.sglang_config import ModelConfig, ServerGroupConfig
+from miles.backends.sglang_utils.sglang_diffusion_engine import (
+    compute_diffusion_engine_env_vars,
+    compute_diffusion_engine_launch_cmd,
+)
 from miles.backends.sglang_utils.sglang_engine import compute_engine_launch_cmd
 from miles.backends.sglang_utils.sglang_scaling_config import ServerGroupScalingConfig
 from miles.ray.utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST
@@ -328,7 +332,10 @@ class InferenceEngineSpec(BaseCommandSpec):
         )
 
     def env_var(self, ctx: WorkerLaunchContext) -> dict[str, str]:
-        return compute_inference_engine_env_vars(ctx.args)
+        env_vars = compute_inference_engine_env_vars(ctx.args)
+        if self.server_group_config.engine_kind == "diffusion":
+            env_vars |= compute_diffusion_engine_env_vars(ctx.args)
+        return env_vars
 
     def launch_command(self, ctx: LaunchCommandContext) -> str:
         args = ctx.args
@@ -341,6 +348,17 @@ class InferenceEngineSpec(BaseCommandSpec):
         random_seed = (
             args.seed + group_scaling.engine_offset + ctx.cell_index * num_workers_per_cell + ctx.worker_in_cell_index
         )
+        if server_group_config.engine_kind == "diffusion":
+            return compute_diffusion_engine_launch_cmd(
+                args=args,
+                interpreter_prefix=interpreter_prefix,
+                base_gpu_id=ctx.local_gpu_ids[0],
+                num_gpus_per_engine=server_group_config.num_gpus_per_engine,
+                sglang_overrides=server_group_config.overrides,
+                nccl_port=ctx.self_addrs["nccl"].port,
+                host=ctx.self_addrs["primary"].host,
+                port=ctx.self_addrs["primary"].port,
+            )
         return compute_engine_launch_cmd(
             args=args,
             interpreter_prefix=interpreter_prefix,
@@ -426,7 +444,12 @@ def _compute_spec_inference_engine(
                 else []
             ),
             PortInfo(name="engine_info_bootstrap", static_port=12000, mode="master", allow_dynamic=True),
-            PortInfo(name=GATE_PORT_NAME, static_port=13000, mode="master", allow_dynamic=True),
+            # sglang.multimodal_gen serves no launch gate, so its cells skip activating one.
+            *(
+                [PortInfo(name=GATE_PORT_NAME, static_port=13000, mode="master", allow_dynamic=True)]
+                if server_group_config.engine_kind != "diffusion"
+                else []
+            ),
         ],
         # TODO: reduce complexity around passing around configs later during arguments refactor
         partial_static_meta=StaticMeta(
@@ -437,6 +460,7 @@ def _compute_spec_inference_engine(
                 sglang_api_key=args.sglang.get_value("api_key", group=server_group_config),
                 needs_offload=server_group_config.needs_offload,
                 update_weights=model_cfg.update_weights,
+                engine_kind=server_group_config.engine_kind,
             ),
         ),
     )

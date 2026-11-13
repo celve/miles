@@ -18,6 +18,8 @@ from miles.utils.audit_utils.config_snapshot.enabled import SNAPSHOT_TESTING_ENA
 
 logger = logging.getLogger(__name__)
 
+GRAD_SCALER_FILENAME = "grad_scaler.pt"
+
 
 class ModelState(Stateful):
     """Wrapper for model state only."""
@@ -77,6 +79,11 @@ def _write_checkpoint_metadata(path: Path, metadata: dict[str, Any]) -> None:
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_text(json.dumps(metadata, indent=2, sort_keys=True))
     tmp_path.replace(path)
+
+
+def _has_enabled_scaler(actor: Any) -> bool:
+    # Only the fp16 diffusion actor carries a GradScaler; its loss scale and growth tracker follow the optimizer flags.
+    return hasattr(actor, "scaler") and actor.scaler.is_enabled()  # config-access-exempt: optional actor attribute
 
 
 def load(actor: Any) -> dict[str, Any] | None:
@@ -164,10 +171,15 @@ def load(actor: Any) -> dict[str, Any] | None:
     if rng_path.exists():
         rng_state = torch.load(rng_path, map_location="cpu")
 
+    scaler_path = checkpoint_dir / GRAD_SCALER_FILENAME
+    load_scaler = not actor.args.backend.no_load_optim and _has_enabled_scaler(actor) and scaler_path.exists()
+    scaler_state = torch.load(scaler_path, map_location="cpu") if load_scaler else None
+
     metadata = _read_checkpoint_metadata(checkpoint_dir / "meta.json")
 
     return {
         "rng": rng_state,
+        "grad_scaler": scaler_state,
         "metadata": metadata,
         "iteration": target_step,
     }
@@ -184,6 +196,9 @@ def finalize_load(actor: Any, checkpoint_payload: dict[str, Any] | None) -> None
             torch.set_rng_state(rng_state["torch"])
         if torch.cuda.is_available() and "cuda" in rng_state:
             torch.cuda.set_rng_state_all(rng_state["cuda"])
+
+    if checkpoint_payload.get("grad_scaler") is not None:
+        actor.scaler.load_state_dict(checkpoint_payload["grad_scaler"])
 
     metadata = checkpoint_payload.get("metadata") or {}
     iteration = checkpoint_payload.get("iteration")
@@ -249,6 +264,8 @@ def save(actor: Any, iteration: int) -> None:
         rng_state = {"torch": torch.get_rng_state()}
         rng_state["cuda"] = torch.cuda.get_rng_state_all()
         torch.save(rng_state, checkpoint_dir / "rng.pt")
+        if save_optimizer_state and _has_enabled_scaler(actor):
+            torch.save(actor.scaler.state_dict(), checkpoint_dir / GRAD_SCALER_FILENAME)
 
         metadata = {
             "iteration": step_id,

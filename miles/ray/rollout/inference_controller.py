@@ -513,4 +513,5 @@ def _compute_server_cell_meta_from_info(info: CellInfo) -> ServerCellMetadata:
         needs_offload=info.meta["needs_offload"],
         update_weights=info.meta["update_weights"],
         workers_hash=info.workers_hash,
+        engine_kind=info.meta["engine_kind"],
     )
