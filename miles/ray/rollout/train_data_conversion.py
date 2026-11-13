@@ -413,7 +413,9 @@ def split_train_data_by_dp(
     also carry the precomputed micro-batch layout; otherwise this falls back to
     the legacy split (the training side schedules locally)."""
     if DIFFUSION_TRAIN_PAIRS_KEY in data:
-        from miles.diffusion.conversion import split_train_data_by_dp as split_diffusion_train_data_by_dp
+        from miles.rollout.diffusion_rollout.conversion import (
+            split_train_data_by_dp as split_diffusion_train_data_by_dp,
+        )
 
         return split_diffusion_train_data_by_dp(data, dp_size=train_parallel_config.dp_size)
     if can_precompute_dp_schedule(args, data, train_parallel_config):

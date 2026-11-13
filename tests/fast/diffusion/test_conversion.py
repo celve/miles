@@ -3,10 +3,14 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from miles.diffusion import conversion
-from miles.diffusion.conversion import build_train_pairs, compute_grpo_advantages, convert_samples_to_train_data
 from miles.diffusion.types import DenoisingEnv, DiffusionRollout, DiTTrajectory
 from miles.ray.rollout.train_data_conversion import split_train_data_by_dp
+from miles.rollout.diffusion_rollout import conversion
+from miles.rollout.diffusion_rollout.conversion import (
+    build_train_pairs,
+    compute_grpo_advantages,
+    convert_samples_to_train_data,
+)
 from miles.utils.args.custom_function import CustomFunctionConfig
 from miles.utils.args.custom_view import ImmutableNamespace
 from miles.utils.types import Sample

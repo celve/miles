@@ -29,7 +29,7 @@ class DiffusionConfig(BaseConfig):
     diffusion_step_strategy_path: A[
         str,
         Arg(help="Function `(args, sample, num_steps, seed) -> (sde_steps, returned_latents)` choosing SDE steps."),
-    ] = "miles.diffusion.rollout.step_strategy.sde_window"
+    ] = "miles.rollout.diffusion_rollout.step_strategy.sde_window"
     diffusion_num_sde_steps: A[int, Arg(help="SDE steps per image; each becomes one train pair.")] = 10
     diffusion_sde_window_range: A[
         str | None, Arg(help="'lo,hi' range the SDE window is drawn from; the whole schedule when unset.")

@@ -16,9 +16,9 @@ from miles.utils.args.configs.reward_model import RewardModelRolloutOnlyConfig
 from miles.utils.args.configs.rollout import RolloutRelatedConfig, RolloutRelatedRolloutOnlyConfig
 
 _HOOKS = {
-    "rollout_function_path": "miles.diffusion.rollout.rollout_fn.DiffusionRolloutFn",
-    "data_source_path": "miles.diffusion.rollout.data_source.DiffusionPromptDataSource",
-    "custom_convert_samples_to_train_data_path": "miles.diffusion.conversion.convert_samples_to_train_data",
+    "rollout_function_path": "miles.rollout.diffusion_rollout.rollout_fn.DiffusionRolloutFn",
+    "data_source_path": "miles.rollout.diffusion_rollout.data_source.DiffusionPromptDataSource",
+    "custom_convert_samples_to_train_data_path": "miles.rollout.diffusion_rollout.conversion.convert_samples_to_train_data",
 }
 
 # (what is unsupported, whether this run asks for it)

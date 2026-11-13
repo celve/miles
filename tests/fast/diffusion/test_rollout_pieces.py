@@ -8,10 +8,10 @@ import pytest
 import torch
 from safetensors.torch import save
 
-from miles.diffusion.rollout.data_source import DiffusionPromptDataSource
-from miles.diffusion.rollout.response import parse_rollout_response
-from miles.diffusion.rollout.step_strategy import sde_window
 from miles.ray.rollout.rollout_executor import RolloutExecutor
+from miles.rollout.diffusion_rollout.data_source import DiffusionPromptDataSource
+from miles.rollout.diffusion_rollout.response import parse_rollout_response
+from miles.rollout.diffusion_rollout.step_strategy import sde_window
 from miles.rollout.rm_hub.ocr import image_to_rgb_uint8, ocr_reward, ocr_target_text
 from miles.utils.simple_checkpointer import save_simple_checkpoint
 
