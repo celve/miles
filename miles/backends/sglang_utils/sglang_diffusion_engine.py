@@ -27,7 +27,7 @@ def compute_diffusion_engine_launch_cmd(
         [
             *interpreter_prefix,
             "-m",
-            "miles.diffusion.engine_main",
+            "miles.backends.sglang_utils.sglang_diffusion_engine_main",
             "--base-gpu-id",
             str(base_gpu_id),
             "--server-args",

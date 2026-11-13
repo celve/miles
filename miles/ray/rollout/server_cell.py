@@ -8,9 +8,9 @@ from typing import Any, Literal
 from sglang.srt.constants import GPU_MEMORY_TYPE_WEIGHTS
 
 from miles.backends.sglang_utils.sglang_api_client import SGLangApiClient, WorkerType, probe_server_healthy
+from miles.backends.sglang_utils.sglang_diffusion_api_client import DiffusionApiClient
 from miles.backends.sglang_utils.sglang_engine import build_server_url
 from miles.backends.sglang_utils.sglang_router_api_client import SGLangRouterApiClient
-from miles.diffusion.api_client import DiffusionApiClient
 from miles.ray.rollout.cell_state import (
     CellAddrInfo,
     CellState,

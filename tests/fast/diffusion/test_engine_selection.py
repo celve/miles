@@ -6,10 +6,10 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from miles.backends.sglang_utils import sglang_diffusion_engine_main as engine_main
 from miles.backends.sglang_utils.sglang_api_client import SGLangApiClient
-from miles.diffusion import engine_main
-from miles.diffusion.api_client import DiffusionApiClient
-from miles.diffusion.engine import compute_diffusion_engine_launch_cmd
+from miles.backends.sglang_utils.sglang_diffusion_api_client import DiffusionApiClient
+from miles.backends.sglang_utils.sglang_diffusion_engine import compute_diffusion_engine_launch_cmd
 from miles.ray.rollout.server_cell import ServerCell
 
 
@@ -42,7 +42,7 @@ def _launch(overrides):
 def test_the_engine_is_multimodal_gen_pinned_to_its_gpu():
     argv, server_args = _launch({})
 
-    assert argv[:3] == ["python", "-m", "miles.diffusion.engine_main"]
+    assert argv[:3] == ["python", "-m", "miles.backends.sglang_utils.sglang_diffusion_engine_main"]
     assert argv[argv.index("--base-gpu-id") + 1] == "1"
     assert server_args["host"] == "::1" and server_args["master_port"] == 25001
     assert server_args["lora_merge_mode"] == "merge" and server_args["dit_precision"] == "fp16"

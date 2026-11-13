@@ -16,7 +16,7 @@ function, data source and converter hooks; Miles' default rollout and perf panel
 
 | Piece | Where |
 | --- | --- |
-| Engine | `sglang.multimodal_gen`, launched by the inference engine spec (`miles/diffusion/engine.py`) and served through the Miles router |
+| Engine | `sglang.multimodal_gen`, launched by the inference engine spec (`miles/backends/sglang_utils/sglang_diffusion_engine.py`) and served through the Miles router |
 | Rollout | `miles.diffusion.rollout.rollout_fn.DiffusionRolloutFn`: SDE-sampled trajectories from `/rollout/generate`, scored through `rm_hub` by `--rm-type ocr` (CPU PaddleOCR) or a `--custom-rm-path`, per microgroup or per group under `--group-rm` |
 | Train data | `miles.diffusion.conversion`: rewards through the text runs' post-process boundary (`--reward-key`, `--custom-reward-post-process-path`, `--disable-rewards-normalization`), Flow-GRPO advantages, one train pair per SDE step, one row per image in the DP split |
 | Trainer | `miles.diffusion.train.actor.DiffusionFSDPTrainRayActor`: FSDP2 DiT with a PEFT LoRA adapter, Flow-GRPO loss, KL to the LoRA base |
