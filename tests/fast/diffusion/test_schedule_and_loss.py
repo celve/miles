@@ -50,8 +50,8 @@ def _batch(advantage, log_prob_old):
     )
 
 
-def _loss(batch, *, new_pred, ref_pred=None, kl_beta=0.0, clip_range=1e-4):
-    metrics = MetricBuffer(group=None, device=torch.device("cpu"))
+def _loss(batch, *, new_pred, ref_pred=None, kl_beta=0.0, clip_range=1e-4, components=(), component=None):
+    metrics = MetricBuffer(group=None, device=torch.device("cpu"), components=components)
     loss = flow_grpo_loss(
         batch,
         new_pred=new_pred,
@@ -60,6 +60,7 @@ def _loss(batch, *, new_pred, ref_pred=None, kl_beta=0.0, clip_range=1e-4):
         clip_range=clip_range,
         kl_beta=kl_beta,
         metrics=metrics,
+        component=component,
     )
     return loss, metrics
 
@@ -106,3 +107,15 @@ def test_the_kl_term_vanishes_against_an_identical_reference():
 
     torch.testing.assert_close(with_kl, torch.tensor(-1.0))
     assert with_shifted_ref > with_kl
+
+
+def test_with_two_components_the_log_prob_gap_is_also_kept_per_component():
+    experts = ("transformer", "transformer_2")
+    _, metrics = _loss(
+        _batch([0.0, 0.5], [1.0, -1.0]), new_pred=torch.zeros(2, 2), components=experts, component=experts[1]
+    )
+
+    gap = metrics._sums["log_prob_mean_abs_diff"].item()
+    assert metrics._sums["log_prob_mean_abs_diff_transformer_2"].item() == gap and gap > 0
+    assert metrics._counts["log_prob_mean_abs_diff_transformer"] == 0
+    assert "log_prob_mean_abs_diff_transformer" not in MetricBuffer(group=None, device=torch.device("cpu"))._sums

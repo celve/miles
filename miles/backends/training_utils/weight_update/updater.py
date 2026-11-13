@@ -48,7 +48,8 @@ class WeightUpdater:
     def __init__(
         self,
         args: Namespace,
-        model: Sequence[torch.nn.Module],
+        # A model with several named components (the diffusion trainer's experts) passes them by name.
+        model: Sequence[torch.nn.Module] | Mapping[str, torch.nn.Module],
         *,
         weights_getter: Callable[[], Mapping[str, torch.Tensor] | None],
         model_name: str,

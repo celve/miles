@@ -60,6 +60,8 @@ def compute_diffusion_server_args(
     server_args["lora_target_modules"] = args.diffusion_lora_target_modules
     if args.diffusion_dit_precision is not None:
         server_args["dit_precision"] = args.diffusion_dit_precision
+    if args.diffusion_flow_shift is not None:
+        server_args["flow_shift"] = args.diffusion_flow_shift
     return {**server_args, **sglang_overrides}
 
 

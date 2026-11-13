@@ -1,5 +1,8 @@
 """Micro-batch schedule of one rank's Flow-GRPO train pairs: image x SDE-step tiles."""
 
+import torch
+import torch.distributed as dist
+
 
 def tile_train_pairs(
     rows: list[list[dict]], *, num_optim_steps: int, sample_microbatch: int, tstep_microbatch: int
@@ -31,3 +34,18 @@ def tile_train_pairs(
             ]
         )
     return steps
+
+
+def check_same_component_on_every_rank(
+    component: str, *, components: tuple[str, ...], group, device: torch.device
+) -> None:
+    """Every DP rank must forward the same component at each micro-batch: the components share one FSDP mesh, so a
+    mismatch would pair one expert's collectives with another's."""
+    local = torch.tensor([components.index(component)], device=device)
+    gathered = torch.empty(dist.get_world_size(group), dtype=local.dtype, device=device)
+    dist.all_gather_into_tensor(gathered, local, group=group)
+    if len(set(gathered.tolist())) > 1:
+        raise RuntimeError(
+            f"DP ranks forward different components at one micro-batch: {[components[i] for i in gathered.tolist()]}; "
+            "every rank's rollout must draw the same SDE steps (epoch_global_random_choice)"
+        )

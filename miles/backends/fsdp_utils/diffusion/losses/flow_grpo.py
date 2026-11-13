@@ -63,6 +63,7 @@ def flow_grpo_loss(
     clip_range: float,
     kl_beta: float,
     metrics: MetricBuffer,
+    component: str | None = None,
 ) -> torch.Tensor:
     """Summed loss of the micro-batch; the caller normalizes by the optimizer step's pair count."""
     sigmas = dict(sigmas=batch.sigmas, next_sigmas=batch.next_sigmas, sigma_max=batch.sigma_max)
@@ -88,6 +89,12 @@ def flow_grpo_loss(
         loss_sum = loss_sum + kl_beta * kl_sum
 
     _record_metrics(metrics, batch, log_prob_new, ratio, per_pair_loss, loss_sum, kl_sum, clip_range=clip_range)
+    if component is not None:
+        metrics.emit_mean(
+            f"log_prob_mean_abs_diff_{component}",
+            total=torch.abs(log_prob_new - batch.log_prob_old).sum(),
+            count=len(batch),
+        )
     return loss_sum
 
 
@@ -117,10 +124,13 @@ def microbatch_loss(actor, pairs: list[dict], *, rollout_id: int, microbatch_id:
         adv_clip_max=args.diffusion_adv_clip_max,
         device=torch.device("cuda", torch.cuda.current_device()),
     )
-    new_pred = actor.noise_pred(batch.latents, batch.timesteps, batch.pos_cond, batch.neg_cond)
+    component = actor.component_for(batch.timesteps)
+    new_pred = actor.noise_pred(component, batch.latents, batch.timesteps, batch.pos_cond, batch.neg_cond)
     ref_pred = None
     if args.diffusion_kl_beta > 0:
-        ref_pred = actor.lora_base_noise_pred(batch.latents, batch.timesteps, batch.pos_cond, batch.neg_cond)
+        ref_pred = actor.lora_base_noise_pred(
+            component, batch.latents, batch.timesteps, batch.pos_cond, batch.neg_cond
+        )
     return flow_grpo_loss(
         batch,
         new_pred=new_pred,
@@ -129,4 +139,5 @@ def microbatch_loss(actor, pairs: list[dict], *, rollout_id: int, microbatch_id:
         clip_range=args.eps_clip,
         kl_beta=args.diffusion_kl_beta,
         metrics=metrics,
+        component=component if len(actor.pipeline_config.components) > 1 else None,
     )

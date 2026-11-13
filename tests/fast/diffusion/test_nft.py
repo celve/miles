@@ -56,6 +56,8 @@ def test_an_ode_request_asks_for_log_probs_without_constants(sde_type, no_const)
         diffusion_noise_level=0.0,
         diffusion_quality="exact",
         diffusion_negative_prompt=None,
+        diffusion_output_num_frames=1,
+        diffusion_guidance_scale_2=None,
     )
 
     params = build_sampling_params(args)

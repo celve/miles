@@ -4,6 +4,7 @@ receive their FSDP2 shards by broadcast; LoRA (PEFT) wraps the model before shar
 import importlib
 import warnings
 from contextlib import contextmanager
+from fnmatch import fnmatch
 from itertools import chain
 
 import torch
@@ -35,6 +36,7 @@ def load_fsdp_dit(
     _sync_dtypes_from_rank0(model)
     full_state = model.state_dict() if is_source else {}
     cpu_offload = args.backend.optimizer_cpu_offload
+    shard_fp32_modules(model, config.fp32_module_patterns, mesh=mesh, cpu_offload=cpu_offload)
     model = apply_fsdp2(
         model,
         mesh=mesh,
@@ -48,10 +50,24 @@ def load_fsdp_dit(
     )
     model = fsdp2_load_full_state_dict(model, full_state, cpu_offload=cpu_offload)
     del full_state
+    config.postprocess_model_after_materialize(model)
     # FSDP fixes each group's gradient dtype at lazy init from the params requiring grad; run it now,
     # before a first forward with the adapter disabled would see none.
     model._get_fsdp_state()._lazy_init()
     return model
+
+
+def shard_fp32_modules(model: torch.nn.Module, patterns: tuple[str, ...], *, mesh, cpu_offload: bool) -> None:
+    """Give each matching module its own FSDP2 group that all-gathers fp32 weights; the blocks sharded around it
+    afterwards keep gathering the forward dtype."""
+    from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy, fully_shard
+
+    policy = MixedPrecisionPolicy(param_dtype=torch.float32, reduce_dtype=torch.float32, cast_forward_inputs=False)
+    for name, module in list(model.named_modules()):
+        if any(fnmatch(name, pattern) for pattern in patterns):
+            fully_shard(
+                module, mesh=mesh, mp_policy=policy, offload_policy=CPUOffloadPolicy() if cpu_offload else None
+            )
 
 
 @contextmanager
