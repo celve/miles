@@ -7,7 +7,6 @@ from typing import Any
 
 import httpx
 
-from miles.diffusion.rollout.ocr import OcrRewardPool
 from miles.diffusion.rollout.response import parse_rollout_response
 from miles.rollout.base_types import (
     BaseRolloutFn,
@@ -18,6 +17,7 @@ from miles.rollout.base_types import (
 )
 from miles.rollout.inference_rollout.inference_rollout_train import get_worker_urls
 from miles.rollout.rm_hub import batched_async_rm
+from miles.rollout.rm_hub.ocr import OcrRewardPool
 from miles.utils.function_registry import load_function
 from miles.utils.types import Sample
 

@@ -4,7 +4,7 @@ python -c 'import importlib.metadata as m, sys; sys.exit(any(m.version(p) != v f
   --no-deps "opencv-python-headless==$OPENCV")
 
 ### 1
-PYTHONPATH=<REPO_ROOT> python -c 'from miles.diffusion.rollout.ocr import OcrScorer; OcrScorer()'
+PYTHONPATH=<REPO_ROOT> python -c 'from miles.rollout.rm_hub.ocr import OcrScorer; OcrScorer()'
 
 ### 2
 hf download

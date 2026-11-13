@@ -28,7 +28,7 @@ DATASET_SUBSET = "flowgrpo_ocr"
 _OCR_DEPS = {"paddleocr": "2.9.1", "paddlepaddle": "2.6.2", "python-Levenshtein": "0.27.3"}
 # Installs the pinned OCR stack unless exactly those versions are present. paddleocr's resolver downgrades numpy below
 # 2 and adds GUI OpenCV wheels, so the image's numpy and headless OpenCV are restored afterwards; PaddleOCR 2.9 runs on
-# them (miles.diffusion.rollout.ocr patches the one numpy 2 gap).
+# them (miles.rollout.rm_hub.ocr patches the one numpy 2 gap).
 _OCR_DEPS_INSTALL = (
     "python -c 'import importlib.metadata as m, sys; "
     f"sys.exit(any(m.version(p) != v for p, v in {json.dumps(_OCR_DEPS)}.items()))' 2>/dev/null || ("
@@ -66,7 +66,7 @@ def prepare(args: ScriptArgs) -> None:
     # Fetch PaddleOCR's models once; the reward pool's workers would each download them and race on a cold cache.
     U.exec_command_cpu(
         f"PYTHONPATH={command_utils.repo_base_dir} python -c "
-        "'from miles.diffusion.rollout.ocr import OcrScorer; OcrScorer()'"
+        "'from miles.rollout.rm_hub.ocr import OcrScorer; OcrScorer()'"
     )
     U.exec_command_cpu(
         f"hf download --repo-type dataset {DATASET} --include '{DATASET_SUBSET}/**' --local-dir {args.dataset_dir}"

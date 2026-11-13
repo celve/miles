@@ -112,7 +112,7 @@ async def async_rm(args, sample: Sample, **kwargs):
         return compute_ifbench_reward(response, label, metadata=metadata)
     elif rm_type == "ocr":
         # Local import: the OCR reward pulls in PaddleOCR, which text runs never install.
-        from miles.diffusion.rollout.ocr import ocr_rm
+        from miles.rollout.rm_hub.ocr import ocr_rm
 
         return await ocr_rm(args, sample, **kwargs)
     elif rm_type == "random":
