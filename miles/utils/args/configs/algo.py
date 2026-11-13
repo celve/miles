@@ -87,10 +87,12 @@ class AlgoConfig(BaseConfig):
     loss_type: A[
         str,
         Arg(
-            choices=["policy_loss", "sft_loss", "custom_loss", "score_centering"],
+            choices=["policy_loss", "sft_loss", "custom_loss", "score_centering", "flow_grpo", "nft"],
             help=(
                 "Choose loss type, currently support ppo policy_loss or sft_loss, "
-                "if custom_loss is set, we will use the function path from `--custom-loss-function-path`."
+                "if custom_loss is set, we will use the function path from `--custom-loss-function-path`. "
+                "`flow_grpo` and `nft` are the diffusion algorithms and need `--model-kind diffusion`, which reads the "
+                "default `policy_loss` as `flow_grpo`."
             ),
         ),
     ] = "policy_loss"

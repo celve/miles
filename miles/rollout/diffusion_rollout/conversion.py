@@ -1,4 +1,4 @@
-"""Flow-GRPO train data: GRPO advantages and one (x_t, x_t+1) train pair per SDE step of each image.
+"""Diffusion train data: GRPO advantages and one row per image of the `--loss-type` algorithm's train pairs.
 
 Registered through `--custom-convert-samples-to-train-data-path`; it also logs the rollout's reward metrics, while
 Miles' default rollout and perf panels log the rest.
@@ -10,6 +10,7 @@ from typing import Any
 import torch
 
 from miles.utils.args.custom_view import compute_custom_function_config
+from miles.utils.diffusion.algorithms import get_algorithm
 from miles.utils.diffusion.metrics import log_metrics
 from miles.utils.function_registry import load_function
 from miles.utils.metric_utils import compute_rollout_step, namespace_metrics
@@ -25,9 +26,10 @@ def convert_samples_to_train_data(args, samples: list[Sample]) -> dict[str, Any]
     """
     raw_rewards, advantages = post_process_rewards(args, samples)
     _log_reward_metrics(args, samples, raw_rewards=raw_rewards, advantages=advantages)
+    algorithm = get_algorithm(args.loss_type)
     return {
         "diffusion_train_pairs": [
-            build_train_pairs(sample, advantage=advantage)
+            algorithm.build_train_pairs(args, sample, advantage=advantage)
             for sample, advantage in zip(samples, advantages, strict=True)
         ],
         "sample_indices": [sample.index for sample in samples],
@@ -68,40 +70,6 @@ def compute_grpo_advantages(args, *, raw_rewards: list[float]) -> list[float]:
         # flow_grpo's `+ 1e-4`
         centered = centered / (std + 1e-4)
     return centered.flatten().tolist()
-
-
-def build_train_pairs(sample: Sample, *, advantage: float) -> list[dict[str, Any]]:
-    rollout = sample.diffusion
-    traj = rollout.dit_trajectory
-    steps = rollout.sde_step_indices
-    assert steps, f"sample {sample.index} has no SDE steps to train on"
-    position = _latent_positions(traj)
-    missing = sorted({s for step in steps for s in (step, step + 1)} - position.keys())
-    assert not missing, f"sample {sample.index}: trajectory lacks latents for steps {missing}"
-
-    # Cloned so a pickled pair carries its own slice, not the whole trajectory storage it views.
-    return [
-        {
-            "sample_index": sample.index,
-            "advantage": float(advantage),
-            "denoising_env": rollout.denoising_env,
-            "latent": traj.latents[position[step]].clone(),
-            "next_latent": traj.latents[position[step + 1]].clone(),
-            "timestep": traj.timesteps[step].clone(),
-            "sigma": traj.sigmas[step].clone(),
-            "next_sigma": traj.sigmas[step + 1].clone(),
-            # The first sigma below 1 on this image's grid; the SDE kernel substitutes it at sigma == 1.
-            "sigma_max": traj.sigmas[1].clone(),
-            "log_prob_old": rollout.rollout_log_probs[step].clone(),
-        }
-        for step in steps
-    ]
-
-
-def _latent_positions(traj) -> dict[int, int]:
-    if traj.latent_step_indices is None:
-        return {step: step for step in range(int(traj.latents.shape[0]))}
-    return {int(step): pos for pos, step in enumerate(traj.latent_step_indices.tolist())}
 
 
 def _log_reward_metrics(args, samples: list[Sample], *, raw_rewards: list[float], advantages: list[float]) -> None:
