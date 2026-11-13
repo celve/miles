@@ -4,7 +4,7 @@ import abc
 
 import torch
 
-from miles.diffusion.types import CondKwargs
+from miles.utils.diffusion.types import CondKwargs
 
 _REGISTRY: dict[str, type["TrainPipelineConfig"]] = {}
 

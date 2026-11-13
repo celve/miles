@@ -3,7 +3,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from miles.diffusion.types import DenoisingEnv, DiffusionRollout, DiTTrajectory
 from miles.ray.rollout.train_data_conversion import split_train_data_by_dp
 from miles.rollout.diffusion_rollout import conversion
 from miles.rollout.diffusion_rollout.conversion import (
@@ -13,6 +12,7 @@ from miles.rollout.diffusion_rollout.conversion import (
 )
 from miles.utils.args.custom_function import CustomFunctionConfig
 from miles.utils.args.custom_view import ImmutableNamespace
+from miles.utils.diffusion.types import DenoisingEnv, DiffusionRollout, DiTTrajectory
 from miles.utils.types import Sample
 
 

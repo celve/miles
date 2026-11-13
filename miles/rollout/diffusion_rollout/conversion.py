@@ -9,8 +9,8 @@ from typing import Any
 
 import torch
 
-from miles.diffusion.metrics import log_metrics
 from miles.utils.args.custom_view import compute_custom_function_config
+from miles.utils.diffusion.metrics import log_metrics
 from miles.utils.function_registry import load_function
 from miles.utils.metric_utils import compute_rollout_step, namespace_metrics
 from miles.utils.types import Sample

@@ -5,7 +5,7 @@ from typing import Any
 import msgpack
 import torch
 
-from miles.diffusion.types import CondKwargs, DenoisingEnv, DiffusionRollout, DiTTrajectory, decode_tensor
+from miles.utils.diffusion.types import CondKwargs, DenoisingEnv, DiffusionRollout, DiTTrajectory, decode_tensor
 
 _IMAGE_CHANNEL_COUNTS = (1, 3, 4)
 

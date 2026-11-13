@@ -309,7 +309,7 @@ class Sample:
 
     prefix_cache_info: PrefixCacheInfo = field(default_factory=PrefixCacheInfo)
 
-    # Denoising trajectory of a --model-kind diffusion sample (miles.diffusion.types.DiffusionRollout); last, so
+    # Denoising trajectory of a --model-kind diffusion sample (miles.utils.diffusion.types.DiffusionRollout); last, so
     # positional construction is unchanged, and left out of to_dict when unset, so text dicts are too.
     diffusion: Any = None
 

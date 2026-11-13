@@ -413,7 +413,7 @@ def parse_args_and_get_parser(
     _validate_argument_ownership(args, parser=parser, training_backend_arg_names=training_backend_arg_names)
     sglang, sglang_scaling = SglangConfig.parse_args(args)
     if args.model_kind == "diffusion":
-        from miles.diffusion.arguments import validate_diffusion_sglang_config
+        from miles.utils.diffusion.arguments import validate_diffusion_sglang_config
 
         validate_diffusion_sglang_config(sglang)
     elif any(group.engine_kind == "diffusion" for model in sglang.models for group in model.server_groups):
@@ -1114,7 +1114,7 @@ def miles_validate_args(args):
         raise ValueError("--rm-type ocr scores generated images, so it needs --model-kind diffusion")
     if args.model_kind == "diffusion":
         # Local import: the diffusion package pulls in optional dependencies text runs never install.
-        from miles.diffusion.arguments import validate_diffusion_args
+        from miles.utils.diffusion.arguments import validate_diffusion_args
 
         validate_diffusion_args(args)
 
@@ -1833,7 +1833,7 @@ def miles_validate_args(args):
             )
         args.global_batch_size = global_batch_size
     if args.model_kind == "diffusion":
-        from miles.diffusion.arguments import validate_diffusion_batch_size
+        from miles.utils.diffusion.arguments import validate_diffusion_batch_size
 
         validate_diffusion_batch_size(args)
 

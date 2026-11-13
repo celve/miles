@@ -5,11 +5,11 @@ import pytest
 import torch
 from tests.fast.fixtures.args_fixtures import parser_defaults
 
-from miles.diffusion.types import DiffusionRollout
 from miles.rollout.base_types import RolloutFnConstructorInput
 from miles.rollout.diffusion_rollout import rollout_fn
 from miles.utils.args.custom_function import CustomFunctionConfig
 from miles.utils.args.custom_view import ImmutableNamespace
+from miles.utils.diffusion.types import DiffusionRollout
 from miles.utils.types import Sample
 
 

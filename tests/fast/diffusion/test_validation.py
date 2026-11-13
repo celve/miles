@@ -2,18 +2,17 @@ from argparse import Namespace
 from types import SimpleNamespace
 
 import pytest
-
 from tests.fast.fixtures.args_fixtures import _RESOLVED_AFTER_PARSING, parser_defaults
 
 from miles.backends.fsdp_utils.arguments import FSDPArgs
 from miles.backends.sglang_utils.sglang_api_client import WorkerType
-from miles.diffusion.arguments import (
+from miles.utils.args.configs.diffusion import DiffusionConfig
+from miles.utils.diffusion.arguments import (
     _HOOKS,
     validate_diffusion_args,
     validate_diffusion_batch_size,
     validate_diffusion_sglang_config,
 )
-from miles.utils.args.configs.diffusion import DiffusionConfig
 
 
 def _supported(**overrides):

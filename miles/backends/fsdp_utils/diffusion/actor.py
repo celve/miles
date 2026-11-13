@@ -22,9 +22,9 @@ from miles.backends.training_utils.parallel import get_parallel_state, set_paral
 from miles.backends.training_utils.torch_native.actor import TorchNativeTrainRayActor
 from miles.backends.training_utils.types import TrainStepOutcome, TrainStepOutput
 from miles.backends.training_utils.weight_update.updater import WeightUpdater
-from miles.diffusion.metrics import log_metrics
 from miles.utils import object_store
 from miles.utils.context_utils import with_defer
+from miles.utils.diffusion.metrics import log_metrics
 from miles.utils.object_store import StoreObjectRef
 from miles.utils.profile_utils import TrainProfiler
 from miles.utils.timer import Timer, inverse_timer, timer
