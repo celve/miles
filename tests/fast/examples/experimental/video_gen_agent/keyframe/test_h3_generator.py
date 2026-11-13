@@ -4,12 +4,20 @@ import asyncio
 import itertools
 from pathlib import Path
 
+import examples.experimental.video_gen_agent.keyframe.env as env
 import httpx
 import pytest
-from examples.experimental.video_gen_agent.generator import ClipRequest, GeneratorUnavailable
+from examples.experimental.video_gen_agent.generator import ClipRequest, FakeImageGenerator, GeneratorUnavailable
 from examples.experimental.video_gen_agent.keyframe import h3_generator
+from examples.experimental.video_gen_agent.keyframe.eval import arms
 from examples.experimental.video_gen_agent.keyframe.h3_generator import H3ClipGenerator
 from fastapi import FastAPI, HTTPException
+from tests.fast.examples.experimental.video_gen_agent.keyframe.test_env import (  # noqa: F401
+    _call,
+    _run,
+    _script,
+    options,
+)
 
 from miles.router.router import MilesRouter, MilesRouterConfig
 from miles.utils.http_utils import find_available_port
@@ -90,9 +98,9 @@ def h3(monkeypatch, tmp_path):
             ),
             verbose=False,
         )
-        for index, options in enumerate(engines):
+        for index, engine in enumerate(engines):
             server = UvicornThreadServer(
-                _fake_h3_engine(f"e{index}", seen, **options),
+                _fake_h3_engine(f"e{index}", seen, **engine),
                 host="127.0.0.1",
                 port=find_available_port(37100 + 50 * index),
             )
@@ -246,3 +254,57 @@ def test_the_canvas_is_the_nearest_h3_aspect_ratio():
         "1:1",
         "4:3",
     ]
+
+
+async def test_an_env_episodes_assets_keep_the_asset_header_and_are_recorded_as_subjects(h3, options):  # noqa: F811
+    seen, _ = h3({})
+    options.setenv(
+        "AGENT_VIDEO_GEN_GENERATOR", "examples.experimental.video_gen_agent.keyframe.h3_generator.H3ClipGenerator"
+    )
+    options.setenv("AGENT_VIDEO_GEN_VIDEO_MODE", "reference")
+    options.setenv("AGENT_VIDEO_GEN_SECONDS", "4")
+    options.setenv("AGENT_VIDEO_GEN_FPS", "24")
+    _script(
+        options,
+        [_call("generate_image", {"prompt": "a corgi, isolated"}), _call("generate_image", {"prompt": "a ball"})],
+        [_call("generate_video", {"image_ids": ["image_2", "image_1"], "prompt": "the corgi chases the ball"})],
+        tools=env.REFERENCE_TOOLS,
+    )
+
+    record = (await _run())["video_gen"]
+
+    (_, body), _ = seen
+    corgi, ball = record["images"]
+    assert [c["uri"] for c in body["conditions"]] == [f"file://{ball['path']}", f"file://{corgi['path']}"]
+    assert body["prompt"] == (
+        "<Subject 1> is the subject shown in <Picture 1>, without its plain background.\n"
+        "<Subject 2> is the subject shown in <Picture 2>, without its plain background.\n"
+        "[reference generation] the corgi chases the ball"
+    )
+    assert record["video"]["reference_roles"] == ("subject", "subject")
+
+
+async def test_a_one_shot_arms_image_of_the_whole_request_is_sent_as_a_scene(h3, monkeypatch, tmp_path):
+    seen, _ = h3({})
+    monkeypatch.setenv("AGENT_VIDEO_GEN_FAKE_DIR", str(tmp_path / "made"))
+    row = arms.one_shot_row("a fox runs through snow", "reference")
+
+    (made,) = await arms.generate([row], H3ClipGenerator(), FakeImageGenerator(), shape=arms.SHAPE | {"seconds": 4.0})
+
+    (_, body), _ = seen
+    assert body["conditions"] == [
+        {"type": "image", "role": "reference", "uri": f"file://{made['reference_paths'][0]}"}
+    ]
+    assert (
+        body["prompt"]
+        == "<Subject 1> is the scene shown in <Picture 1>.\n[reference generation] a fox runs through snow"
+    )
+
+
+@pytest.mark.parametrize(
+    "roles, message",
+    [(("scene",), "1 reference roles for 2 references"), (("subject", "setting"), "not \\['setting'\\]")],
+)
+def test_a_reference_role_must_name_each_reference_as_a_subject_or_a_scene(roles, message):
+    with pytest.raises(ValueError, match=message):
+        _request(reference_roles=roles)

@@ -17,6 +17,9 @@ from PIL import Image as PILImage
 from PIL.PngImagePlugin import PngInfo
 
 
+REFERENCE_ROLES = ("subject", "scene")
+
+
 @dataclass(frozen=True)
 class ClipRequest:
     prompt: str
@@ -32,6 +35,14 @@ class ClipRequest:
     last_image_path: str | None = None
     # Images the clip shows as subjects and look rather than starts from, for reference-to-video.
     reference_paths: tuple[str, ...] = ()
+    # What each reference is, in reference_paths' order: an isolated "subject" or a whole "scene"; empty is all subjects.
+    reference_roles: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.reference_roles and len(self.reference_roles) != len(self.reference_paths):
+            raise ValueError(f"{len(self.reference_roles)} reference roles for {len(self.reference_paths)} references")
+        if unknown := set(self.reference_roles) - set(REFERENCE_ROLES):
+            raise ValueError(f"reference roles are {' or '.join(REFERENCE_ROLES)}, not {sorted(unknown)}")
 
     @property
     def num_frames(self) -> int:

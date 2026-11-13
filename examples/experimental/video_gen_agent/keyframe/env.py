@@ -115,7 +115,9 @@ REFERENCE_TOOLS = [
             ),
             "parameters": {
                 "type": "object",
-                "properties": {"prompt": {"type": "string", "description": "The one asset this image shows, in detail."}}
+                "properties": {
+                    "prompt": {"type": "string", "description": "The one asset this image shows, in detail."}
+                }
                 | _SHARED_PARAMETERS,
                 "required": ["prompt"],
             },
@@ -390,7 +392,9 @@ async def _generate_video(episode: _Episode, arguments: dict) -> str:
         request = replace(request, image_path=images[0].path)
     elif reference:
         # An asset's prompt describes it isolated on a plain background, so only the planner's prompt reaches the video.
-        request = replace(request, reference_paths=tuple(image.path for image in images))
+        request = replace(
+            request, reference_paths=tuple(image.path for image in images), reference_roles=("subject",) * len(images)
+        )
     else:
         request = replace(request, prompt=f"{images[0].request.prompt} {request.prompt}")
         # The cap bounds what the generator reads, here the chosen image's prompt and this one together.
@@ -441,7 +445,6 @@ def _chosen_images(
             return None, f"you have not seen {image.image_id} yet; look at it, then call generate_video"
         images.append(image)
     return images, None
-
 
 
 async def _generated(episode: _Episode, generation):

@@ -96,6 +96,8 @@ def test_in_reference_mode_both_image_arms_condition_the_video_on_a_reference(tm
         "a fox, isolated snow",
     )
     assert "reference_paths" not in by["B0"] and "reference_paths" not in by["B1"]
+    # The one-shot image renders the whole request; K-blind's are assets.
+    assert (one_shot["reference_roles"], "reference_roles" in blind_k) == (["scene"], False)
 
 
 def test_in_i2v_mode_k_blind_animates_the_agents_recorded_first_image(tmp_path, monkeypatch):
@@ -674,6 +676,7 @@ def test_bo3_lets_the_planner_pick_among_three_keyframes_the_first_of_which_is_b
         "a fox",
         seed,
     )
+    assert row["reference_roles"] == b0_ref["reference_roles"] == ["scene"]
     (payload,) = planner.asked
     shown = payload["messages"][-1]["content"]
     assert [part["image_url"]["url"] for part in shown if part["type"] == "image_url"] == [
@@ -703,7 +706,11 @@ def test_comp_key_composes_k0s_first_three_assets_into_the_clips_first_frame(tmp
     composed = _made(fox["image_path"])
     assert composed["image_paths"] == assets[:3] and composed["seed"] == request_seed("a fox")
     assert composed["prompt"] == "The fox in image 1 leaps at the ball in image 2 by the tree in image 3."
-    assert (fox["prompt"], fox["reference_paths"]) == ("the fox chases the ball", assets)
+    assert (fox["prompt"], fox["reference_paths"], "reference_roles" in fox) == (
+        "the fox chases the ball",
+        assets,
+        False,
+    )
     (payload,) = planner.asked
     assert [p["image_url"]["url"] for p in payload["messages"][-1]["content"] if p["type"] == "image_url"] == [
         f"file://{path}" for path in assets[:3]
@@ -739,6 +746,7 @@ def test_end_key_renders_the_planners_first_and_last_frames_for_dynamic_and_moti
         ("a red leaf", seed),
     ]
     assert (leaf["prompt"], leaf["reference_paths"]) == ("the leaf turns red", [leaf["image_path"]])
+    assert leaf["reference_roles"] == ["scene"]
     assert (car["request"], car["prompt"], car["planner_answer"]) == ("a car drives left", None, "no idea")
     (made, _) = asyncio.run(arms.generate([leaf, car], FakeClipGenerator()))
     asked = json.loads(open(made["path"]).read())
@@ -811,8 +819,9 @@ def test_b1_ref_renders_the_rewrite_as_b0_ref_renders_the_raw_request(tmp_path, 
         _made(b0_ref["reference_paths"][0])["seed"],
     )
     asked = json.loads(open(b1_ref["path"]).read())
-    assert (asked["prompt"], asked["reference_paths"], asked["seed"]) == (
+    assert (asked["prompt"], asked["reference_paths"], asked["seed"], asked["reference_roles"]) == (
         "A red fox trots through snow.",
         b1_ref["reference_paths"],
         request_seed("a fox"),
+        ["scene"],
     )
