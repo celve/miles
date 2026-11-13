@@ -9,9 +9,11 @@ from pathlib import Path
 import pytest
 
 from miles.backends.sglang_utils.sglang_diffusion_engine import compute_diffusion_engine_launch_cmd
+from miles.ray.specs.reward import REWARD_WORKER_CLASS
 from miles.ray.specs.train import _DIFFUSION_TRAINER_ACTOR_CLASSES
 from miles.utils.args.configs.diffusion import DiffusionConfig
 from miles.utils.diffusion.arguments import _HOOKS
+from miles.utils.diffusion.rewards import OCR_SCORER, PICKSCORE_SCORER
 
 REPO = Path(__file__).resolve().parents[3]
 TRAINER_PACKAGE = "miles.backends.fsdp_utils.diffusion"
@@ -64,6 +66,10 @@ RUNTIME_OBJECTS = [
     _recipe_step_strategy(WAN_EXECUTE_SNAPSHOT),
     # rm_hub imports PickScore inside the call, so text runs never load it.
     "miles.rollout.rm_hub.pickscore.pickscore_rm",
+    # Reward workers construct these by path, inside the worker process.
+    REWARD_WORKER_CLASS,
+    OCR_SCORER,
+    PICKSCORE_SCORER,
     *(f"{module}.{name}" for module, name in _recipe_prepare_imports()),
 ]
 
