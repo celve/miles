@@ -17,6 +17,9 @@ REPO = Path(__file__).resolve().parents[3]
 TRAINER_PACKAGE = "miles.backends.fsdp_utils.diffusion"
 PREPARE_SNAPSHOT = REPO / "tests/snapshots/launch_scripts/py/scripts/run_sd35_medium_flow_grpo_ocr.py/prepare.txt"
 NFT_EXECUTE_SNAPSHOT = REPO / "tests/snapshots/launch_scripts/py/scripts/run_sd35_medium_nft_ocr.py/execute.txt"
+WAN_EXECUTE_SNAPSHOT = (
+    REPO / "tests/snapshots/launch_scripts/py/scripts/run_wan22_a14b_flow_grpo_pickscore.py/execute.txt"
+)
 
 
 def _engine_main_module():
@@ -47,8 +50,8 @@ def _recipe_prepare_imports():
     return re.findall(r"from ([\w.]+) import (\w+)", PREPARE_SNAPSHOT.read_text())
 
 
-def _nft_recipe_step_strategy():
-    (path,) = re.findall(r"--diffusion-step-strategy-path (\S+)", NFT_EXECUTE_SNAPSHOT.read_text())
+def _recipe_step_strategy(snapshot):
+    (path,) = re.findall(r"--diffusion-step-strategy-path (\S+)", snapshot.read_text())
     return path
 
 
@@ -57,7 +60,10 @@ RUNTIME_OBJECTS = [
     *_DIFFUSION_TRAINER_ACTOR_CLASSES.values(),
     DiffusionConfig.model_fields["diffusion_step_strategy_path"].default,
     DiffusionConfig.model_fields["diffusion_nft_timestep_strategy_path"].default,
-    _nft_recipe_step_strategy(),
+    _recipe_step_strategy(NFT_EXECUTE_SNAPSHOT),
+    _recipe_step_strategy(WAN_EXECUTE_SNAPSHOT),
+    # rm_hub imports PickScore inside the call, so text runs never load it.
+    "miles.rollout.rm_hub.pickscore.pickscore_rm",
     *(f"{module}.{name}" for module, name in _recipe_prepare_imports()),
 ]
 
