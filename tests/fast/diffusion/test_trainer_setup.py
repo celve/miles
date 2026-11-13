@@ -3,8 +3,13 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.distributed.fsdp as fsdp
+from tests.fast.backends.fsdp_utils.checkpoint_fixtures import cpu_checkpoint_actor
+from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 
+from miles.backends.fsdp_utils import checkpoint
 from miles.backends.fsdp_utils.diffusion import model as dit_model
+
+__all__ = ["cpu_checkpoint_actor"]
 
 
 class _PeftDiT(torch.nn.Module):
@@ -49,3 +54,17 @@ def test_the_dit_is_sharded_by_miles_apply_fsdp2_without_casting_inputs(monkeypa
         for _, kwargs in calls
     )
     assert loaded == [cpu_offload]
+
+
+def test_a_resumed_fp16_run_keeps_its_loss_scale(cpu_checkpoint_actor):
+    actor = cpu_checkpoint_actor
+    actor.scaler = ShardedGradScaler(device="cpu")
+    actor.scaler.scale(torch.ones(1))
+    actor.scaler.update(new_scale=1024.0)
+    saved = actor.scaler.state_dict()
+    checkpoint.save(actor=actor, iteration=0)
+
+    actor.scaler = ShardedGradScaler(device="cpu")
+    checkpoint.finalize_load(actor=actor, checkpoint_payload=checkpoint.load(actor=actor))
+
+    assert actor.scaler.state_dict() == saved
