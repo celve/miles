@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from tests.fast.diffusion.test_validation import _parse_diffusion_run
+from tests.fast.utils.diffusion.test_validation import _parse_diffusion_run
 
 from miles.ray.placement_group import _get_placement_group_layout
 from miles.ray.specs.entrypoint import compute_specs
@@ -103,7 +103,7 @@ def test_an_ocr_worker_scores_each_image_of_a_call_on_its_own(monkeypatch):
     [dict(cluster_backend="kubernetes"), dict(worker_comm_backend="rpc"), dict(deploy_component="trainer")],
 )
 def test_reward_pools_run_only_in_one_ray_deployment(override):
-    from tests.fast.diffusion.test_validation import _supported
+    from tests.fast.utils.diffusion.test_validation import _supported
 
     from miles.utils.diffusion.arguments import validate_diffusion_args
 
@@ -112,7 +112,7 @@ def test_reward_pools_run_only_in_one_ray_deployment(override):
 
 
 def test_a_global_custom_reward_starts_no_pool_so_any_deployment_may_run_it():
-    from tests.fast.diffusion.test_validation import _supported
+    from tests.fast.utils.diffusion.test_validation import _supported
 
     from miles.utils.diffusion.arguments import validate_diffusion_args
 

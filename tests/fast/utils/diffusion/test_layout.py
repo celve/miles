@@ -15,7 +15,7 @@ from miles.utils.args.configs.diffusion import DiffusionConfig
 from miles.utils.diffusion.arguments import _HOOKS
 from miles.utils.diffusion.rewards import OCR_SCORER, PICKSCORE_SCORER
 
-REPO = Path(__file__).resolve().parents[3]
+REPO = Path(__file__).resolve().parents[4]
 TRAINER_PACKAGE = "miles.backends.fsdp_utils.diffusion"
 PREPARE_SNAPSHOT = REPO / "tests/snapshots/launch_scripts/py/scripts/run_sd35_medium_flow_grpo_ocr.py/prepare.txt"
 NFT_EXECUTE_SNAPSHOT = REPO / "tests/snapshots/launch_scripts/py/scripts/run_sd35_medium_nft_ocr.py/execute.txt"
