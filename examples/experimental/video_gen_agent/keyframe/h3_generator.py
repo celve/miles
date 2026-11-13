@@ -23,6 +23,7 @@ Options come from ``AGENT_VIDEO_GEN_*`` env vars, as the env's own do:
 import asyncio
 import os
 import random
+from collections.abc import Sequence
 
 import httpx
 
@@ -40,13 +41,17 @@ SECONDS_RANGE = (4, 15)
 POLL_S = 2.0
 
 
-def h3_prompt(prompt: str, num_references: int) -> str:
-    """H3's reference prompt form (its VIDEO_PROMPT_WRITING_GUIDE_ref_en.md): one subject per <Picture k>, then the
-    task type, then the planner's prompt."""
-    subjects = "\n".join(
-        f"<Subject {k}> is the subject shown in <Picture {k}>, without its plain background."
-        for k in range(1, num_references + 1)
-    )
+# A scene labelled as an isolated subject made H3's clips 43% stiller (LIN-2902), so each kind gets its own line.
+_SUBJECT_LINES = {
+    "subject": "<Subject {k}> is the subject shown in <Picture {k}>, without its plain background.",
+    "scene": "<Subject {k}> is the scene shown in <Picture {k}>.",
+}
+
+
+def h3_prompt(prompt: str, roles: Sequence[str]) -> str:
+    """H3's reference prompt form (its VIDEO_PROMPT_WRITING_GUIDE_ref_en.md): one subject per <Picture k>, said to be
+    the asset or the scene it is, then the task type, then the planner's prompt."""
+    subjects = "\n".join(_SUBJECT_LINES[role].format(k=k) for k, role in enumerate(roles, start=1))
     return f"{subjects}\n[reference generation] {prompt}"
 
 
@@ -112,8 +117,9 @@ class H3ClipGenerator:
 
     async def _generate_on(self, client: httpx.AsyncClient, engine: str, request: ClipRequest) -> Clip:
         references = request.reference_paths
+        roles = request.reference_roles or ("subject",) * len(references)
         body = {
-            "prompt": h3_prompt(request.prompt, len(references)) if references else request.prompt,
+            "prompt": h3_prompt(request.prompt, roles) if references else request.prompt,
             "task": "ref2va" if references else "fl2va" if keyframes(request) else "t2va",
             # H3 numbers only the references as <Picture k>; keyframes go first, as its own clients send them.
             "conditions": keyframes(request)

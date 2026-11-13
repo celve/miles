@@ -175,7 +175,12 @@ def one_shot_row(request: str, mode: str) -> dict:
     """The mode's one-shot arm for a request: the raw request to the video model, by way of the image model in i2v or
     reference mode."""
     row = {"arm": ONE_SHOT_ARMS[mode], "request": request, "prompt": request, "seed": request_seed(request)}
-    return row if mode == "t2v" else row | {"image_prompt": request, "mode": mode}
+    if mode == "t2v":
+        return row
+    # The image renders the whole request, so as a reference it is a scene, not an isolated asset.
+    return (
+        row | {"image_prompt": request, "mode": mode} | ({"reference_roles": ["scene"]} if mode == "reference" else {})
+    )
 
 
 def missing_anchors(requests: list[str], anchor_dir: Path) -> list[str]:
@@ -255,6 +260,7 @@ async def generate(
                     image_path=row.get("image_path"),
                     last_image_path=row.get("last_image_path"),
                     reference_paths=tuple(row.get("reference_paths") or ()),
+                    reference_roles=tuple(row.get("reference_roles") or ()),
                     **shape,
                 ),
                 retry_delay_s,
@@ -273,7 +279,11 @@ def from_dump(dump: Path, arm: str, requests: list[str]) -> list[dict]:
         record = recorded.get(request) or {}
         video = record.get("video") or {}
         # Reference mode's images, which the replay needs as much as its prompt.
-        references = {"reference_paths": video["reference_paths"]} if video.get("reference_paths") else {}
+        references = (
+            {"reference_paths": video["reference_paths"], "reference_roles": video.get("reference_roles") or []}
+            if video.get("reference_paths")
+            else {}
+        )
         rows.append(
             {
                 "arm": arm,
@@ -380,6 +390,7 @@ async def keyframes(
                 return row | {
                     "prompt": request,
                     "reference_paths": [chosen],
+                    "reference_roles": ["scene"],
                     "candidates": paths,
                     "pick": pick,
                     "planner_answer": answer,
@@ -418,6 +429,7 @@ async def keyframes(
             return row | {
                 "prompt": plan["video"],
                 "reference_paths": [first],
+                "reference_roles": ["scene"],
                 "image_path": first,
                 "last_image_path": last,
                 "frame_prompts": [plan["first"], plan["last"]],
