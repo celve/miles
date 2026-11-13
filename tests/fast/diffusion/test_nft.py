@@ -3,20 +3,14 @@ from argparse import Namespace
 import pytest
 import torch
 
+from miles.backends.fsdp_utils.diffusion.losses import LOSSES
+from miles.backends.fsdp_utils.diffusion.losses.nft import NFTBatch, corrupt, nft_loss
 from miles.backends.fsdp_utils.diffusion.metric_buffer import MetricBuffer
 from miles.backends.fsdp_utils.diffusion.pipeline_config import get_train_pipeline_config
 from miles.rollout.diffusion_rollout.rollout_fn import build_sampling_params
 from miles.rollout.diffusion_rollout.step_strategy import ode_and_return_last
-from miles.utils.diffusion.algorithms import get_algorithm
-from miles.utils.diffusion.algorithms.nft import (
-    DiffusionNFT,
-    NFTBatch,
-    corrupt,
-    drop_final_steps,
-    drop_random_steps,
-    nft_loss,
-    stable_hash,
-)
+from miles.utils.diffusion.algorithms import ALGORITHMS, get_algorithm
+from miles.utils.diffusion.algorithms.nft import DiffusionNFT, drop_final_steps, drop_random_steps, stable_hash
 from miles.utils.diffusion.types import DenoisingEnv, DiffusionRollout, DiTTrajectory
 from miles.utils.types import Sample
 
@@ -162,3 +156,7 @@ def test_the_logged_mixing_weight_is_the_fp32_one_under_an_fp16_forward():
     _, metrics = _loss(0.3, new_pred=new, old_pred=old)
 
     assert metrics._sums["nft_r_mean"].item() == torch.tensor(0.3 / 5.0 / 2.0 + 0.5, dtype=torch.float32).item()
+
+
+def test_every_diffusion_algorithm_has_a_trainer_loss_of_the_same_loss_type():
+    assert LOSSES.keys() == ALGORITHMS.keys()

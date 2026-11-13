@@ -106,3 +106,27 @@ def _record_metrics(metrics, batch, log_prob_new, ratio, per_pair_loss, loss_sum
     metrics.emit_mean("log_prob_new_idx_0", total=log_prob_new[0], count=1)
     metrics.emit_mean("log_prob_old_idx_0", total=log_prob_old[0], count=1)
     metrics.emit_mean("log_prob_mean_abs_diff", total=torch.abs(log_prob_new - log_prob_old).sum(), count=n)
+
+
+def microbatch_loss(actor, pairs: list[dict], *, rollout_id: int, microbatch_id: int, metrics) -> torch.Tensor:
+    args = actor.args
+    batch = collate_pairs(
+        pairs,
+        config=actor.pipeline_config,
+        use_cfg=args.diffusion_guidance_scale > 1.0,
+        adv_clip_max=args.diffusion_adv_clip_max,
+        device=torch.device("cuda", torch.cuda.current_device()),
+    )
+    new_pred = actor.noise_pred(batch.latents, batch.timesteps, batch.pos_cond, batch.neg_cond)
+    ref_pred = None
+    if args.diffusion_kl_beta > 0:
+        ref_pred = actor.lora_base_noise_pred(batch.latents, batch.timesteps, batch.pos_cond, batch.neg_cond)
+    return flow_grpo_loss(
+        batch,
+        new_pred=new_pred,
+        ref_pred=ref_pred,
+        noise_level=args.diffusion_noise_level,
+        clip_range=args.eps_clip,
+        kl_beta=args.diffusion_kl_beta,
+        metrics=metrics,
+    )

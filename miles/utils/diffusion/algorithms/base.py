@@ -1,11 +1,10 @@
-"""The interface a diffusion RL algorithm implements across the rollout, conversion and train stages."""
+"""The interface a diffusion RL algorithm implements across the rollout and conversion stages; its loss is the
+trainer's, picked by the same `--loss-type` in `miles.backends.fsdp_utils.diffusion.losses`."""
 
 import abc
 from argparse import Namespace
 from collections.abc import Callable
 from typing import Any
-
-import torch
 
 from miles.utils.types import Sample
 
@@ -25,8 +24,3 @@ class DiffusionAlgorithm(abc.ABC):
     @abc.abstractmethod
     def build_train_pairs(self, args: Namespace, sample: Sample, *, advantage: float) -> list[dict[str, Any]]:
         """One image's train pairs, in the order the tile schedule takes them."""
-
-    @abc.abstractmethod
-    def loss(self, actor, pairs: list[dict], *, rollout_id: int, microbatch_id: int, metrics) -> torch.Tensor:
-        """Summed loss of one micro-batch, the rollout's `microbatch_id`-th on this rank; the actor normalizes by the
-        optimizer step's pair count."""

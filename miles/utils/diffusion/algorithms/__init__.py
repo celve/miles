@@ -1,4 +1,4 @@
-"""Diffusion RL algorithms, selected by `--loss-type`: each owns its rollout request, train pairs and loss."""
+"""Diffusion RL algorithms, selected by `--loss-type`: each owns its rollout request and train pairs."""
 
 from miles.utils.diffusion.algorithms.base import DiffusionAlgorithm
 from miles.utils.diffusion.algorithms.flow_grpo import FlowGRPO

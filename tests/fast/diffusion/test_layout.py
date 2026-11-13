@@ -16,6 +16,7 @@ from miles.utils.diffusion.arguments import _HOOKS
 REPO = Path(__file__).resolve().parents[3]
 TRAINER_PACKAGE = "miles.backends.fsdp_utils.diffusion"
 PREPARE_SNAPSHOT = REPO / "tests/snapshots/launch_scripts/py/scripts/run_sd35_medium_flow_grpo_ocr.py/prepare.txt"
+NFT_EXECUTE_SNAPSHOT = REPO / "tests/snapshots/launch_scripts/py/scripts/run_sd35_medium_nft_ocr.py/execute.txt"
 
 
 def _engine_main_module():
@@ -45,10 +46,17 @@ def _recipe_prepare_imports():
     return re.findall(r"from ([\w.]+) import (\w+)", PREPARE_SNAPSHOT.read_text())
 
 
+def _nft_recipe_step_strategy():
+    (path,) = re.findall(r"--diffusion-step-strategy-path (\S+)", NFT_EXECUTE_SNAPSHOT.read_text())
+    return path
+
+
 RUNTIME_OBJECTS = [
     *_HOOKS.values(),
     *_DIFFUSION_TRAINER_ACTOR_CLASSES.values(),
     DiffusionConfig.model_fields["diffusion_step_strategy_path"].default,
+    DiffusionConfig.model_fields["diffusion_nft_timestep_strategy_path"].default,
+    _nft_recipe_step_strategy(),
     *(f"{module}.{name}" for module, name in _recipe_prepare_imports()),
 ]
 
@@ -134,13 +142,19 @@ def test_only_the_trainer_package_imports_itself_at_module_level():
     assert offenders == []
 
 
-def test_the_shared_sample_payload_imports_no_trainer_or_rollout_code():
-    path = REPO / "miles/utils/diffusion/types.py"
+SHARED_LEAVES = [
+    REPO / "miles/utils/diffusion/types.py",
+    *sorted((REPO / "miles/utils/diffusion/algorithms").glob("*.py")),
+]
+
+
+@pytest.mark.parametrize("path", SHARED_LEAVES, ids=lambda path: str(path.relative_to(REPO)))
+def test_the_shared_payload_and_algorithms_import_no_trainer_or_rollout_code(path):
     imported = [
         module
         for node in ast.walk(ast.parse(path.read_text()))
         if isinstance(node, (ast.Import, ast.ImportFrom))
-        for module in _imported(node, _module_name(path), False)
+        for module in _imported(node, _module_name(path), path.name == "__init__.py")
     ]
 
     assert not [module for module in imported if _names(module, TRAINER_PACKAGE) or _names(module, "miles.rollout")]

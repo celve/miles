@@ -3,9 +3,6 @@
 from argparse import Namespace
 from typing import Any
 
-import torch
-
-from miles.backends.fsdp_utils.diffusion.losses.flow_grpo import collate_pairs, flow_grpo_loss
 from miles.utils.args.configs.algo import AlgoConfig
 from miles.utils.diffusion.algorithms.base import DiffusionAlgorithm
 from miles.utils.types import Sample
@@ -64,29 +61,6 @@ class FlowGRPO(DiffusionAlgorithm):
             }
             for step in steps
         ]
-
-    def loss(self, actor, pairs: list[dict], *, rollout_id: int, microbatch_id: int, metrics) -> torch.Tensor:
-        args = actor.args
-        batch = collate_pairs(
-            pairs,
-            config=actor.pipeline_config,
-            use_cfg=args.diffusion_guidance_scale > 1.0,
-            adv_clip_max=args.diffusion_adv_clip_max,
-            device=torch.device("cuda", torch.cuda.current_device()),
-        )
-        new_pred = actor.noise_pred(batch.latents, batch.timesteps, batch.pos_cond, batch.neg_cond)
-        ref_pred = None
-        if args.diffusion_kl_beta > 0:
-            ref_pred = actor.lora_base_noise_pred(batch.latents, batch.timesteps, batch.pos_cond, batch.neg_cond)
-        return flow_grpo_loss(
-            batch,
-            new_pred=new_pred,
-            ref_pred=ref_pred,
-            noise_level=args.diffusion_noise_level,
-            clip_range=args.eps_clip,
-            kl_beta=args.diffusion_kl_beta,
-            metrics=metrics,
-        )
 
 
 def _latent_positions(traj) -> dict[int, int]:

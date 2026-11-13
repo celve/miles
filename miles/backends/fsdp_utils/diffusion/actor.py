@@ -13,6 +13,7 @@ from torch.distributed.tensor import DTensor
 from miles.backends.fsdp_utils import checkpoint
 from miles.backends.fsdp_utils.actor import build_optimizer
 from miles.backends.fsdp_utils.diffusion.ema import EMAOptimizer, load_ema, save_ema
+from miles.backends.fsdp_utils.diffusion.losses import get_diffusion_loss_function
 from miles.backends.fsdp_utils.diffusion.metric_buffer import MetricBuffer
 from miles.backends.fsdp_utils.diffusion.model import DTYPES, load_fsdp_dit
 from miles.backends.fsdp_utils.diffusion.pipeline_config import get_train_pipeline_config
@@ -70,6 +71,7 @@ class DiffusionFSDPTrainRayActor(TorchNativeTrainRayActor):
         self.forward_dtype = DTYPES[args.diffusion_forward_dtype]
         self.pipeline_config = get_train_pipeline_config(args.diffusion_model_family)
         self.algorithm = get_algorithm(args.loss_type)
+        self.loss_function = get_diffusion_loss_function(args.loss_type)
         self.model = load_fsdp_dit(args, config=self.pipeline_config, mesh=get_parallel_state().get_mesh("fsdp"))
         self.optimizer = build_optimizer(args, (p for p in self.model.parameters() if p.requires_grad))
         # fp16 policy gradients underflow unscaled; the sharded scaler agrees on found_inf across ranks.
@@ -147,7 +149,7 @@ class DiffusionFSDPTrainRayActor(TorchNativeTrainRayActor):
         metrics = MetricBuffer(group=state.intra_dp.group, device=torch.device("cuda", torch.cuda.current_device()))
         num_pairs = sum(len(pairs) for pairs in micro_batches)
         for index, pairs in enumerate(micro_batches):
-            loss_sum = self.algorithm.loss(
+            loss_sum = self.loss_function(
                 self, pairs, rollout_id=rollout_id, microbatch_id=first_microbatch_id + index, metrics=metrics
             )
             self.scaler.scale(loss_sum / float(num_pairs)).backward()
