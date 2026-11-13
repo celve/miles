@@ -64,20 +64,62 @@ def test_the_engine_launch_module_imports():
     importlib.import_module(_engine_main_module())
 
 
-def _module_level_imports(tree):
+def _module_name(path):
+    parts = list(path.relative_to(REPO).with_suffix("").parts)
+    return ".".join(parts[:-1] if parts[-1] == "__init__" else parts)
+
+
+def _imported(node, module_name, is_package):
+    if isinstance(node, ast.Import):
+        return [alias.name for alias in node.names]
+    base = node.module
+    if node.level:
+        package = module_name.split(".")[: None if is_package else -1]
+        base = ".".join([*package[: len(package) - node.level + 1], *filter(None, [node.module])])
+    return [f"{base}.{alias.name}" for alias in node.names]
+
+
+def _eager_imports(tree, module_name, is_package=False):
+    """Imports that run when the module is imported: everywhere but inside function bodies."""
     pending = list(tree.body)
     while pending:
         node = pending.pop()
-        if isinstance(node, ast.Import):
-            yield node.lineno, [alias.name for alias in node.names]
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            yield node.lineno, [node.module]
-        elif isinstance(node, (ast.If, ast.Try)):
-            pending += [*node.body, *node.orelse, *(n for h in getattr(node, "handlers", []) for n in h.body)]
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            yield node.lineno, _imported(node, module_name, is_package)
+        pending += ast.iter_child_nodes(node)
 
 
 def _names(module, prefix):
     return module == prefix or module.startswith(prefix + ".")
+
+
+def _offenders(source, module_name, is_package=False):
+    return [
+        lineno
+        for lineno, modules in _eager_imports(ast.parse(source), module_name, is_package)
+        if any(_names(module, TRAINER_PACKAGE) for module in modules)
+    ]
+
+
+@pytest.mark.parametrize(
+    "source, module_name",
+    [
+        ("from miles.backends.fsdp_utils import diffusion", "miles.x"),
+        ("from .diffusion import actor", "miles.backends.fsdp_utils.x"),
+        ("from ..fsdp_utils.diffusion.actor import A", "miles.backends.sglang_utils.x"),
+        ("try:\n    pass\nfinally:\n    import miles.backends.fsdp_utils.diffusion", "miles.x"),
+        ("class A:\n    from miles.backends.fsdp_utils.diffusion import actor", "miles.x"),
+        ("with x:\n    import miles.backends.fsdp_utils.diffusion.sde", "miles.x"),
+    ],
+)
+def test_the_scan_sees_every_form_of_an_eager_trainer_import(source, module_name):
+    assert _offenders(source, module_name)
+
+
+def test_the_scan_allows_a_trainer_import_inside_a_function():
+    assert not _offenders("def f():\n    from miles.backends.fsdp_utils.diffusion import actor", "miles.x")
 
 
 def test_only_the_trainer_package_imports_itself_at_module_level():
@@ -86,21 +128,19 @@ def test_only_the_trainer_package_imports_itself_at_module_level():
         f"{path.relative_to(REPO)}:{lineno}"
         for path in sorted((REPO / "miles").rglob("*.py"))
         if trainer_dir not in path.parents
-        for lineno, modules in _module_level_imports(ast.parse(path.read_text()))
-        if any(_names(module, TRAINER_PACKAGE) for module in modules)
+        for lineno in _offenders(path.read_text(), _module_name(path), path.name == "__init__.py")
     ]
 
     assert offenders == []
 
 
 def test_the_shared_sample_payload_imports_no_trainer_or_rollout_code():
-    tree = ast.parse((REPO / "miles/utils/diffusion/types.py").read_text())
+    path = REPO / "miles/utils/diffusion/types.py"
     imported = [
         module
-        for node in ast.walk(tree)
+        for node in ast.walk(ast.parse(path.read_text()))
         if isinstance(node, (ast.Import, ast.ImportFrom))
-        for module in ([node.module] if isinstance(node, ast.ImportFrom) else [a.name for a in node.names])
-        if module
+        for module in _imported(node, _module_name(path), False)
     ]
 
     assert not [module for module in imported if _names(module, TRAINER_PACKAGE) or _names(module, "miles.rollout")]
