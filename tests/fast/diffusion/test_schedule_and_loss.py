@@ -1,9 +1,9 @@
 import pytest
 import torch
 
-from miles.diffusion.train.loss import PairBatch, flow_grpo_loss
-from miles.diffusion.train.metric_buffer import MetricBuffer
-from miles.diffusion.train.schedule import tile_train_pairs
+from miles.backends.fsdp_utils.diffusion.losses.flow_grpo import PairBatch, flow_grpo_loss
+from miles.backends.fsdp_utils.diffusion.metric_buffer import MetricBuffer
+from miles.backends.fsdp_utils.diffusion.schedule import tile_train_pairs
 
 
 def _rows(num_images, num_steps):
@@ -65,7 +65,7 @@ def _loss(batch, *, new_pred, ref_pred=None, kl_beta=0.0, clip_range=1e-4):
 
 
 def _on_policy_log_prob(pred):
-    from miles.diffusion.train.sde import sde_step_log_prob
+    from miles.backends.fsdp_utils.diffusion.sde import sde_step_log_prob
 
     batch = _batch([0.0], [0.0])
     log_prob, _, _ = sde_step_log_prob(

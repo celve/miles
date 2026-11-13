@@ -6,8 +6,8 @@ starts, rather than failing inside one.
 """
 
 from miles.backends.fsdp_utils.arguments import FSDPArgs
+from miles.backends.fsdp_utils.diffusion.pipeline_config import get_train_pipeline_config, resolve_model_family
 from miles.backends.sglang_utils.sglang_api_client import WorkerType
-from miles.diffusion.train.pipeline_config import get_train_pipeline_config, resolve_model_family
 from miles.router.backend import RouterKind
 from miles.utils.args.configs.algo import AlgoConfig
 from miles.utils.args.configs.backend_fields import TrainerBackendTraitConfig

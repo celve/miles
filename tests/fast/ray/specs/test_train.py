@@ -291,7 +291,7 @@ class TestConstructorArguments:
         args = _make_args(train_backend="fsdp", model_kind="diffusion")
         (actor_spec,) = specs_trainer(args)
 
-        assert actor_spec.worker_class == "miles.diffusion.train.actor.DiffusionFSDPTrainRayActor"
+        assert actor_spec.worker_class == "miles.backends.fsdp_utils.diffusion.actor.DiffusionFSDPTrainRayActor"
         assert train_specs._is_deterministic_diffusion(actor_spec.args) is actor_spec.args.backend.deterministic_mode
 
 

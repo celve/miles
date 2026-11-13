@@ -8,7 +8,7 @@ import math
 
 import torch
 
-from miles.diffusion.train.sde import sde_step_log_prob
+from miles.backends.fsdp_utils.diffusion.sde import sde_step_log_prob
 
 
 def _flow_grpo_sde_step_with_logprob(sigmas, step, model_output, sample, prev_sample, noise_level):

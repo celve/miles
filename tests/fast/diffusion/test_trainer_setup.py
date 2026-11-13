@@ -4,7 +4,7 @@ import pytest
 import torch
 import torch.distributed.fsdp as fsdp
 
-from miles.diffusion.train import model as dit_model
+from miles.backends.fsdp_utils.diffusion import model as dit_model
 
 
 class _PeftDiT(torch.nn.Module):

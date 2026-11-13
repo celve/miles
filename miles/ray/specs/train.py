@@ -50,7 +50,7 @@ _TRAINER_ACTOR_CLASSES = {
     "torchtitan": "miles.backends.torchtitan_utils.actor.TorchtitanTrainRayActor",
 }
 _DIFFUSION_TRAINER_ACTOR_CLASSES = {
-    "fsdp": "miles.diffusion.train.actor.DiffusionFSDPTrainRayActor",
+    "fsdp": "miles.backends.fsdp_utils.diffusion.actor.DiffusionFSDPTrainRayActor",
 }
 
 _NUM_GPUS_PER_TRAINER_WORKER = 0.4

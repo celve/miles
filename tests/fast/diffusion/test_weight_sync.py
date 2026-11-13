@@ -10,9 +10,9 @@ import torch
 import torch.distributed as dist
 from torch.multiprocessing import reductions
 
+from miles.backends.fsdp_utils.diffusion import weight_sync
 from miles.backends.training_utils.weight_update.hf_weight_iterator import HfWeightIteratorBase
 from miles.backends.training_utils.weight_update.updater import WeightUpdater
-from miles.diffusion.train import weight_sync
 from miles.ray.rollout.inference_controller import UpdatableEngines
 from miles.utils import distributed_utils
 

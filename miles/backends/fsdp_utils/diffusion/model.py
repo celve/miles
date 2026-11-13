@@ -11,7 +11,7 @@ import torch.distributed as dist
 from diffusers import DiffusionPipeline
 
 from miles.backends.fsdp_utils.actor import apply_fsdp2, fsdp2_load_full_state_dict
-from miles.diffusion.train.pipeline_config import TrainPipelineConfig
+from miles.backends.fsdp_utils.diffusion.pipeline_config import TrainPipelineConfig
 
 DTYPES = {"fp32": torch.float32, "bf16": torch.bfloat16, "fp16": torch.float16}
 

@@ -10,6 +10,12 @@ from torch.distributed.tensor import DTensor
 
 from miles.backends.fsdp_utils import checkpoint
 from miles.backends.fsdp_utils.actor import build_optimizer
+from miles.backends.fsdp_utils.diffusion.losses.flow_grpo import collate_pairs, flow_grpo_loss
+from miles.backends.fsdp_utils.diffusion.metric_buffer import MetricBuffer
+from miles.backends.fsdp_utils.diffusion.model import DTYPES, load_fsdp_dit
+from miles.backends.fsdp_utils.diffusion.pipeline_config import get_train_pipeline_config
+from miles.backends.fsdp_utils.diffusion.schedule import tile_train_pairs
+from miles.backends.fsdp_utils.diffusion.weight_sync import DiffusionLoraFromTensor, DiffusionLoraWeightIterator
 from miles.backends.fsdp_utils.lr_scheduler import get_lr_scheduler
 from miles.backends.fsdp_utils.parallel import create_fsdp_parallel_state
 from miles.backends.training_utils.parallel import get_parallel_state, set_parallel_state
@@ -17,12 +23,6 @@ from miles.backends.training_utils.torch_native.actor import TorchNativeTrainRay
 from miles.backends.training_utils.types import TrainStepOutcome, TrainStepOutput
 from miles.backends.training_utils.weight_update.updater import WeightUpdater
 from miles.diffusion.metrics import log_metrics
-from miles.diffusion.train.loss import collate_pairs, flow_grpo_loss
-from miles.diffusion.train.metric_buffer import MetricBuffer
-from miles.diffusion.train.model import DTYPES, load_fsdp_dit
-from miles.diffusion.train.pipeline_config import get_train_pipeline_config
-from miles.diffusion.train.schedule import tile_train_pairs
-from miles.diffusion.train.weight_sync import DiffusionLoraFromTensor, DiffusionLoraWeightIterator
 from miles.utils import object_store
 from miles.utils.context_utils import with_defer
 from miles.utils.object_store import StoreObjectRef

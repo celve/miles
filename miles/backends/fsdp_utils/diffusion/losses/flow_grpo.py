@@ -4,9 +4,9 @@ from dataclasses import dataclass
 
 import torch
 
-from miles.diffusion.train.metric_buffer import MetricBuffer
-from miles.diffusion.train.pipeline_config import TrainPipelineConfig
-from miles.diffusion.train.sde import sde_step_log_prob
+from miles.backends.fsdp_utils.diffusion.metric_buffer import MetricBuffer
+from miles.backends.fsdp_utils.diffusion.pipeline_config import TrainPipelineConfig
+from miles.backends.fsdp_utils.diffusion.sde import sde_step_log_prob
 
 
 @dataclass
