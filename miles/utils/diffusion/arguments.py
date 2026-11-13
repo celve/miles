@@ -6,7 +6,6 @@ starts, rather than failing inside one.
 """
 
 from miles.backends.fsdp_utils.arguments import FSDPArgs
-from miles.backends.fsdp_utils.diffusion.pipeline_config import get_train_pipeline_config, resolve_model_family
 from miles.backends.sglang_utils.sglang_api_client import WorkerType
 from miles.router.backend import RouterKind
 from miles.utils.args.configs.algo import AlgoConfig
@@ -160,6 +159,9 @@ def validate_diffusion_args(args) -> None:
     _derive_hooks(args)
     if args.diffusion_lora_rank <= 0 or args.diffusion_num_sde_steps <= 0:
         raise ValueError("--diffusion-lora-rank and --diffusion-num-sde-steps must be positive")
+
+    # Local: shared code reaches into the trainer package only from inside a function (tests/fast/diffusion/test_layout.py).
+    from miles.backends.fsdp_utils.diffusion.pipeline_config import get_train_pipeline_config, resolve_model_family
 
     if args.diffusion_model_family is None:
         args.diffusion_model_family = resolve_model_family(args.hf_checkpoint)
