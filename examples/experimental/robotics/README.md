@@ -13,7 +13,7 @@ PEAR (at `f32aa1f`) gives a vision-language model the robot's state as JSON and 
 | `libero_sim_server.py` | the simulator server inside the sandbox: `/reset`, `/act`, `/replay`, `/health` |
 | `make_libero_data.py` | rows `{prompt, metadata: {suite, task_id, trial_id}}`, train trials 0–39 and held-out trials 40–49 |
 | `libero_probe.py` | checks a server: reset reproducible across servers, stateful scene equal to PEAR's replay, timings |
-| `libero_smoke.py` | `run()` end to end on real sandboxes with a scripted policy, no GPU |
+| `libero_episodes.py` | `run()` on real sandboxes, with a scripted policy (no GPU) or a served model |
 
 ## How an episode runs
 
@@ -38,7 +38,7 @@ The build runs PEAR's own installer (`scripts/install.sh libero`), which ends wi
 ## Check it without a GPU
 
 ```bash
-python examples/experimental/robotics/libero_smoke.py --episodes 4
+python examples/experimental/robotics/libero_episodes.py --episodes 4
 ```
 
 ## Train

@@ -287,7 +287,7 @@ async def run(
             ),
             timeout=max_episode_s,
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         log.end_reason = "timeout"
     except SimulatorFailure as exc:
         tail = await asyncio.to_thread(sandbox.log_tail)
