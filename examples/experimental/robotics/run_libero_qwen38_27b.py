@@ -5,8 +5,16 @@ sandbox service, PEAR's prompts and action checks, thinking on, and one context 
 (``--context-tokens``, PEAR's 160k at most). The trainer loads the HF checkpoint through the Megatron bridge, so no
 conversion runs. Needs the libero-sim template built (``libero_sandbox.py build``) and an API key for the service.
 
+Modes: ``rl`` trains; ``collect`` only plays and records episodes (``--debug-rollout-only``), such as a stronger
+teacher's from ``--hf-checkpoint``; ``sft`` trains masked cross-entropy on recorded episodes that
+``make_libero_sft_data.py`` wrote one file per step, with no engines.
+
 Args:
+    --mode: rl (default), collect or sft.
     --suites: LIBERO suites the training rows come from (default libero_goal); held-out trials 40-49 never train.
+    --prompt-data: a rows file to play instead of make_libero_data's training rows.
+    --hf-checkpoint: the model to start from instead of <model-dir>/Qwen3.8-27B.
+    --sft-data: in sft mode, the directory of <step>.pt files.
     --context-tokens: an episode's whole context, prompt and every turn (default 65536).
     --num-rollout / --rollout-batch-size / --n-samples-per-prompt: rounds, rows a round, episodes a row.
     --eval-interval: rounds between held-out evaluations on trials 40-49; 0 turns evaluation off (default).
@@ -20,6 +28,7 @@ Example:
 """
 
 from dataclasses import dataclass
+from typing import Literal
 from pathlib import Path
 
 import typer
@@ -38,6 +47,11 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     model_dir: str = "/root/models"
     data_dir: str = "/root/datasets"
     megatron_path: str = "/root/Megatron-LM"
+    mode: Literal["rl", "collect", "sft"] = "rl"
+    prompt_data: str = ""
+    hf_checkpoint: str = ""
+    sft_data: str = ""
+    save_interval: int = 5
     suites: str = "libero_goal"
     context_tokens: int = 65536
     num_rollout: int = 1
@@ -51,6 +65,18 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     libero_e2b_proxy: str = ""
     libero_template: str = ""
     extra_args: str = ""
+
+    def __post_init__(self):
+        if (self.mode == "sft") != bool(self.sft_data):
+            raise ValueError("--sft-data is required in sft mode and read only there")
+
+    @property
+    def checkpoint(self) -> str:
+        return self.hf_checkpoint or f"{self.model_dir}/{MODEL_NAME}"
+
+    @property
+    def rows(self) -> str:
+        return self.prompt_data or f"{self.rows_dir}/libero.train.jsonl"
 
     @property
     def rows_dir(self) -> str:
@@ -93,17 +119,19 @@ def execute(args: ScriptArgs):
 
     # The bridge reads the HF checkpoint directly; a fresh --load directory starts from it at rollout 0.
     ckpt_args = (
-        f"--hf-checkpoint {args.model_dir}/{MODEL_NAME} "
-        f"--ref-load {args.model_dir}/{MODEL_NAME} "
+        f"--hf-checkpoint {args.checkpoint} "
+        f"--ref-load {args.checkpoint} "
         "--megatron-to-hf-mode bridge "
         f"--load {args.run_dir}/checkpoints "
         f"--save {args.run_dir}/checkpoints "
-        "--save-interval 5 "
+        f"--save-interval {args.save_interval} "
     )
+    if args.mode == "sft":
+        ckpt_args += f"--save-hf {args.run_dir}/hf/iter_{{rollout_id}} "
 
     # One context budget for the whole episode, as PEAR's response budget; a turn may use all that is left.
     rollout_args = (
-        f"--prompt-data {args.rows_dir}/libero.train.jsonl "
+        f"--prompt-data {args.rows} "
         "--input-key prompt "
         "--label-key label "
         "--metadata-key metadata "
@@ -161,12 +189,20 @@ def execute(args: ScriptArgs):
         "--eps-clip-c 3.0 "
         "--use-tis "
     )
+    if args.mode == "sft":
+        # Recorded episodes replace the rollout; their response masks already cover only the generated tokens.
+        grpo_args = (
+            "--loss-type sft_loss "
+            "--calculate-per-token-loss "
+            "--disable-compute-advantages-and-returns "
+            f"--load-debug-rollout-data {args.sft_data}/{{rollout_id}}.pt "
+        )
 
     optimizer_args = (
         "--optimizer adam "
         f"--lr {args.lr} "
         "--lr-decay-style constant "
-        "--weight-decay 0.1 "
+        f"--weight-decay {0.0 if args.mode == 'sft' else 0.1} "
         "--adam-beta1 0.9 "
         "--adam-beta2 0.98 "
         "--optimizer-cpu-offload "
@@ -208,6 +244,8 @@ def execute(args: ScriptArgs):
         f"--actor-num-gpus-per-node {args.num_gpus_per_node} "
         "--colocate "
     )
+    if args.mode == "collect":
+        misc_args += "--debug-rollout-only "
 
     train_args = (
         f"{ckpt_args} "
