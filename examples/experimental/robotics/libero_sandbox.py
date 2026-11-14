@@ -16,6 +16,7 @@ Env vars:
   LIBERO_READY_TIMEOUT_S         how long the server may take to answer /health (default 300)
   LIBERO_CREATE_CONCURRENCY      creates in flight per rollout process (default 8)
   LIBERO_E2B_URL_SCHEME          the gateway's scheme (default http, AgentENV's data plane)
+  LIBERO_E2B_PROXY               a proxy to the service, for hosts off its network (socks5h://... needs httpx[socks])
   E2B_API_URL / E2B_SANDBOX_URL / E2B_API_KEY[_FILE]   the service, read by the SDK and resolve_api_key
 """
 
@@ -99,12 +100,21 @@ def resolve_api_key() -> str:
     return resolve_provider_api_key("E2B_API_KEY", "E2B_API_KEY_FILE", "~/.config/e2b/api_key")
 
 
+def proxy() -> str | None:
+    return os.environ.get("LIBERO_E2B_PROXY") or None
+
+
+def connection_opts() -> dict:
+    """What every SDK call takes: the key, and the proxy; the SDK reads neither from the proxy env vars."""
+    return {"api_key": resolve_api_key(), "proxy": proxy()}
+
+
 def build_template(*, force: bool = False, on_logs=None) -> str:
     """Build the template unless its alias exists; return the alias."""
     from e2b import Template  # the SDK is needed only where a sandbox is made
 
     alias = template_alias()
-    if not force and Template.alias_exists(alias, api_key=resolve_api_key()):
+    if not force and Template.alias_exists(alias, **connection_opts()):
         return alias
     template = Template().from_image(BASE_IMAGE).set_user("root")
     for command in build_commands():
@@ -116,7 +126,7 @@ def build_template(*, force: bool = False, on_logs=None) -> str:
         memory_mb=MEMORY_MB,
         skip_cache=force,
         on_build_logs=on_logs,
-        api_key=resolve_api_key(),
+        **connection_opts(),
     )
     return alias
 
@@ -127,14 +137,14 @@ class Sandbox:
     def __init__(self, *, template: str, max_lifetime_s: int, labels: dict[str, str]):
         from e2b import Sandbox as E2BSandbox
 
-        self._api_key = resolve_api_key()
+        self._opts = connection_opts()
         ttl_s = int(os.environ.get("LIBERO_SANDBOX_TTL_S", "900"))
         self._handle = E2BSandbox.create(
             template=template,
             # a server enforcing max_lifetime_secs refuses a longer timeout
             timeout=min(ttl_s, max_lifetime_s),
             metadata={**labels, "purpose": "libero-sim", "max_lifetime_secs": str(max_lifetime_s)},
-            api_key=self._api_key,
+            **self._opts,
         )
         self.sandbox_id = self._handle.sandbox_id
         self._alive = True
@@ -164,7 +174,7 @@ class Sandbox:
     def kill(self) -> None:
         self._alive = False
         try:
-            self._handle.kill(api_key=self._api_key)
+            self._handle.kill(**self._opts)
         except Exception:
             pass  # the timeout and max lifetime reclaim it
 
@@ -175,7 +185,7 @@ class Sandbox:
             time.sleep(ttl_s / 6)
             try:
                 if self._alive:
-                    self._handle.set_timeout(ttl_s, api_key=self._api_key)
+                    self._handle.set_timeout(ttl_s, **self._opts)
                 failures = 0
             except Exception:
                 failures += 1
@@ -186,7 +196,7 @@ def wait_ready(url: str, *, timeout_s: float) -> None:
     last_error: Exception | None = None
     while time.monotonic() < deadline:
         try:
-            if httpx.get(f"{url}/health", timeout=10).status_code == 200:
+            if httpx.get(f"{url}/health", timeout=10, proxy=proxy()).status_code == 200:
                 return
         except httpx.HTTPError as exc:
             last_error = exc

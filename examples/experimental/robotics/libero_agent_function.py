@@ -31,6 +31,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -147,7 +148,7 @@ def parse_action(text: str) -> tuple[dict[str, Any] | None, str | None]:
 
 class SimulatorClient:
     def __init__(self, url: str, timeout_s: float):
-        self._client = httpx.AsyncClient(base_url=url, timeout=timeout_s)
+        self._client = httpx.AsyncClient(base_url=url, timeout=timeout_s, proxy=libero_sandbox.proxy())
 
     async def post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -168,7 +169,9 @@ def _answer_text(message: Any) -> str:
 
 
 def _context_budget(metadata: dict[str, Any]) -> int:
-    return int(os.environ.get("LIBERO_CONTEXT_TOKENS") or metadata.get("max_seq_len") or 32768)
+    """LIBERO_CONTEXT_TOKENS may lower the run's max_seq_len, never raise it: past it the sample is truncated."""
+    limits = [int(v) for v in (os.environ.get("LIBERO_CONTEXT_TOKENS"), metadata.get("max_seq_len")) if v]
+    return min(limits) if limits else 32768
 
 
 async def play(
@@ -209,6 +212,11 @@ async def play(
         if choice.finish_reason == "length":
             log.end_reason = "length"
             return
+        # the reserve is an estimate of the observation; a reply that ran past the budget is not acted on, since
+        # the sample would be truncated before it
+        if context > context_budget:
+            log.end_reason = "budget"
+            return
         action, reason = parse_action(_answer_text(choice.message))
         if action is None:
             logger.info("episode %s: no action (%s)", env_args, reason)
@@ -243,17 +251,47 @@ def _env_args(metadata: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"a LIBERO row's metadata needs suite, task_id and trial_id: {exc!r}") from None
 
 
+class _Startup:
+    """A sandbox started on a thread, killed by whichever side finds the start was abandoned: a cancelled
+    ``to_thread`` keeps running its thread, and a result it returns then has no taker."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.abandoned = False
+        self.sandbox: libero_sandbox.Sandbox | None = None
+
+    def start(self, **kwargs) -> libero_sandbox.Sandbox:
+        sandbox = libero_sandbox.Sandbox(**kwargs)
+        with self.lock:
+            self.sandbox = sandbox
+            abandoned = self.abandoned
+        if abandoned:
+            sandbox.kill()
+        return sandbox
+
+    def abandon(self) -> libero_sandbox.Sandbox | None:
+        with self.lock:
+            self.abandoned = True
+            return self.sandbox
+
+
 async def _start_sandbox(env_args: dict[str, Any], max_episode_s: float) -> libero_sandbox.Sandbox:
     labels = {key: str(value) for key, value in env_args.items()}
     limit = int(os.environ.get("LIBERO_CREATE_CONCURRENCY", "8"))
+    startup = _Startup()
     try:
         async with rollout_semaphore("libero-sandbox-create", limit):
             return await asyncio.to_thread(
-                libero_sandbox.Sandbox,
+                startup.start,
                 template=libero_sandbox.selected_template(),
                 max_lifetime_s=int(max_episode_s) + 30 * 60,
                 labels=labels,
             )
+    except asyncio.CancelledError:
+        started = startup.abandon()
+        if started is not None:
+            await asyncio.shield(asyncio.to_thread(started.kill))
+        raise
     except Exception as exc:
         raise InfraAbort("SandboxStartFailed", f"the libero-sim sandbox did not start: {exc!r}") from exc
 

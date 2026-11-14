@@ -4,13 +4,16 @@ The sandbox is the one stand-in: ``libero_sandbox.Sandbox`` is replaced by an ob
 fake simulator's, so everything from the reset to the reward goes through the code a rollout runs.
 """
 
+import asyncio
 import base64
 import json
+import sys
 import threading
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import libero_agent_function as laf
+import libero_probe
 import make_libero_data
 import pytest
 
@@ -238,22 +241,65 @@ async def test_a_sandbox_that_does_not_start_discards_the_sample(episode, monkey
     assert raised.value.exit_status == "SandboxStartFailed"
 
 
+async def test_a_sandbox_started_after_the_episode_was_cancelled_is_killed(monkeypatch, tmp_path):
+    monkeypatch.setenv("MILES_ROLLOUT_LIMITS_SCOPE", f"test-{tmp_path.name}")
+    entered, release = threading.Event(), threading.Event()
+
+    class SlowSandbox(FakeSandbox):
+        def __init__(self, **kwargs):
+            entered.set()
+            release.wait(10)
+            super().__init__(**kwargs)
+
+    monkeypatch.setattr(laf.libero_sandbox, "Sandbox", SlowSandbox)
+    monkeypatch.setenv("LIBERO_TEMPLATE", "libero-sim-test")
+    FakeSandbox.instances, FakeSandbox.sim_url = [], "http://127.0.0.1:9"
+    task = asyncio.ensure_future(laf.run(base_url="http://127.0.0.1:9", prompt=None, metadata=dict(EPISODE)))
+    await asyncio.to_thread(entered.wait, 10)
+
+    task.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    for _ in range(100):
+        if FakeSandbox.instances and FakeSandbox.instances[0].killed:
+            break
+        await asyncio.sleep(0.05)
+
+    (sandbox,) = FakeSandbox.instances
+    assert sandbox.killed
+
+
 async def test_a_reply_cut_at_its_token_cap_ends_the_episode(episode):
     result = await episode(FakePolicy([answer(), answer()], finish_reasons=["stop", "length"]), FakeSimulator())
 
     assert result["reward"] == 0.0 and result["agent_metrics"]["end_reason"] == "length"
 
 
-async def test_the_context_budget_caps_each_reply_and_ends_the_episode(episode, monkeypatch):
+async def test_the_context_budget_caps_each_reply_and_a_reply_past_it_is_not_acted_on(episode, monkeypatch):
     monkeypatch.setenv("LIBERO_TURN_RESERVE_TOKENS", "500")
-    policy = FakePolicy([answer()] * 5, prompt_tokens=1000)
+    policy, simulator = FakePolicy([answer()] * 5, prompt_tokens=1000), FakeSimulator(done_at=5)
 
-    result = await episode(policy, FakeSimulator(done_at=5), metadata={**EPISODE, "max_seq_len": 3000})
+    result = await episode(policy, simulator, metadata={**EPISODE, "max_seq_len": 3000})
 
     # 3000 budget - 500 reserve: the first reply gets 2500 capped at 512; after it 1100 tokens are used, so
     # the second gets 1400 capped at 512; after the second 2100 are used, which leaves 400, so it gets 400
     assert [request["max_tokens"] for request in policy.requests] == [512, 512, 400]
+    # the third exchange totals 3100, past the budget: its action is not carried out
+    assert [path for path, _ in simulator.requests] == ["/reset", "/act", "/act"]
     assert result["agent_metrics"]["end_reason"] == "budget" and result["reward"] == 0.0
+
+
+async def test_the_env_budget_lowers_max_seq_len_but_cannot_raise_it(episode, monkeypatch):
+    monkeypatch.setenv("LIBERO_TURN_RESERVE_TOKENS", "0")
+    policy = FakePolicy([answer()] * 2)
+
+    monkeypatch.setenv("LIBERO_CONTEXT_TOKENS", "9000")
+    await episode(policy, FakeSimulator(done_at=1), metadata={**EPISODE, "max_seq_len": 600}, request_kwargs={})
+    monkeypatch.setenv("LIBERO_CONTEXT_TOKENS", "300")
+    await episode(policy, FakeSimulator(done_at=1), metadata={**EPISODE, "max_seq_len": 600}, request_kwargs={})
+
+    assert [request["max_tokens"] for request in policy.requests] == [600, 300]
 
 
 async def test_the_turn_cap_ends_the_episode(episode, monkeypatch):
@@ -285,3 +331,13 @@ def test_heldout_trials_are_disjoint_from_training():
         return {(r["metadata"]["suite"], r["metadata"]["task_id"], r["metadata"]["trial_id"]) for r in rows}
 
     assert len(train) == 80 and len(heldout) == 20 and not keys(train) & keys(heldout)
+
+
+@pytest.mark.parametrize("urls", [["http://a:1"], ["http://a:1", "http://a:1"]])
+def test_the_probe_needs_two_distinct_servers(monkeypatch, urls):
+    monkeypatch.setattr(sys, "argv", ["libero_probe.py", *[arg for url in urls for arg in ("--url", url)]])
+
+    with pytest.raises(SystemExit) as exited:
+        libero_probe.main()
+
+    assert exited.value.code == 2

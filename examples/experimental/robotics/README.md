@@ -57,6 +57,7 @@ Use a CUA launcher's arguments with these changes: `--custom-agent-function-path
 | `LIBERO_READY_TIMEOUT_S` | 300 | server start, imports and the first scene included |
 | `LIBERO_CREATE_CONCURRENCY` | 8 | sandbox creates in flight per rollout process |
 | `LIBERO_E2B_URL_SCHEME` | http | the sandbox gateway's scheme |
+| `LIBERO_E2B_PROXY` | none | a proxy to the sandbox service for a host off its network, such as `socks5h://127.0.0.1:1080` (needs `httpx[socks]`) |
 
 ## Measured (2026-11-14, template at 2 vCPU / 4 GiB)
 
