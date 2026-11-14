@@ -247,10 +247,13 @@ def execute(args: ScriptArgs):
         f"--dump-details {args.run_dir}/dump "
         "--actor-num-nodes 1 "
         f"--actor-num-gpus-per-node {args.num_gpus_per_node} "
-        "--colocate "
     )
     if args.mode == "collect":
-        misc_args += "--debug-rollout-only "
+        misc_args += "--colocate --debug-rollout-only "
+    elif args.mode == "rl":
+        misc_args += "--colocate "
+    # sft has no engines to share the GPUs with; colocated, the trainer sleeps after loading, and only the
+    # advantage path restores its weights (actor.py _switch_model), so a step would train blank weights
 
     train_args = (
         f"{ckpt_args} "
