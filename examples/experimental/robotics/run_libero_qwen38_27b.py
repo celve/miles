@@ -14,7 +14,7 @@ Args:
     --suites: LIBERO suites the training rows come from (default libero_goal); held-out trials 40-49 never train.
     --prompt-data: a rows file to play instead of make_libero_data's training rows.
     --hf-checkpoint: the model to start from instead of <model-dir>/Qwen3.8-27B.
-    --sft-data: in sft mode, the directory of <step>.pt files.
+    --sft-data: in sft mode, the directory of <step>.pt files; pass with the batch flags the data maker prints.
     --context-tokens: an episode's whole context, prompt and every turn (default 65536).
     --num-rollout / --rollout-batch-size / --n-samples-per-prompt: rounds, rows a round, episodes a row.
     --eval-interval: rounds between held-out evaluations on trials 40-49; 0 turns evaluation off (default).
@@ -69,6 +69,11 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     def __post_init__(self):
         if (self.mode == "sft") != bool(self.sft_data):
             raise ValueError("--sft-data is required in sft mode and read only there")
+        if self.mode == "sft" and self.n_samples_per_prompt != 1:
+            raise ValueError(
+                "in sft mode a step is one file of whole episodes: pass the flags make_libero_sft_data.py prints "
+                "(--rollout-batch-size <episodes per file> --n-samples-per-prompt 1 --num-rollout <files>)"
+            )
 
     @property
     def checkpoint(self) -> str:
