@@ -182,17 +182,18 @@ def execute(args: ScriptArgs):
         "--rollout-health-check-timeout 30 "
     )
 
-    # Context parallelism halves each rank's share of a long episode; Qwen3.8's 4 KV heads cap TP at 4.
+    # Qwen3.8's 4 KV heads cap TP at 4; the bridge's Qwen-VL model refuses packed token-space inputs under
+    # context parallelism, so one rank holds a whole episode and the token cap is the context budget.
     perf_args = (
         "--tensor-model-parallel-size 4 "
         "--sequence-parallel "
         "--pipeline-model-parallel-size 1 "
-        "--context-parallel-size 2 "
+        "--context-parallel-size 1 "
         "--recompute-granularity full "
         "--recompute-method uniform "
         "--recompute-num-layers 1 "
         "--use-dynamic-batch-size "
-        "--max-tokens-per-gpu 32768 "
+        f"--max-tokens-per-gpu {args.context_tokens} "
     )
 
     misc_args = (
