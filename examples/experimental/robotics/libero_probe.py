@@ -9,7 +9,7 @@
 Standard library only, so it runs anywhere the server is reachable; numpy and PIL, when present, add a
 per-frame pixel difference to a mismatch. Exits 1 on any mismatch.
 
-    python libero_probe.py --url http://127.0.0.1:8000 [--url http://<second server>] --out /tmp/probe
+    python libero_probe.py --url http://127.0.0.1:8000 --url http://127.0.0.1:8001 --out /tmp/probe
 """
 
 import argparse
@@ -74,12 +74,14 @@ def save_frames(out: Path | None, name: str, observation: dict) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
-        "--url", action="append", required=True, help="a simulator server; give two, the last plays the episode"
+        "--url", action="append", required=True, help="two simulator servers: the second plays, the first replays"
     )
     parser.add_argument("--episode", default='{"suite": "libero_goal", "task_id": 0, "trial_id": 0}')
     parser.add_argument("--rounds", type=int, default=1, help="play the script this many times (or until done)")
     parser.add_argument("--out", type=Path, default=None, help="where to save the frames")
     args = parser.parse_args()
+    if len(args.url) != 2 or args.url[0] == args.url[1]:
+        parser.error("give two distinct --url: a replay closes its server's open episode, so it runs on the first")
     episode = json.loads(args.episode)
     problems: list[str] = []
     timings: dict[str, list[float]] = {"reset": [], "act": [], "replay": []}
