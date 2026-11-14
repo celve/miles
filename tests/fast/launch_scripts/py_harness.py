@@ -81,6 +81,7 @@ def iter_py_launch_scripts() -> list[PyLaunchScript]:
             REPO_ROOT / "examples/multi_lora/serve_qwen3_30b_a3b_tinker.py",
             REPO_ROOT / "examples/geo3k_vlm/run_geo3k_qwen3_8_27b.py",
             REPO_ROOT / "examples/geo3k_vlm/multi_turn/run_geo3k_vlm_multi_turn_token_space.py",
+            REPO_ROOT / "examples/experimental/robotics/run_libero_qwen38_27b.py",
         ]
     )
     return [PyLaunchScript(path=path, entrypoints=tuple(_entrypoint_names(path))) for path in paths]
