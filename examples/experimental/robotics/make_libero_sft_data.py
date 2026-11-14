@@ -36,7 +36,16 @@ def successful_episodes(dumps: list[Path], trials: set[int], per_task: int | Non
                 and metadata.get("libero", {}).get("end_reason") == "env"
             ):
                 by_task[(metadata["suite"], metadata["task_id"])].append(sample)
-    return [sample for key in sorted(by_task) for sample in by_task[key][:per_task]]
+    return [sample for key in sorted(by_task) for sample in _across_states(by_task[key])[:per_task]]
+
+
+def _across_states(samples: list[dict]) -> list[dict]:
+    """One success per initial state in turn, so a cap keeps as many states as the data has."""
+    by_state: dict[int, list[dict]] = defaultdict(list)
+    for sample in samples:
+        by_state[sample["metadata"]["trial_id"]].append(sample)
+    queues = [by_state[state] for state in sorted(by_state)]
+    return [q[i] for i in range(max(map(len, queues), default=0)) for q in queues if i < len(q)]
 
 
 def make_media_durable(episodes: list[dict], *, media_dir: Path, backup: Path | None, out: Path) -> int:
@@ -58,19 +67,22 @@ def make_media_durable(episodes: list[dict], *, media_dir: Path, backup: Path | 
             copied.add(relative)
         return str(target.resolve())
 
-    def rewrite(value):
-        if isinstance(value, str) and value.startswith(prefix):
+    # In the media fields every string is a frame, so one outside the prefix is refused; metadata holds other text.
+    def rewrite(value, *, every_string: bool):
+        if isinstance(value, str) and (every_string or value.startswith(prefix)):
             return durable(value)
         if isinstance(value, list):
-            return [rewrite(v) for v in value]
+            return [rewrite(v, every_string=every_string) for v in value]
         if isinstance(value, dict):
-            return {k: rewrite(v) for k, v in value.items()}
+            return {k: rewrite(v, every_string=every_string) for k, v in value.items()}
         return value
 
     for sample in episodes:
-        sample["multimodal_inputs"] = rewrite(sample["multimodal_inputs"])
-        sample["multimodal_train_inputs"] = rewrite(sample["multimodal_train_inputs"])
-        sample["metadata"] = rewrite(sample["metadata"])
+        sample["multimodal_inputs"] = rewrite(sample["multimodal_inputs"], every_string=True)
+        sample["multimodal_train_inputs"] = rewrite(sample["multimodal_train_inputs"], every_string=True)
+        metadata = dict(sample["metadata"])
+        refs = rewrite(metadata.pop("prompt_media_refs", None), every_string=True)
+        sample["metadata"] = {**rewrite(metadata, every_string=False), **({"prompt_media_refs": refs} if refs else {})}
     return len(copied)
 
 
