@@ -1,0 +1,8 @@
+### 0
+hf download Qwen/Qwen3.8-27B
+  --local-dir /root/models/Qwen3.8-27B
+
+### 1
+python3 <REPO_ROOT>/examples/experimental/robotics/make_libero_data.py
+  --out-dir /root/datasets/libero
+  --suites libero_goal

@@ -14,6 +14,7 @@ PEAR (at `f32aa1f`) gives a vision-language model the robot's state as JSON and 
 | `make_libero_data.py` | rows `{prompt, metadata: {suite, task_id, trial_id}}`, train trials 0–39 and held-out trials 40–49 |
 | `libero_probe.py` | checks a server: reset reproducible across servers, stateful scene equal to PEAR's replay, timings |
 | `libero_episodes.py` | `run()` on real sandboxes, with a scripted policy (no GPU) or a served model |
+| `run_libero_qwen38_27b.py` | GRPO for Qwen3.8-27B on one 8-GPU node, trainer and engines colocated |
 
 ## How an episode runs
 
@@ -43,7 +44,13 @@ python examples/experimental/robotics/libero_episodes.py --episodes 4
 
 ## Train
 
-Use a CUA launcher's arguments with these changes: `--custom-agent-function-path libero_agent_function.run`, `--custom-rm-path libero_agent_function.reward_func`, rows from `make_libero_data.py` with `--input-key prompt --metadata-key metadata`, this directory on the rollout's and the agent worker's `PYTHONPATH`, and thinking on (`--apply-chat-template-kwargs '{"enable_thinking": true}'`) as in PEAR. A group is the `--n-samples-per-prompt` episodes of one row, so it shares task and initial state.
+```bash
+python examples/experimental/robotics/run_libero_qwen38_27b.py \
+    --e2b-api-url https://sandbox-service-control-plane.tail134ba0.ts.net \
+    --e2b-sandbox-url http://sandbox-service-control-plane --e2b-api-key-file ~/.config/e2b/api_key
+```
+
+The launcher runs the agent function through the session server (`qwen38small` TITO, frames in token space), with thinking on and one context budget per episode (`--context-tokens`) as in PEAR. A group is the `--n-samples-per-prompt` episodes of one row, so it shares task and initial state. Its docstring lists the flags; the agent function reads these env vars, which the launcher sets from its flags where one exists:
 
 | Env var | Default | Meaning |
 | --- | --- | --- |
@@ -63,9 +70,9 @@ Use a CUA launcher's arguments with these changes: `--custom-agent-function-path
 
 - On a 16-vCPU VM: reset 2.8–5.5 s, action 0.5 s, PEAR's replay of the same episode 3.1 s rising to 7.1 s at 300 native steps.
 - In sandboxes, from an AWS VM, four at once: sandbox start 47–98 s, reset 8–13 s, action 2.1–2.3 s.
+- Base Qwen3.8-27B served by SGLang on 8 H200, 64 episodes at once (8 LIBERO-Goal tasks x held-out trial 40 x 8, 160k context): 1 of 64 succeeded; 56 spent the 300-step budget and 7 ended on an answer with no valid action. Sandbox start 35–304 s, reset 7–24 s, action 3.8–6.5 s, a reply 52 s at the median; an episode took 26 min at the median, 52 min at most.
 
 ## Limits
 
-- No episode here has succeeded: the scripted smoke policy does not solve a task, so reward 1 has been exercised only by the fast tests, on PEAR's own success rule.
 - LIBERO renders on the CPU (llvmpipe); a sandbox service node's CPUs bound how many episodes run at once.
 - PEAR's other environments (LIBERO-plus, LIBERO-PRO, RoboDojo, RoboLab) are not wired in; RoboDojo needs GPUs a CPU sandbox does not have.
