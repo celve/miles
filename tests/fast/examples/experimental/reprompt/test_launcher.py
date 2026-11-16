@@ -17,6 +17,7 @@ def config(monkeypatch, tmp_path):
         num_key_value_heads=2,
         num_hidden_layers=1,
         intermediate_size=256,
+        rms_norm_eps=1e-5,
         tie_word_embeddings=True,
     ).save_pretrained(tmp_path / "Qwen2.5-3B-Instruct")
     (tmp_path / "Qwen2.5-3B-Instruct_torch_dist").mkdir()
