@@ -72,9 +72,10 @@ def reward_server():
         seen.append(body)
         return {"image_reward": 0.8}
 
-    port = find_available_port(31000)
-    with UvicornThreadServer(app, host="127.0.0.1", port=port):
-        yield f"http://127.0.0.1:{port}", seen
+    server = UvicornThreadServer(app, host="127.0.0.1", port=find_available_port(31000))
+    server.start()
+    yield server.url, seen
+    server.stop()
 
 
 def _sample(response: str) -> Sample:
