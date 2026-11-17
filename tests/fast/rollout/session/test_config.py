@@ -177,8 +177,13 @@ class TestComputeSessionServerConfig:
 
     @pytest.mark.parametrize(
         "router, policy, expected",
-        [("sglang", "manual", "X-SMG-Routing-Key"), ("sglang", "round_robin", None), ("miles", "manual", None)],
-        ids=["sgl-router-manual", "sgl-router-round-robin", "miles-router"],
+        [
+            ("sglang", "manual", "X-SMG-Routing-Key"),
+            ("sglang", "round_robin", None),
+            ("miles", "consistent_hashing", "X-SMG-Routing-Key"),
+            ("miles", "manual", None),
+        ],
+        ids=["sgl-router-manual", "sgl-router-round-robin", "miles-router-consistent-hashing", "miles-router-manual"],
     )
     def test_the_routing_key_header_is_set_only_when_the_router_routes_by_key(
         self, router: str, policy: str, expected: str | None, caplog: pytest.LogCaptureFixture
