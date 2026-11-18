@@ -125,6 +125,19 @@ without it every call's pixels are copied through host memory on the engine's to
 that also answers `/health`; under desktop load the Miles router can then stop routing to the engine. For the
 same reason, run desktop trials in worker mode (section 5) so the harness's CPU load stays off the GPU host.
 
+Session images keep each turn's prefix cache only if the turn lands on the engine that served the
+session's last one. Pass `--sglang-router-policy consistent_hashing` beside `--use-miles-router`:
+the Miles router then places each session by a hash of its id and moves it only when its engine
+leaves the healthy pool, where it is otherwise least-busy. Two settings matter once a harness keeps
+many screenshots per request; a 1080p frame is about 2,040 image tokens for Qwen3-VL-style models:
+
+- Size the desktops per engine to the engine's KV pool. Each session needs its whole prompt in KV
+  between turns, or the turn re-prefills every frame. At `--sglang-mem-fraction-static 0.6` a
+  Qwen3.8-27B TP1 engine on an H200 holds about 187k tokens, and 8 sessions of 10 to 24 frames on
+  one engine missed the prefix cache on half their turns; raise it where engines are not colocated.
+- Set `--max-seq-len` to at least frames × 2,042 plus the text. The samples op cuts each trajectory
+  at it and drops, without an error, one left with no turn: 32768 keeps about 15 frames.
+
 ## 5. Optional: run the trials on a CPU box
 
 Host-process harnesses (`computer-1`, `terminus-2`) and their verifiers use the rollout host's CPUs, one Python

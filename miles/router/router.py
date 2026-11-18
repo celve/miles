@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import logging
 import sys
@@ -141,13 +142,13 @@ class MilesRouter:
         headers: dict | None = None,
     ) -> dict:
         """Core proxy logic. Returns dict with request_body, response_body, status_code, headers."""
-        worker_url = self._use_url()
-        url = f"{worker_url}/{path}"
-
         if body is None:
             body = await request.body()
         if headers is None:
             headers = dict(request.headers)
+
+        worker_url = self._use_url(self._routing_key(headers))
+        url = f"{worker_url}/{path}"
         if body is not None:
             headers = {k: v for k, v in headers.items() if k.lower() not in ("content-length", "transfer-encoding")}
 
@@ -256,10 +257,25 @@ class MilesRouter:
         """List all registered workers"""
         return {"urls": list(self.worker_request_counts.keys())}
 
-    def _use_url(self):
-        """Select worker URL with minimal active requests."""
+    def _routing_key(self, headers: dict) -> str | None:
+        name = self.config.routing_key_header
+        if name is None:
+            return None
+        return next((v for k, v in headers.items() if k.lower() == name.lower()), None) or None
 
-        if not self.dead_workers:
+    def _use_url(self, routing_key: str | None = None):
+        """Select the worker a routing key hashes to, or else the one with the fewest active requests."""
+
+        if routing_key is not None:
+            # rendezvous hashing: a key moves only when its own worker leaves the healthy pool
+            url = max(
+                (w for w in self.worker_request_counts if w not in self.dead_workers),
+                key=lambda w: _rendezvous_score(w, routing_key),
+                default=None,
+            )
+            if url is None:
+                raise RuntimeError("No healthy workers available in the pool")
+        elif not self.dead_workers:
             # Healthy path: select from all workers
             url = min(self.worker_request_counts, key=self.worker_request_counts.get)
         else:
@@ -279,6 +295,11 @@ class MilesRouter:
             logger.info(f"[miles-router] Request to {url} finished after the worker was deregistered; ignoring")
             return
         self.worker_request_counts[url] = count - 1
+
+
+def _rendezvous_score(worker_url: str, routing_key: str) -> int:
+    digest = hashlib.blake2b(f"{worker_url}\0{routing_key}".encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "big")
 
 
 def _worker_id(worker_url: str) -> str:

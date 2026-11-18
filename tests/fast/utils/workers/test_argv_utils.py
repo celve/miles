@@ -110,6 +110,7 @@ class TestConfigToArgv:
             timeout=None,
             health_check_interval=10.0,
             health_check_failure_threshold=3,
+            routing_key_header=None,
         )
         assert parse_config_argv(MilesRouterConfig, config_to_argv(router_config)) == router_config
 
