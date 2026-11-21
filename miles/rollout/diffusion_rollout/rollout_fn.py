@@ -39,6 +39,7 @@ class DiffusionRolloutFn(InferenceRolloutFn):
             eval_prompts=read_eval_prompts,
             eval_sampling_params=build_eval_sampling_params,
             eval_seed_key="seed",
+            retry_group_reward_errors=False,
         )
 
     async def __call__(self, input: RolloutFnInput) -> RolloutFnOutput:

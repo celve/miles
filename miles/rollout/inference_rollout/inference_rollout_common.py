@@ -28,6 +28,7 @@ from miles.utils.eval_config import EvalDatasetConfig
 from miles.utils.lifecycle import TrajectoryLifecycle
 from miles.utils.output_store.dropped import record_dropped_samples
 from miles.utils.processing_utils import load_processor, load_tokenizer
+from miles.utils.retry_utils import NonRetryableError
 from miles.utils.types import Sample, SampleLineage
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,7 @@ class RolloutGenerationHooks:
     eval_prompts: Callable[[Namespace, EvalDatasetConfig], list[Sample]] | None = None
     eval_sampling_params: Callable[[Namespace, EvalDatasetConfig], dict[str, Any]] | None = None
     eval_seed_key: str | None = None
+    retry_group_reward_errors: bool = True
 
 
 _DEFAULT_GENERATION_HOOKS = RolloutGenerationHooks()
@@ -215,7 +217,12 @@ async def generate_and_rm_group(
             return group
 
         if args.group_rm:
-            await batched_async_rm(args, group, inplace_set_reward_field=True)
+            try:
+                await batched_async_rm(args, group, inplace_set_reward_field=True)
+            except Exception as exc:
+                if state.hooks.retry_group_reward_errors:
+                    raise
+                raise NonRetryableError(f"{log_prefix} group reward failed: {exc}") from exc
     except BaseException:
         # cancel siblings and let them settle: the group returns only after every
         # sample task is done, so no orphan generation or in-flight credit outlives it
