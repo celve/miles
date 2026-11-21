@@ -117,7 +117,7 @@ def execute(args: ScriptArgs) -> None:
 
     sglang_args = (
         "--use-miles-router "
-        "--sglang-server-concurrency 8 "
+        "--sglang-server-concurrency 64 "
         "--diffusion-dit-precision fp16 "
         "--update-weight-buffer-size 2147483648 "
     )

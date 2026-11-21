@@ -53,7 +53,7 @@ export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && ray job submit
   --diffusion-lora-alpha 128
   --diffusion-lora-init gaussian 
   --use-miles-router
-  --sglang-server-concurrency 8
+  --sglang-server-concurrency 64
   --update-weight-buffer-size 2147483648 
   --train-backend fsdp
   --diffusion-forward-dtype bf16

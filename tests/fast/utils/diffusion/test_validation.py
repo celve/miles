@@ -132,7 +132,9 @@ def test_a_foreign_hook_is_rejected():
 
 
 def _group(worker_type=WorkerType.REGULAR, num_gpus_per_engine=1, engine_kind="diffusion"):
-    return SimpleNamespace(worker_type=worker_type, num_gpus_per_engine=num_gpus_per_engine, engine_kind=engine_kind)
+    return SimpleNamespace(
+        worker_type=worker_type, num_gpus_per_engine=num_gpus_per_engine, engine_kind=engine_kind, overrides={}
+    )
 
 
 def _model(name, groups, update_weights=True):
@@ -201,7 +203,6 @@ def test_a_parsed_diffusion_run_derives_its_batch_size_from_steps_per_rollout():
         (dict(use_tis=True), "--use-tis"),
         (dict(rollout_temperature=0.7), "--rollout-temperature"),
         (dict(rollout_max_response_len=64), "--rollout-max-response-len"),
-        (dict(custom_generate_function_path="my.generate"), "--custom-generate-function-path"),
         (dict(fp16=True), "--fp16.*--diffusion-forward-dtype"),
         (dict(attn_implementation="sdpa"), "--attn-implementation"),
         (dict(apply_chat_template=True), "--apply-chat-template"),
@@ -467,3 +468,41 @@ def test_a_parsed_nft_run_passes_and_carries_the_seed_the_converter_reads():
     )
 
     assert config.loss_type == "nft" and config.seed == 1234
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["--over-sampling-batch-size", "16"],
+        ["--recompute-logprobs-via-prefill"],
+        ["--diffusion-microgroup-size", "0"],
+        ["--disable-rollout-global-dataset"],
+        ["--custom-generate-function-path", "miles.rollout.generate_hub.single_turn.generate"],
+    ],
+)
+def test_the_cli_rejects_incompatible_shared_rollout_flags(options):
+    with pytest.raises(ValueError, match=options[0]):
+        _parse_diffusion_run("--global-batch-size", "64", *options)
+
+
+def test_the_cli_accepts_the_diffusion_generate_hook_and_sample_submission():
+    hook = _HOOKS["custom_generate_function_path"]
+    config = _parse_diffusion_run(
+        "--global-batch-size",
+        "64",
+        "--custom-generate-function-path",
+        hook,
+        "--rollout-submission-granularity",
+        "sample",
+    )
+    assert config.custom_generate_function_path.path == hook
+    assert config.rollout_submission_granularity == "sample"
+
+
+def test_a_server_group_may_not_enable_engine_batching():
+    group = _group()
+    group.overrides["batching_max_size"] = 2
+    with pytest.raises(ValueError, match="batching_max_size"):
+        validate_diffusion_sglang_config(SimpleNamespace(models=[_model("m", [group])]))
+    group.overrides["batching_max_size"] = 1
+    validate_diffusion_sglang_config(SimpleNamespace(models=[_model("m", [group])]))

@@ -15,11 +15,13 @@ from miles.utils.args.configs.data import DataConfig
 from miles.utils.args.configs.diffusion import DiffusionConfig
 from miles.utils.args.configs.reward_model import RewardModelRolloutOnlyConfig
 from miles.utils.args.configs.rollout import RolloutRelatedConfig, RolloutRelatedRolloutOnlyConfig
+from miles.utils.args.custom_function import CustomFunctionConfig
 from miles.utils.diffusion.algorithms import ALGORITHMS
 from miles.utils.diffusion.rewards import declared_reward_pool_names
 
 _HOOKS = {
     "rollout_function_path": "miles.rollout.diffusion_rollout.rollout_fn.DiffusionRolloutFn",
+    "custom_generate_function_path": "miles.rollout.diffusion_rollout.generate.generate",
     "data_source_path": "miles.rollout.diffusion_rollout.data_source.DiffusionPromptDataSource",
     "custom_convert_samples_to_train_data_path": "miles.rollout.diffusion_rollout.conversion.convert_samples_to_train_data",
 }
@@ -44,6 +46,13 @@ _UNSUPPORTED = [
         lambda a: a.eval_interval is not None or bool(a.eval_prompt_data),
     ),
     ("fully async or partial rollout", lambda a: a.fully_async or a.partial_rollout),
+    ("--over-sampling-batch-size without diffusion engine abort", lambda a: a.over_sampling_batch_size is not None),
+    (
+        "--recompute-logprobs-via-prefill, which requires text token log-probs",
+        lambda a: a.recompute_logprobs_via_prefill,
+    ),
+    ("--disable-rollout-global-dataset, which the shared rollout requires", lambda a: not a.rollout_global_dataset),
+    ("--diffusion-microgroup-size < 1", lambda a: a.diffusion_microgroup_size < 1),
     ("dynamic sampling filters", lambda a: a.dynamic_sampling_filter_path is not None),
     (
         "a reward other than --rm-type ocr, --rm-type pickscore or a --custom-rm-path",
@@ -141,7 +150,6 @@ _UNREAD = {
         "rollout_top_k",
         "rollout_max_response_len",
         "rollout_top_logprobs_num",
-        "custom_generate_function_path",
         "custom_agent_function_path",
         "rollout_data_postprocess_path",
     ],
@@ -276,13 +284,15 @@ def _check_step_strategy_flags(args) -> None:
 
 def _derive_hooks(args) -> None:
     """`--model-kind diffusion` sets its four hooks; an explicit different one is an error."""
-    unset = {None, DataConfig.model_fields["data_source_path"].default.path}
+    default_source = DataConfig.model_fields["data_source_path"].default.path
     wrong = {}
     for name, hook in _HOOKS.items():
-        if vars(args)[name] in unset:
+        value = vars(args)[name]
+        path = value.path if isinstance(value, CustomFunctionConfig) else value
+        if path is None or (name == "data_source_path" and path == default_source):
             vars(args)[name] = hook
-        elif vars(args)[name] != hook:
-            wrong[name] = vars(args)[name]
+        elif path != hook:
+            wrong[f"--{name.replace('_', '-')}"] = path
     if wrong:
         raise ValueError(f"--model-kind diffusion sets its own hooks {_HOOKS}; got {wrong}")
 
@@ -301,4 +311,8 @@ def validate_diffusion_sglang_config(sglang) -> None:
             raise ValueError(
                 f"--model-kind diffusion serves regular single-GPU engine groups, got {group.worker_type.value} "
                 f"with {group.num_gpus_per_engine} GPUs per engine"
+            )
+        if int(group.overrides.get("batching_max_size") or 1) > 1:
+            raise ValueError(
+                "--model-kind diffusion uses client batching and requires server-group batching_max_size <= 1"
             )

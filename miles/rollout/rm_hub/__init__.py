@@ -15,6 +15,7 @@ from .gpqa import compute_gpqa_reward
 from .math_dapo_utils import compute_score as compute_score_dapo
 from .math_utils import extract_answer as extract_boxed_answer
 from .math_utils import grade_answer_verl
+from .pools import get_reward_pool_kwargs
 
 # `math`, `deepscaler` and `gemma_math` already grade the last `\boxed{}` themselves (deepscaler and
 # gemma_math only after their end-of-reasoning marker), so their `boxed_` variants grade the response
@@ -73,6 +74,7 @@ def _resolve_reward_config(args, sample: Sample) -> tuple[CustomFunctionConfig |
 
 
 async def async_rm(args, sample: Sample, **kwargs):
+    kwargs = kwargs or get_reward_pool_kwargs()
     custom_rm_path, rm_type = _resolve_reward_config(args, sample)
 
     if custom_rm_path is not None:
@@ -137,6 +139,7 @@ async def batched_async_rm(
     inplace_set_reward_field: bool = False,
     **kwargs,
 ) -> list[int | float] | None:
+    kwargs = kwargs or get_reward_pool_kwargs()
     if inplace_set_reward_field:
         rewards = await batched_async_rm(args, samples, **kwargs)
         for sample, reward in zip(samples, rewards, strict=True):
