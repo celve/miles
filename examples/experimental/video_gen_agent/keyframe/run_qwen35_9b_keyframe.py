@@ -83,6 +83,7 @@ Example:
     python examples/experimental/video_gen_agent/keyframe/run_qwen35_9b_keyframe.py --init-checkpoint /root/shared_data/sft
 """
 
+import json
 import math
 from dataclasses import dataclass, field, replace
 
@@ -93,6 +94,7 @@ from examples.experimental.video_gen_agent.multiturn.run_qwen35_9b_fastwan impor
 from scripts.run_sd35_medium_flow_grpo_ocr import OCR_DEPS_INSTALL
 
 from miles.utils.chat_template_utils import resolve_reasoning_and_tool_call_parser
+from miles.utils.chat_template_utils.tito_tokenizer import resolve_fixed_chat_template
 from miles.utils.external_utils import command_utils
 from miles.utils.misc import should_run_periodic_action
 
@@ -715,9 +717,12 @@ def _sft_train_args(args: ScriptArgs) -> str:
         "--max-seq-len 16384 "
         "--loss-type sft_loss --calculate-per-token-loss --disable-compute-advantages-and-returns "
         "--debug-train-only "
-        f"--tito-model {args.recipe.tito_model} "
         f"--save-hf {args.run_dir}/hf "
     )
+    # --tito-model configures the session server, which an SFT run has none of: its family's registered template
+    # and kwargs, which that flag would set, render the episodes instead.
+    template, template_kwargs = resolve_fixed_chat_template(args.recipe.tito_model)
+    sft_args += f"--chat-template-path {template} --apply-chat-template-kwargs '{json.dumps(template_kwargs)}' "
     return (
         f"{_ckpt_args(args)} {sft_args} {_multimodal_args(args)} {_optimizer_args(args, lr=args.sft_lr)} "
         f"{command_utils.get_default_wandb_args(__file__, run_id=args.run_id)} "

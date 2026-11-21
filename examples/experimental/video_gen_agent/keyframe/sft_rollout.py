@@ -16,7 +16,7 @@ from miles.backends.training_utils.data.token_space_media_process import (
     RolloutEngineProcessorArgs,
     build_trainer_processor,
 )
-from miles.utils.chat_template_utils.template import normalize_tool_arguments
+from miles.utils.chat_template_utils.template import extract_tool_dicts, normalize_tool_arguments
 from miles.utils.media_refs import collect_media_refs
 from miles.utils.processing_utils import load_tokenizer
 
@@ -32,8 +32,8 @@ _STATE: dict = {}
 
 def render_episode(tokenizer, messages: list[dict], tools: list[dict], **template_kwargs) -> tuple[list[int], list[int]]:
     """The episode's tokens, one placeholder per image, and a loss mask of 1 on every assistant turn's own tokens."""
-    # The session server's own normalization: tool-call arguments as the template indexes them.
-    messages = normalize_tool_arguments(messages, "dict")
+    # The serving side's own canonicalization: tool-call arguments as the template indexes them, tools as model dumps.
+    messages, tools = normalize_tool_arguments(messages, "dict"), extract_tool_dicts(tools)
     pieces: list[tuple[str, int]] = []
     done = ""
     for k, message in enumerate(messages):

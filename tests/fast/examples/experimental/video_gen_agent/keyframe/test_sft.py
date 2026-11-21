@@ -17,6 +17,7 @@ from tests.fast.examples.experimental.video_gen_agent.keyframe.test_image_observ
     qwen38,
     tokenizer,
 )
+from examples.experimental.video_gen_agent.keyframe.run_qwen35_9b_keyframe import ScriptArgs, _train_args
 from tests.fast.examples.experimental.video_gen_agent.keyframe.test_launcher import _config
 from tests.fast.rollout.session.test_token_space_images import TokenSpaceEngine, _samples
 from tests.fast.rollout.session.test_token_space_videos import _make_core
@@ -142,7 +143,7 @@ def test_each_group_keeps_its_top_episode_only_when_it_is_ungated_and_stands_out
             0: [(0.9, False), (0.5, False), (0.5, False), (0.5, False)],  # kept
             1: [(0.9, True), (0.5, False), (0.5, False), (0.5, False)],  # top gated
             2: [(0.6, False), (0.6, False), (0.6, False), (0.6, False)],  # flat
-            3: [(0.62, False), (0.6, False), (0.58, False), (0.4, False)],  # top within half a std
+            3: [(0.7, False), (0.7, False), (0.7, False), (0.7, False), (0.0, False)],  # top within half a std
         },
     )
 
@@ -167,9 +168,11 @@ def test_the_set_writes_the_kept_messages_with_their_tools_and_lists_request_ids
 def test_an_sft_run_trains_every_gpu_on_the_set_with_the_planners_template(monkeypatch, tmp_path):
     args = _config(monkeypatch, tmp_path, sft_data="/sft", num_gpus_per_node=8, video_mode="h3-ref")
 
-    assert args.loss_type == "sft_loss" and args.debug_train_only and args.num_epoch == 2 and args.lr == 1e-5
-    assert args.prompt_data == "/sft/train.jsonl" and args.tool_key == "tools" and args.tito_model == "qwen35"
-    assert args.rollout_function_path.endswith("keyframe.sft_rollout.generate_rollout")
+    assert args.loss_type == "sft_loss" and args.debug_train_only and args.num_epoch == 2
+    assert "--lr 1e-05 " in _train_args(ScriptArgs(run_id="test", sft_data="/sft", video_mode="h3-ref"))
+    assert args.prompt_data == "/sft/train.jsonl" and args.tool_key == "tools"
+    assert args.chat_template_path.endswith("qwen3.5_fixed.jinja") and args.apply_chat_template_kwargs == QWEN35_KWARGS
+    assert args.rollout_function_path.path.endswith("keyframe.sft_rollout.generate_rollout")
     assert args.actor_num_gpus_per_node == 8 and args.save_hf.endswith("/test/hf")
 
 
