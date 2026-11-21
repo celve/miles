@@ -3,6 +3,7 @@ be the very sample the session server builds when the trained planner plays the 
 
 import asyncio
 import json
+import math
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,7 +13,7 @@ import pytest
 import torch
 from examples.experimental.video_gen_agent.keyframe.env import tools_for
 from examples.experimental.video_gen_agent.keyframe.run_qwen35_9b_keyframe import ScriptArgs, _train_args
-from examples.experimental.video_gen_agent.keyframe.sft_heldout_loss import _expand
+from examples.experimental.video_gen_agent.keyframe.sft_heldout_loss import _expand, _row_loss
 from examples.experimental.video_gen_agent.keyframe.sft_rollout import IMAGE_PAD, render_episode
 from tests.fast.examples.experimental.video_gen_agent.keyframe.test_image_observations import (
     _run_episode,
@@ -165,6 +166,26 @@ def test_the_heldout_check_scores_the_tokens_training_sees(monkeypatch, tmp_path
     tokens, mask = _expand(tokens, mask, counts, tokenizer.convert_tokens_to_ids(IMAGE_PAD))
 
     assert tokens == sample.tokens and mask[-sample.response_length :] == sample.loss_mask
+
+
+def test_the_heldout_check_runs_a_real_forward_on_an_image_bearing_row(
+    monkeypatch, tmp_path, tokenizer, processor_core, model_path
+):
+    from transformers import AutoConfig, AutoModelForImageTextToText, AutoProcessor
+
+    _, _, result = _episode(monkeypatch, tmp_path, processor_core, tokenizer, model_path, "qwen35")
+    row = json.loads(json.dumps({"messages": result["video_gen"]["messages"], "tools": tools_for("preview")}))
+    config = AutoConfig.from_pretrained(model_path)
+    # Full attention only: the linear-attention kernel has no CPU path, and M-RoPE, the failing part, is in every layer.
+    config.text_config.update({"num_hidden_layers": 1, "layer_types": ["full_attention"]})
+    config.vision_config.update({"depth": 1})
+    torch.manual_seed(0)
+    model = AutoModelForImageTextToText.from_config(config).eval()
+
+    loss, trained = _row_loss(model, AutoProcessor.from_pretrained(model_path), tokenizer, row, QWEN35_KWARGS)
+
+    sample = _sft_sample(monkeypatch, model_path, processor_core, result)
+    assert math.isfinite(loss) and loss > 0 and trained == sum(sample.loss_mask)
 
 
 def test_a_template_that_rewrites_an_earlier_turn_is_refused(tokenizer):

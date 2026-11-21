@@ -70,7 +70,8 @@ Args:
     --sft-data: an SFT run instead of RL, on the train.jsonl of a directory ``keyframe.sft_data`` wrote from recorded
         episodes of any planner, re-rendered for this one by ``keyframe.sft_rollout``; --sft-epochs (2) at --sft-lr
         (1e-5), --rollout-batch-size episodes a step, all GPUs training; Miles takes floor(rows / batch) steps an
-        epoch, so each pass leaves the remainder unseen. It saves under the run's ``checkpoints`` and exports HF weights
+        epoch with its cursor running on across epochs, so a run draws epochs x floor(rows / batch) x batch
+        episodes and its last pass is partial. It saves under the run's ``checkpoints`` and exports HF weights
         to its ``hf``; ``keyframe.sft_heldout_loss`` scores the held-out rows on that export and on the base planner.
     --init-checkpoint: such an SFT run's directory, which an RL run then starts from and keeps as its KL reference.
 

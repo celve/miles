@@ -46,6 +46,9 @@ def _row_loss(model, processor, tokenizer, row: dict, template_kwargs: dict) -> 
         inputs = {key: value.to(model.device) for key, value in vision.items()}
     tokens, mask = _expand(tokens, mask, counts, tokenizer.convert_tokens_to_ids(IMAGE_PAD))
     ids = torch.tensor([tokens], device=model.device)
+    if counts:
+        # Qwen3.5's M-RoPE places image rows by per-token modality, which the image processor alone does not give.
+        inputs["mm_token_type_ids"] = torch.tensor(processor.create_mm_token_type_ids([tokens]), device=model.device)
     logits = model(input_ids=ids, **inputs).logits[0, :-1].float()
     trained = torch.tensor(mask[1:], device=model.device, dtype=torch.bool)
     loss = F.cross_entropy(logits[trained], ids[0, 1:][trained], reduction="sum")
