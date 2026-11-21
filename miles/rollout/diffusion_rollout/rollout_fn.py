@@ -4,12 +4,20 @@ import asyncio
 from argparse import Namespace
 from typing import Any
 
-from miles.rollout.base_types import RolloutFnConstructorInput, RolloutFnTrainInput, RolloutFnTrainOutput
+from miles.rollout.base_types import (
+    RolloutFnConstructorInput,
+    RolloutFnInput,
+    RolloutFnOutput,
+    RolloutFnTrainInput,
+    RolloutFnTrainOutput,
+)
 from miles.rollout.diffusion_rollout.client import ImageClient
+from miles.rollout.diffusion_rollout.data_source import read_eval_prompts
 from miles.rollout.diffusion_rollout.generate import use_image_client
 from miles.rollout.inference_rollout.inference_rollout_common import InferenceRolloutFn, RolloutGenerationHooks
 from miles.rollout.rm_hub.pools import use_reward_pools
 from miles.utils.diffusion.rewards import BUILT_IN_REWARD_POOLS
+from miles.utils.eval_config import EvalDatasetConfig
 
 
 class DiffusionRolloutFn(InferenceRolloutFn):
@@ -24,20 +32,27 @@ class DiffusionRolloutFn(InferenceRolloutFn):
         self.client = ImageClient(input.args, {f"{name}_pool": pool for name, pool in self.reward_pools.items()})
 
     def generation_hooks(self) -> RolloutGenerationHooks:
-        return RolloutGenerationHooks(sampling_params=build_sampling_params, load_tokenizer=False, engine_abort=False)
+        return RolloutGenerationHooks(
+            sampling_params=build_sampling_params,
+            load_tokenizer=False,
+            engine_abort=False,
+            eval_prompts=read_eval_prompts,
+            eval_sampling_params=build_eval_sampling_params,
+            eval_seed_key="seed",
+        )
+
+    async def __call__(self, input: RolloutFnInput) -> RolloutFnOutput:
+        await asyncio.gather(*(pool.ensure_healthy() for pool in self.reward_pools.values()))
+        with use_image_client(self.client), use_reward_pools(self.reward_pools):
+            return await super().__call__(input)
 
     async def _call_train(self, input: RolloutFnTrainInput) -> RolloutFnTrainOutput:
         self.client.dispatcher.reset(index_offset=self.data_source.sample_index_offset)
-        await asyncio.gather(*(pool.ensure_healthy() for pool in self.reward_pools.values()))
-        with use_image_client(self.client), use_reward_pools(self.reward_pools):
-            output = await super()._call_train(input)
+        output = await super()._call_train(input)
         for group in output.samples:
             for sample in group:
                 sample.diffusion.rollout_id = input.rollout_id
         return output
-
-    async def _call_eval(self, input):
-        raise AssertionError("diffusion runs have no eval rollout yet")
 
     async def dispose(self) -> None:
         await self.client.dispose()
@@ -63,6 +78,28 @@ def _check_selected_rewards_have_pools(rm_types: set[str], *, declared: dict) ->
 
 def build_sampling_params(args: Namespace) -> dict[str, Any]:
     """Static fields of the ``POST /rollout/generate`` body for training rollouts."""
+    return _image_params(args) | {
+        "rollout": True,
+        "rollout_sde_type": args.diffusion_sde_type,
+        "rollout_noise_level": args.diffusion_noise_level,
+        # The engine refuses full log-probs of ODE steps, which carry no noise to score.
+        "rollout_log_prob_no_const": args.diffusion_sde_type == "ode",
+        "rollout_debug_mode": False,
+        "rollout_return_denoising_env": True,
+        "rollout_return_dit_trajectory": True,
+    }
+
+
+def build_eval_sampling_params(args: Namespace, dataset_cfg: EvalDatasetConfig) -> dict[str, Any]:
+    return _image_params(args) | {
+        "rollout": False,
+        "num_inference_steps": args.diffusion_eval_num_steps or args.diffusion_num_steps,
+        "rollout_return_denoising_env": False,
+        "rollout_return_dit_trajectory": False,
+    }
+
+
+def _image_params(args: Namespace) -> dict[str, Any]:
     params: dict[str, Any] = {
         "generator_device": "cuda",
         "width": args.diffusion_width,
@@ -70,15 +107,7 @@ def build_sampling_params(args: Namespace) -> dict[str, Any]:
         "num_inference_steps": args.diffusion_num_steps,
         "guidance_scale": args.diffusion_guidance_scale,
         "true_cfg_scale": None,
-        "rollout": True,
-        "rollout_sde_type": args.diffusion_sde_type,
-        "rollout_noise_level": args.diffusion_noise_level,
-        # The engine refuses full log-probs of ODE steps, which carry no noise to score.
-        "rollout_log_prob_no_const": args.diffusion_sde_type == "ode",
-        "rollout_debug_mode": False,
         "rollout_video_dtype": "keep",
-        "rollout_return_denoising_env": True,
-        "rollout_return_dit_trajectory": True,
         "num_frames": args.diffusion_output_num_frames,
         "extra_sampling_params": {"quality": args.diffusion_quality},
     }

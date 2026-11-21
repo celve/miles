@@ -57,10 +57,8 @@ def test_the_recipe_layout_passes_and_resolves_the_family_defaults():
         (dict(ref_load="/ref"), "reference"),
         (dict(use_kl_loss=True), "reference"),
         (dict(use_opd=True), "distillation"),
-        (dict(eval_interval=5), "evaluation"),
         (dict(fully_async=True), "async"),
         (dict(partial_rollout=True), "async"),
-        (dict(dynamic_sampling_filter_path="f"), "filters"),
         (dict(rm_type="math"), "reward"),
         (dict(rm_type=None), "reward"),
         (dict(use_output_store=True), "output store"),
@@ -473,6 +471,9 @@ def test_a_parsed_nft_run_passes_and_carries_the_seed_the_converter_reads():
 @pytest.mark.parametrize(
     "options",
     [
+        ["--eval-num-gpus", "2"],
+        ["--diffusion-eval-num-steps", "0"],
+        ["--group-rm", "--eval-interval", "1"],
         ["--over-sampling-batch-size", "16"],
         ["--rollout-sample-filter-path", "miles.rollout.filter_hub.sample_filters.mask_truncated_zero_reward"],
         ["--recompute-logprobs-via-prefill"],
@@ -507,3 +508,21 @@ def test_a_server_group_may_not_enable_engine_batching():
         validate_diffusion_sglang_config(SimpleNamespace(models=[_model("m", [group])]))
     group.overrides["batching_max_size"] = 1
     validate_diffusion_sglang_config(SimpleNamespace(models=[_model("m", [group])]))
+
+
+def test_the_cli_resolves_scheduled_diffusion_eval(tmp_path):
+    path = str(tmp_path / "eval.jsonl")
+    args = _parse_diffusion_run(
+        "--global-batch-size",
+        "64",
+        "--eval-prompt-data",
+        "ocr",
+        path,
+        "--eval-interval",
+        "1",
+        "--diffusion-eval-num-steps",
+        "7",
+    )
+    assert args.eval_datasets[0].path == path
+    assert args.diffusion_eval_num_steps == 7
+    assert args.eval_function_path.path == args.rollout_function_path.path == _HOOKS["rollout_function_path"]

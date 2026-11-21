@@ -40,6 +40,7 @@ class RolloutGenerationHooks:
     engine_abort: bool = True
     eval_prompts: Callable[[Namespace, EvalDatasetConfig], list[Sample]] | None = None
     eval_sampling_params: Callable[[Namespace, EvalDatasetConfig], dict[str, Any]] | None = None
+    eval_seed_key: str | None = None
 
 
 _DEFAULT_GENERATION_HOOKS = RolloutGenerationHooks()

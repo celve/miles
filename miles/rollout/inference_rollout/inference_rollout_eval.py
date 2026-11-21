@@ -119,9 +119,9 @@ async def eval_rollout_single_dataset(
             if router_routes_by_key(args):
                 sample.routing_key = str(uuid.uuid4())
             sampling_params = base_sampling_params
-            if args.sglang.common_value("enable_deterministic_inference"):
+            if hooks.eval_seed_key or args.sglang.common_value("enable_deterministic_inference"):
                 sampling_params = base_sampling_params.copy()
-                sampling_params["sampling_seed"] = args.rollout_seed + j
+                sampling_params[hooks.eval_seed_key or "sampling_seed"] = args.rollout_seed + j
             tasks.append(
                 asyncio.create_task(
                     generate_and_rm(
