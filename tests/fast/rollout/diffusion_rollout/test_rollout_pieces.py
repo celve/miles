@@ -266,7 +266,8 @@ def _index_window(args, sample, num_steps, seed):
 
 
 @pytest.mark.parametrize("order", list(permutations(range(3))))
-async def test_first_arrival_sends_the_same_body_and_every_follower_gets_its_image(order):
+@pytest.mark.parametrize("tail_order", [(3, 4), (4, 3)])
+async def test_first_arrival_sends_the_same_body_and_every_follower_gets_its_image(order, tail_order):
     args = _request_args(
         loss_type="flow_grpo",
         diffusion_step_strategy_path=f"{__name__}._index_window",
@@ -298,7 +299,7 @@ async def test_first_arrival_sends_the_same_body_and_every_follower_gets_its_ima
 
     try:
         with use_image_client(client):
-            arrivals = [*order, 4, 3]
+            arrivals = [*order, *tail_order]
             results = await asyncio.gather(
                 *(
                     generate(

@@ -48,6 +48,10 @@ _UNSUPPORTED = [
     ("fully async or partial rollout", lambda a: a.fully_async or a.partial_rollout),
     ("--over-sampling-batch-size without diffusion engine abort", lambda a: a.over_sampling_batch_size is not None),
     (
+        "--rollout-sample-filter-path, which marks samples the diffusion converter cannot skip",
+        lambda a: a.rollout_sample_filter_path is not None,
+    ),
+    (
         "--recompute-logprobs-via-prefill, which requires text token log-probs",
         lambda a: a.recompute_logprobs_via_prefill,
     ),

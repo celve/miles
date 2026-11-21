@@ -474,6 +474,7 @@ def test_a_parsed_nft_run_passes_and_carries_the_seed_the_converter_reads():
     "options",
     [
         ["--over-sampling-batch-size", "16"],
+        ["--rollout-sample-filter-path", "miles.rollout.filter_hub.sample_filters.mask_truncated_zero_reward"],
         ["--recompute-logprobs-via-prefill"],
         ["--diffusion-microgroup-size", "0"],
         ["--disable-rollout-global-dataset"],

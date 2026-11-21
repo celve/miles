@@ -247,10 +247,9 @@ async def test_every_rollout_checks_pool_health_and_keeps_the_executor_owned_poo
     assert fn.reward_pools["pickscore"] is pools["pickscore"]
 
 
-async def test_sample_submission_filter_and_all_samples_hook_use_the_shared_loop(monkeypatch, tmp_path):
+async def test_sample_submission_and_all_samples_hook_use_the_shared_loop(monkeypatch, tmp_path):
     fn = _rollout(
         rollout_submission_granularity="sample",
-        rollout_sample_filter_path="test_filter",
         rollout_all_samples_process_path="test_process",
     )
     prompts = tmp_path / "prompts.jsonl"
@@ -266,24 +265,18 @@ async def test_sample_submission_filter_and_all_samples_hook_use_the_shared_loop
         sample_done(scheduler)
         completions.append(scheduler.samples_in_flight)
 
-    def filter_output(args, groups):
-        calls.append(("filter", [sample.index for sample in groups[0]]))
-        groups[0] = groups[0][:-1]
-
     def process_all(args, groups, data_source):
         assert data_source == fn.data_source.get_samples
         calls.append(("all", [sample.index for sample in groups[0]]))
 
     monkeypatch.setattr(SampleBackfillSubmission, "sample_done_callback", on_done)
     async with _fake_engine(fn):
-        with function_registry.temporary("test_filter", filter_output), function_registry.temporary(
-            "test_process", process_all
-        ):
+        with function_registry.temporary("test_process", process_all):
             (group,) = (await fn(RolloutFnTrainInput(rollout_id=0))).samples
 
     assert completions[:4] == [3, 2, 1, 0]
-    assert calls == [("filter", [0, 1, 2, 3]), ("all", [0, 1, 2, 3])]
-    assert [sample.index for sample in group] == [0, 1, 2]
+    assert calls == [("all", [0, 1, 2, 3])]
+    assert [sample.index for sample in group] == [0, 1, 2, 3]
 
 
 async def test_resuming_with_a_new_group_size_keeps_seeds_and_positions(tmp_path):
