@@ -47,6 +47,7 @@ def sample_flow_event_dir(tmp_path: Path) -> Iterator[Path]:
 class FakeGenerateState(GenerateState):
     def __init__(self, args):
         self.args = args
+        self.hooks = rollout_common.RolloutGenerationHooks()
         self.sampling_params = {}
         self.aborted = False
         self.generate_fn_semaphore = asyncio.Semaphore(2)

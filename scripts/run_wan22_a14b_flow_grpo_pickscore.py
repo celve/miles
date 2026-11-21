@@ -122,7 +122,7 @@ def execute(args: ScriptArgs) -> None:
 
     lora_args = "--diffusion-lora-rank 64 --diffusion-lora-alpha 128 --diffusion-lora-init gaussian "
 
-    sglang_args = "--use-miles-router --sglang-server-concurrency 8 --update-weight-buffer-size 2147483648 "
+    sglang_args = "--use-miles-router --sglang-server-concurrency 64 --update-weight-buffer-size 2147483648 "
 
     train_args = (
         "--train-backend fsdp "
