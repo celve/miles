@@ -4,6 +4,7 @@ import uuid
 from argparse import Namespace
 from collections.abc import Callable
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import Any
 
 from miles.rollout.base_types import (
@@ -23,6 +24,7 @@ from miles.rollout.generate_utils.generate_endpoint_utils import apply_sample_ma
 from miles.rollout.inference_rollout.compatibility import load_generate_function
 from miles.rollout.rm_hub import async_rm, batched_async_rm
 from miles.utils.async_utils import DynamicLimitSemaphore
+from miles.utils.eval_config import EvalDatasetConfig
 from miles.utils.lifecycle import TrajectoryLifecycle
 from miles.utils.output_store.dropped import record_dropped_samples
 from miles.utils.processing_utils import load_processor, load_tokenizer
@@ -31,25 +33,43 @@ from miles.utils.types import Sample, SampleLineage
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class RolloutGenerationHooks:
+    sampling_params: Callable[[Namespace], dict[str, Any]] | None = None
+    load_tokenizer: bool = True
+    engine_abort: bool = True
+    eval_prompts: Callable[[Namespace, EvalDatasetConfig], list[Sample]] | None = None
+    eval_sampling_params: Callable[[Namespace, EvalDatasetConfig], dict[str, Any]] | None = None
+
+
+_DEFAULT_GENERATION_HOOKS = RolloutGenerationHooks()
+
+
 class GenerateState:
-    def __init__(self, args: Namespace) -> None:
+    def __init__(self, args: Namespace, hooks: RolloutGenerationHooks = _DEFAULT_GENERATION_HOOKS) -> None:
         # persistent state for the generation process
         self.args = args
-        self.tokenizer = load_tokenizer(
-            args.hf_checkpoint, chat_template_path=args.chat_template_path, trust_remote_code=True
-        )
-        self.processor = load_processor(args.hf_checkpoint, trust_remote_code=True)
+        self.hooks = hooks
+        self.tokenizer = self.processor = None
+        if hooks.load_tokenizer:
+            self.tokenizer = load_tokenizer(
+                args.hf_checkpoint, chat_template_path=args.chat_template_path, trust_remote_code=True
+            )
+            self.processor = load_processor(args.hf_checkpoint, trust_remote_code=True)
 
         self.generate_fn_semaphore = DynamicLimitSemaphore(
             lambda: args.sglang_server_concurrency * max(args.inference_runtime_mut_state.engine_count, 1)
         )
-        self.sampling_params: dict[str, Any] = compute_sampling_params(
-            args,
-            temperature=args.rollout_temperature,
-            top_p=args.rollout_top_p,
-            top_k=args.rollout_top_k,
-            max_new_tokens=args.rollout_max_response_len,
-        )
+        if hooks.sampling_params is not None:
+            self.sampling_params = hooks.sampling_params(args)
+        else:
+            self.sampling_params = compute_sampling_params(
+                args,
+                temperature=args.rollout_temperature,
+                top_p=args.rollout_top_p,
+                top_k=args.rollout_top_k,
+                max_new_tokens=args.rollout_max_response_len,
+            )
 
         self.generate_function = load_generate_function(args.custom_generate_function_path) or generate
         self.sample_generate_functions: dict[str, Any] = {}
@@ -235,8 +255,11 @@ class InferenceRolloutFn(BaseRolloutFn):
     def __init__(self, input: RolloutFnConstructorInput):
         super().__init__(input)
         self.data_source = input.data_source
-        self.state = GenerateState(input.args)
+        self.state = GenerateState(input.args, hooks=self.generation_hooks())
         self.eval_prompt_dataset_cache = {}
+
+    def generation_hooks(self) -> RolloutGenerationHooks:
+        return _DEFAULT_GENERATION_HOOKS
 
     async def __call__(self, input: RolloutFnInput) -> RolloutFnOutput:
         if input.evaluation:
