@@ -56,6 +56,12 @@ _UNSUPPORTED = [
         lambda a: a.dynamic_sampling_filter_path is not None
         and a.diffusion_step_strategy_path == f"{step_strategy.__name__}.epoch_global_random_choice",
     ),
+    (
+        "--rollout-submission-granularity sample with epoch_global_random_choice, "
+        "since surplus groups can mix SDE steps from different epochs in one rollout",
+        lambda a: a.rollout_submission_granularity == "sample"
+        and a.diffusion_step_strategy_path == f"{step_strategy.__name__}.epoch_global_random_choice",
+    ),
     ("--over-sampling-batch-size without diffusion engine abort", lambda a: a.over_sampling_batch_size is not None),
     (
         "--rollout-sample-filter-path, which marks samples the diffusion converter cannot skip",

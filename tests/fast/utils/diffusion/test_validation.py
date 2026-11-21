@@ -483,6 +483,17 @@ def test_a_parsed_nft_run_passes_and_carries_the_seed_the_converter_reads():
             "--diffusion-sde-candidate-steps",
             "1,2,3",
         ],
+        pytest.param(
+            [
+                "--rollout-submission-granularity",
+                "sample",
+                "--diffusion-step-strategy-path",
+                "miles.rollout.diffusion_rollout.step_strategy.epoch_global_random_choice",
+                "--diffusion-sde-candidate-steps",
+                "1,2,3",
+            ],
+            id="sample-with-epoch-wide-draw",
+        ),
         ["--rollout-sample-filter-path", "miles.rollout.filter_hub.sample_filters.mask_truncated_zero_reward"],
         ["--recompute-logprobs-via-prefill"],
         ["--diffusion-microgroup-size", "0"],
