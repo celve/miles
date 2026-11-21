@@ -3,6 +3,7 @@ import json
 from argparse import Namespace
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import msgpack
@@ -11,6 +12,7 @@ import torch
 from safetensors.torch import save
 from tests.fast.fixtures.args_fixtures import parser_defaults
 
+from miles.ray.rollout.rollout_executor import RolloutExecutor
 from miles.rollout.base_types import RolloutFnConstructorInput, RolloutFnTrainInput
 from miles.rollout.diffusion_rollout import rollout_fn
 from miles.rollout.diffusion_rollout.data_source import DiffusionPromptDataSource
@@ -18,6 +20,7 @@ from miles.rollout.submission_scheduler import SampleBackfillSubmission
 from miles.utils.args.custom_function import CustomFunctionConfig
 from miles.utils.args.custom_view import ImmutableNamespace
 from miles.utils.diffusion.types import DiffusionRollout
+from miles.utils.eval_config import EvalDatasetConfig
 from miles.utils.function_registry import function_registry
 from miles.utils.types import Sample
 
@@ -301,3 +304,72 @@ async def test_resuming_with_a_new_group_size_keeps_seeds_and_positions(tmp_path
         range(fn.state.args.rollout_seed + 4, fn.state.args.rollout_seed + 8)
     )
     assert [request["num_outputs_per_prompt"] for request in requests] == [2, 2]
+
+
+@pytest.mark.parametrize("eval_steps", [None, 3])
+async def test_executor_scores_image_only_eval_with_a_seed_per_repeat(tmp_path, monkeypatch, eval_steps):
+    prompts = tmp_path / "eval.jsonl"
+    prompts.write_text('{"question":"first","attrs":{"tag":1},"target":"a"}\n{"question":"second","target":"b"}\n')
+    dataset = EvalDatasetConfig(
+        name="ocr",
+        path=str(prompts),
+        input_key="question",
+        metadata_key="attrs",
+        label_key="target",
+        n_samples_per_eval_prompt=3,
+    )
+    fn = _rollout(eval_datasets=[dataset], diffusion_eval_num_steps=eval_steps, eval_uses_snapshots=False)
+    executor = object.__new__(RolloutExecutor)
+    executor.args = fn.state.args
+    executor.eval_generate_rollout = fn
+    executor.use_legacy_rollout_v1 = False
+    executor._refresh_inference_runtime_mut_state = AsyncMock()
+    executor._metric_checker = None
+    executor.custom_convert_samples_to_train_data_func = Mock(side_effect=AssertionError("converted eval images"))
+    results = {}
+    monkeypatch.setattr(
+        "miles.ray.rollout.rollout_executor.log_eval_rollout_data",
+        lambda rollout_id, args, data, metrics: results.update(data),
+    )
+
+    async with _fake_engine(fn) as requests:
+        await executor.eval(0)
+
+    samples = results["ocr"]["samples"]
+    seeds = [fn.state.args.rollout_seed + j for j in range(3)]
+    assert sorted((r["prompt"], r["seed"]) for r in requests) == [(p, s) for p in ("first", "second") for s in seeds]
+    assert all(r["rollout"] is False and r["num_outputs_per_prompt"] == 1 for r in requests)
+    assert all(r["num_inference_steps"] == (eval_steps or fn.state.args.diffusion_num_steps) for r in requests)
+    assert all(not r["rollout_return_dit_trajectory"] and not r["rollout_return_denoising_env"] for r in requests)
+    assert [(s.index, s.diffusion.seed) for s in samples] == list(enumerate(seeds * 2))
+    assert all(s.diffusion.dit_trajectory is None for s in samples)
+    assert [(s.label, s.metadata) for s in samples] == [("a", {"tag": 1})] * 3 + [("b", {})] * 3
+    assert results["ocr"]["rewards"] == [5.0] * 3 + [6.0] * 3
+    executor.custom_convert_samples_to_train_data_func.assert_not_called()
+
+
+async def filter_test_reward(args, samples):
+    return [float(sample.index % 2) if sample.prompt == "keep" else 0.0 for sample in samples]
+
+
+async def test_reward_std_filter_refills_a_dropped_diffusion_group(tmp_path):
+    from tests.fast.utils.diffusion.test_validation import _parse_diffusion_run
+
+    filter_path = "miles.rollout.filter_hub.common_filters.apply_reward_nonzero_std_filter"
+    config = _parse_diffusion_run("--global-batch-size", "64", "--dynamic-sampling-filter-path", filter_path)
+    fn = _rollout(
+        dynamic_sampling_filter_path=config.dynamic_sampling_filter_path,
+        custom_rm_path=CustomFunctionConfig(path=f"{__name__}.filter_test_reward"),
+    )
+    prompts = tmp_path / "train.jsonl"
+    prompts.write_text('{"input":"drop"}\n{"input":"keep"}\n')
+    fn.data_source = DiffusionPromptDataSource(
+        Namespace(**(dict(fn.state.args) | {"prompt_data": str(prompts), "rollout_shuffle": False}))
+    )
+    async with asyncio.timeout(5), _fake_engine(fn) as requests:
+        output = await fn(RolloutFnTrainInput(rollout_id=1))
+
+    (group,) = output.samples
+    assert output.metrics["rollout/dynamic_filter/drop_zero_std_0.0"] == 1
+    assert [sample.index for sample in group] == [4, 5, 6, 7]
+    assert [r["prompt"] for r in requests] == ["drop", "drop", "keep", "keep"]

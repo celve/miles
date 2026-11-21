@@ -18,6 +18,9 @@ class DiffusionConfig(BaseConfig):
 
     # rollout request
     diffusion_num_steps: A[int, Arg(help="Denoising steps per rollout image.")] = 10
+    diffusion_eval_num_steps: A[
+        int | None, Arg(help="Denoising steps per eval image. Defaults to --diffusion-num-steps.")
+    ] = None
     diffusion_guidance_scale: A[float, Arg(help="Classifier-free guidance scale, used in rollout and training.")] = 4.5
     diffusion_negative_prompt: A[str | None, Arg(help="Negative prompt for classifier-free guidance.")] = None
     diffusion_height: A[int, Arg(help="Rollout image height.")] = 512
