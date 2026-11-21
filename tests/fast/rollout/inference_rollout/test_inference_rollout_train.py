@@ -6,20 +6,22 @@ from types import SimpleNamespace
 import pytest
 
 from miles.rollout.inference_rollout import inference_rollout_train
+from miles.rollout.inference_rollout.inference_rollout_common import RolloutGenerationHooks
 from miles.utils.output_store.plan import StorePlanError
 
 
 class TestAbort:
-    async def test_one_unresponsive_worker_does_not_stop_abort_cleanup(
-        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    @pytest.mark.parametrize("engine_abort", [True, False])
+    async def test_abort_drains_pending_groups(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, engine_abort: bool
     ) -> None:
-        """One failed worker abort still runs the agent hook and returns pending partial groups."""
         args = Namespace(
             partial_rollout=True,
             sglang_router_ip="router",
             sglang_router_port=30000,
         )
-        state = SimpleNamespace(args=args, aborted=False)
+        hooks = RolloutGenerationHooks() if engine_abort else RolloutGenerationHooks(engine_abort=False)
+        state = SimpleNamespace(args=args, aborted=False, hooks=hooks)
         sample = SimpleNamespace(response="partial", metadata={})
         hook_calls: list[Namespace] = []
         posted_urls: list[str] = []
@@ -50,11 +52,16 @@ class TestAbort:
         with caplog.at_level(logging.WARNING, logger=inference_rollout_train.__name__):
             aborted_groups = await inference_rollout_train.abort(state, {pending}, rollout_id=17)
 
-        assert posted_urls == ["http://healthy/abort_request", "http://unresponsive/abort_request"]
+        assert state.aborted
+        assert pending.done()
+        if engine_abort:
+            assert posted_urls == ["http://healthy/abort_request", "http://unresponsive/abort_request"]
+            assert "Failed to abort worker at http://unresponsive: worker cannot answer" in caplog.text
+        else:
+            assert posted_urls == []
         assert hook_calls == [args]
         assert aborted_groups == [[sample]]
         assert sample.metadata["start_rollout_id"] == 17
-        assert "Failed to abort worker at http://unresponsive: worker cannot answer" in caplog.text
 
 
 class TestGroupErrors:
