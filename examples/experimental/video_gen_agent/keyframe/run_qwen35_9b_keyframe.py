@@ -45,9 +45,11 @@ Args:
         h3-ref modes, one asset per subject or object; 3 otherwise; seconds: 2, or 4 in h3-ref mode).
     --max-prompt-words: a longer generator prompt gets an error reply (default 0, no cap: Linyu, 2026-11-10, "more
         detailed prompt might generate better video"); 120 is the survey's cap.
-    --reward: the signal terms, ``hpsv3+vqascore`` (default), ``hpsv3+unifiedreward``, ``hpsv3``, ``pickscore``,
-        ``pairwise`` or ``hpsv3+vqascore+motion``; --adherence-gate adds the judge's prompt-adherence gate, off by
-        default. ``pairwise`` is the Qwen3-VL judge's probability that the clip beats its request's one-shot clip
+    --reward: the signal terms, ``hpsv3+vqascore`` (default), ``hpsv3+videoalign-ta``, ``hpsv3+unifiedreward``,
+        ``hpsv3``, ``pickscore``, ``pairwise`` or ``hpsv3+vqascore+motion``; ``hpsv3+videoalign-ta`` puts VideoAlign's
+        text-alignment head in VQAScore's place, since LIN-3047 found it never flat within a group where VQAScore was
+        flat in 32% of them; --adherence-gate adds the judge's prompt-adherence gate, off by default.
+        ``pairwise`` is the Qwen3-VL judge's probability that the clip beats its request's one-shot clip
         (B0-ref in reference mode), shown both in both orders, with the OCR gate and no motion gate (LIN-2858); its
         anchors must be in --anchor-dir (default ``{data-dir}/video_gen_anchors_{video-mode}``, plus ``_{seconds}s`` for a
         --seconds other than the mode's default) before the run, made
@@ -118,6 +120,8 @@ _REQUEST_DIRS = {
 HPSV3 = "MizzenAI/HPSv3"
 HPSV3_BASE = "Qwen/Qwen2-VL-7B-Instruct"
 UNIFIED_REWARD = "CodeGoat24/UnifiedReward-2.0-qwen3vl-8b"
+VIDEOALIGN = "KwaiVGI/VideoReward"
+VIDEOALIGN_BASE = "Qwen/Qwen2-VL-2B-Instruct"
 PICKSCORE = "yuvalkirstain/PickScore_v1"
 PICKSCORE_PROCESSOR = "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"
 
@@ -232,6 +236,9 @@ _SIGNAL_RANGES = {
     "hpsv3": (-10.213, 11.652),
     "vqascore": (0.0, 1.0),
     "unifiedreward": (0.248, 3.229),
+    # The low end is the calibration minimum, but H3 clips reach 1.90 against the calibration's 1.23 (LIN-3047), so
+    # the top sits at 3 normalized units: standardizing within the group cancels the scale, and only a cap ties clips.
+    "videoalign_ta": (-2.855, 3.0),
     "pickscore": (0.604, 0.910),
     "pairwise": (0.0, 1.0),
     "motion": (0.0, 1.0),
@@ -240,6 +247,7 @@ _SIGNAL_RANGES = {
 # own (0.62, 0.29), so the survey's fallback, VQAScore on the request, takes its place by default (LIN-2821).
 _REWARDS = {
     "hpsv3+vqascore": ("hpsv3", "vqascore"),
+    "hpsv3+videoalign-ta": ("hpsv3", "videoalign_ta"),
     "hpsv3+unifiedreward": ("hpsv3", "unifiedreward"),
     "hpsv3": ("hpsv3",),
     "pickscore": ("pickscore",),
@@ -765,6 +773,7 @@ def _reward_models(args: ScriptArgs) -> list[str]:
         "hpsv3": [HPSV3, HPSV3_BASE],
         "vqascore": [],
         "unifiedreward": [UNIFIED_REWARD],
+        "videoalign_ta": [VIDEOALIGN, VIDEOALIGN_BASE],
         "pickscore": [PICKSCORE, PICKSCORE_PROCESSOR],
         "pairwise": [],
         "motion": [],
@@ -791,6 +800,14 @@ def _reward_pools(args: ScriptArgs) -> list[dict]:
         "unifiedreward": (
             "miles.rollout.rm_hub.video.unified_reward.UnifiedRewardScorer",
             {"model_path": args.local(UNIFIED_REWARD)},
+        ),
+        "videoalign_ta": (
+            "miles.rollout.rm_hub.video.videoalign.VideoAlignScorer",
+            {
+                "checkpoint_path": args.local(VIDEOALIGN),
+                "base_model_path": args.local(VIDEOALIGN_BASE),
+                "heads": ["TA"],
+            },
         ),
         "pickscore": (
             "miles.rollout.rm_hub.video.pickscore.VideoPickScoreScorer",

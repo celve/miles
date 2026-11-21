@@ -2,6 +2,7 @@ import shlex
 
 import examples.experimental.video_gen_agent.keyframe.run_qwen35_9b_keyframe as launcher
 import pytest
+from examples.experimental.video_gen_agent.gated_reward import clip_record
 from examples.experimental.video_gen_agent.keyframe.env import KeyframeEnvOptions
 from examples.experimental.video_gen_agent.keyframe.run_qwen35_9b_keyframe import (
     LIGHTX2V,
@@ -85,6 +86,7 @@ def test_each_layout_parses_with_two_frozen_generators_on_gpus_of_their_own(
         ("pickscore", False, ["pickscore"], {"motion", "pickscore", "ocr"}),
         ("hpsv3", True, ["hpsv3"], {"motion", "hpsv3", "adherence", "ocr"}),
         ("hpsv3+unifiedreward", False, ["hpsv3", "unifiedreward"], {"motion", "hpsv3", "unifiedreward", "ocr"}),
+        ("hpsv3+videoalign-ta", False, ["hpsv3", "videoalign_ta"], {"motion", "hpsv3", "videoalign_ta", "ocr"}),
         ("hpsv3+vqascore+motion", False, ["hpsv3", "vqascore", "motion"], {"motion", "hpsv3", "vqascore", "ocr"}),
     ],
 )
@@ -100,6 +102,24 @@ def test_the_reward_is_a_flag(monkeypatch, tmp_path, reward, adherence_gate, sig
         assert hook.video_reward_adherence_pool == "adherence" and hook.video_reward_adherence_threshold > 0
         adherence = next(pool for pool in config.reward_pools if pool.name == "adherence")
         assert adherence.scorer_kwargs["axis_weights"] == {"prompt_adherence": 1.0}
+
+
+def test_the_videoalign_reward_scores_ta_alone_in_vqascores_place_without_capping_h3_clips(monkeypatch, tmp_path):
+    config = _config(monkeypatch, tmp_path, num_gpus_per_node=8, video_mode="h3-ref", reward="hpsv3+videoalign-ta")
+
+    pools = {pool.name: pool for pool in config.reward_pools}
+    assert [config.reward_scaling.pools[n].gpu_offset for n in ("motion", "hpsv3", "videoalign_ta")] == [0, 1, 2]
+    assert pools["videoalign_ta"].colocated and pools["videoalign_ta"].uses_gpu
+    assert pools["videoalign_ta"].scorer_path == "miles.rollout.rm_hub.video.videoalign.VideoAlignScorer"
+    assert pools["videoalign_ta"].scorer_kwargs == {
+        "checkpoint_path": f"{tmp_path}/VideoReward",
+        "base_model_path": f"{tmp_path}/Qwen2-VL-2B-Instruct",
+        "heads": ["TA"],
+    }
+    hook = config.custom_rm_path.config
+    scores = {"signal:hpsv3": 5.0, "ocr": 0.0, "motion": 0.9}
+    terms = [clip_record(hook, scores | {"signal:videoalign_ta": ta})["terms"]["videoalign_ta"] for ta in (1.5, 1.9)]
+    assert 0 < terms[0] < terms[1] < 1
 
 
 def test_the_pairwise_reward_judges_against_the_anchors_with_the_ocr_gate_alone(monkeypatch, tmp_path):
@@ -303,6 +323,14 @@ def test_prepare_downloads_the_defaults_models_and_only_the_modes_lightx2v_loras
     assert not any("pip install ftfy==" in command for command in commands)
     assert loras.count("t2v_A14b") == 2 and "i2v" not in loras
     assert any("make_requests" in command for command in commands)
+
+
+def test_prepare_downloads_videoalign_and_its_base_for_the_videoalign_reward(monkeypatch, tmp_path):
+    commands = _recorded(monkeypatch, tmp_path, "prepare", video_mode="h3-ref", reward="hpsv3+videoalign-ta")
+
+    downloads = [command for command in commands if "hf download" in command]
+    for repo in ("KwaiVGI/VideoReward", "Qwen/Qwen2-VL-2B-Instruct", "MizzenAI/HPSv3"):
+        assert any(f"hf download {repo} " in command for command in downloads)
 
 
 def test_prepare_stops_on_missing_anchors_for_every_request_the_pairwise_reward_judges(monkeypatch, tmp_path):
