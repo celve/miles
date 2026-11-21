@@ -1,3 +1,4 @@
+import asyncio
 import json
 from argparse import Namespace
 from contextlib import asynccontextmanager
@@ -160,7 +161,7 @@ async def test_pickscore_scores_in_position_order_at_the_chosen_granularity(grou
     pools = _pickscore_pools()
     fn = _rollout(rm_type="pickscore", reward_pools=pools, group_rm=group_rm)
 
-    async with _fake_engine(fn):
+    async with asyncio.timeout(5), _fake_engine(fn):
         (group,) = (await fn(RolloutFnTrainInput(rollout_id=0))).samples
 
     assert pools["pickscore"].calls == batch_sizes
@@ -246,11 +247,16 @@ async def test_every_rollout_checks_pool_health_and_keeps_the_executor_owned_poo
     assert fn.reward_pools["pickscore"] is pools["pickscore"]
 
 
-async def test_sample_submission_filter_and_all_samples_hook_use_the_shared_loop(monkeypatch):
+async def test_sample_submission_filter_and_all_samples_hook_use_the_shared_loop(monkeypatch, tmp_path):
     fn = _rollout(
         rollout_submission_granularity="sample",
         rollout_sample_filter_path="test_filter",
         rollout_all_samples_process_path="test_process",
+    )
+    prompts = tmp_path / "prompts.jsonl"
+    prompts.write_text('{"input": "first"}\n{"input": "second"}\n')
+    fn.data_source = DiffusionPromptDataSource(
+        Namespace(**(dict(fn.state.args) | {"prompt_data": str(prompts), "rollout_shuffle": False}))
     )
     completions = []
     calls = []
