@@ -30,7 +30,8 @@ def _episodes(dump_dir: Path) -> list[dict]:
             record = sample["metadata"].get("video_reward") or {}
             episodes.append(
                 {
-                    "group": (path.stem, sample["group_index"]),
+                    # Group indices restart in every run, so a group is only one within its own dump.
+                    "group": (str(dump_dir), path.stem, sample["group_index"]),
                     "request_id": sample["metadata"].get("id"),
                     "reward": sample["reward"],
                     "scored": "scores" in record,

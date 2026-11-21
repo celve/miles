@@ -7,7 +7,6 @@ prompt through its end-of-turn token, and nothing else is. Each image placeholde
 token-space processor, as the rollout engines expand it, so the trainer's rebuild finds the tokens it expects.
 """
 
-import asyncio
 import logging
 
 import torch
@@ -16,18 +15,22 @@ from miles.backends.training_utils.data.token_space_media_process import (
     RolloutEngineProcessorArgs,
     build_trainer_processor,
 )
+from miles.rollout.base_types import (
+    BaseRolloutFn,
+    RolloutFnConstructorInput,
+    RolloutFnInput,
+    RolloutFnTrainOutput,
+)
 from miles.utils.chat_template_utils.template import extract_tool_dicts, normalize_tool_arguments
 from miles.utils.media_refs import collect_media_refs
 from miles.utils.processing_utils import load_tokenizer
 
-__all__ = ["generate_rollout", "render_episode"]
+__all__ = ["KeyframeSftRollout", "expand_images", "render_episode"]
 
 logger = logging.getLogger(__name__)
 
 IMAGE_PAD = "<|image_pad|>"
 END_OF_TURN = "<|im_end|>"
-
-_STATE: dict = {}
 
 
 def render_episode(tokenizer, messages: list[dict], tools: list[dict], **template_kwargs) -> tuple[list[int], list[int]]:
@@ -59,11 +62,11 @@ def _render(tokenizer, messages, tools, **kwargs) -> str:
     return tokenizer.apply_chat_template(messages, tools=tools, tokenize=False, **kwargs)
 
 
-def expand_images(core, tokens: list[int], mask: list[int], images: list[str], pad_id: int) -> tuple[list, list]:
+async def expand_images(core, tokens: list[int], mask: list[int], images: list[str], pad_id: int) -> tuple[list, list]:
     """Each image's single placeholder expanded to its token count, as the engines expand it; untrained."""
     if not images:
         return tokens, mask
-    output = asyncio.run(core.process(image_data=images, input_ids=tokens, mm_token_expansion_start_len=0))
+    output = await core.process(image_data=images, input_ids=tokens, mm_token_expansion_start_len=0)
     expanded = output["input_ids"][0].tolist()
     expanded_mask, i = [], 0
     for token in expanded:
@@ -79,40 +82,45 @@ def expand_images(core, tokens: list[int], mask: list[int], images: list[str], p
     return expanded, expanded_mask
 
 
-def _setup(args) -> dict:
-    if not _STATE:
-        tokenizer = load_tokenizer(args.hf_checkpoint, chat_template_path=args.chat_template_path, trust_remote_code=True)
-        engine_args = RolloutEngineProcessorArgs.from_sglang_config(args.sglang, hf_checkpoint=args.hf_checkpoint)
-        core = build_trainer_processor(
-            engine_args, mm_processor_worker_num=1, mm_io_worker_num=0, device=torch.device("cpu")
-        ).core
-        _STATE.update(
-            tokenizer=tokenizer,
-            core=core,
-            pad_id=tokenizer.convert_tokens_to_ids(IMAGE_PAD),
-            kwargs=dict(args.apply_chat_template_kwargs or {}),
+def _processor_core(args):
+    """SGLang's token-space processor, built from the run's engine settings the way the trainer builds its own."""
+    engine_args = RolloutEngineProcessorArgs.from_sglang_config(args.sglang, hf_checkpoint=args.hf_checkpoint)
+    return build_trainer_processor(
+        engine_args, mm_processor_worker_num=1, mm_io_worker_num=0, device=torch.device("cpu")
+    ).core
+
+
+class KeyframeSftRollout(BaseRolloutFn):
+    """``--rollout-function-path`` for an SFT run on rows of recorded episodes; async, since the executor awaits it on
+    its own event loop and the processor is a coroutine."""
+
+    def __init__(self, input: RolloutFnConstructorInput) -> None:
+        super().__init__(input)
+        self.args, self.data_source = input.args, input.data_source
+        self.tokenizer = load_tokenizer(
+            self.args.hf_checkpoint, chat_template_path=self.args.chat_template_path, trust_remote_code=True
         )
-    return _STATE
+        self.template_kwargs = dict(self.args.apply_chat_template_kwargs or {})
+        self.pad_id = self.tokenizer.convert_tokens_to_ids(IMAGE_PAD)
+        self.core = _processor_core(self.args)
 
+    async def __call__(self, input: RolloutFnInput) -> RolloutFnTrainOutput:
+        assert not input.evaluation, "an SFT run on recorded episodes has no eval"
+        groups = self.data_source.get_samples(self.args.rollout_batch_size)
+        for (sample,) in groups:
+            await self._fill(sample)
+        if input.rollout_id == 0:
+            logger.info(f"keyframe SFT: {len(groups)} episodes, the first {len(groups[0][0].tokens)} tokens")
+        return RolloutFnTrainOutput(samples=groups)
 
-def generate_rollout(args, rollout_id, data_buffer, evaluation=False):
-    """``--rollout-function-path`` for an SFT run on rows of recorded episodes."""
-    assert not evaluation, "an SFT run on recorded episodes has no eval"
-    state = _setup(args)
-    samples = data_buffer.get_samples(args.rollout_batch_size)
-    out = []
-    for (sample,) in samples:
+    async def _fill(self, sample) -> None:
         messages, tools = sample.prompt, sample.metadata.get("tools")
-        tokens, mask = render_episode(state["tokenizer"], messages, tools, **state["kwargs"])
+        tokens, mask = render_episode(self.tokenizer, messages, tools, **self.template_kwargs)
         images = (collect_media_refs(messages, None) or {}).get("images") or []
-        tokens, mask = expand_images(state["core"], tokens, mask, images, state["pad_id"])
+        tokens, mask = await expand_images(self.core, tokens, mask, images, self.pad_id)
         response_length = len(mask) - mask.index(1)
         sample.tokens = tokens
         sample.response_length = response_length
         sample.loss_mask = mask[-response_length:]
         sample.multimodal_inputs = {"images": images} if images else None
         sample.reward = 0
-        out.append(sample)
-    if rollout_id == 0:
-        logger.info(f"keyframe SFT: {len(out)} episodes, first has {len(out[0].tokens)} tokens")
-    return out

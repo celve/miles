@@ -69,8 +69,9 @@ Args:
     --model-dir, --data-dir: where models and the requests live; checkpoints, images and clips go under --output-dir.
     --sft-data: an SFT run instead of RL, on the train.jsonl of a directory ``keyframe.sft_data`` wrote from recorded
         episodes of any planner, re-rendered for this one by ``keyframe.sft_rollout``; --sft-epochs (2) at --sft-lr
-        (1e-5), --rollout-batch-size episodes a step, all GPUs training. It saves under the run's ``checkpoints`` and
-        exports HF weights to its ``hf``.
+        (1e-5), --rollout-batch-size episodes a step, all GPUs training; Miles takes floor(rows / batch) steps an
+        epoch, so each pass leaves the remainder unseen. It saves under the run's ``checkpoints`` and exports HF weights
+        to its ``hf``; ``keyframe.sft_heldout_loss`` scores the held-out rows on that export and on the base planner.
     --init-checkpoint: such an SFT run's directory, which an RL run then starts from and keeps as its KL reference.
 
 Example:
@@ -691,7 +692,7 @@ def _train_args(args: ScriptArgs) -> str:
         "--use-tis "
     )
 
-    optimizer_args = _optimizer_args(args, lr=1e-6)
+    optimizer_args = _optimizer_args(args, lr="1e-6")
 
     sglang_args = (
         f"--sglang-config {command_utils.encode_pseudo_file(yaml.safe_dump(_sglang_config(args)))} "
@@ -710,7 +711,7 @@ def _train_args(args: ScriptArgs) -> str:
 def _sft_train_args(args: ScriptArgs) -> str:
     """Supervised training on recorded episodes: no engines, every GPU a data-parallel copy of the trainer."""
     sft_args = (
-        f"--rollout-function-path {AGENT}.keyframe.sft_rollout.generate_rollout "
+        f"--rollout-function-path {AGENT}.keyframe.sft_rollout.KeyframeSftRollout "
         f"--prompt-data {args.sft_data}/train.jsonl --input-key messages --tool-key tools --rollout-shuffle "
         f"--num-epoch {args.sft_epochs} "
         f"--rollout-batch-size {args.rollout_batch_size} --global-batch-size {args.rollout_batch_size} "
@@ -724,7 +725,7 @@ def _sft_train_args(args: ScriptArgs) -> str:
     template, template_kwargs = resolve_fixed_chat_template(args.recipe.tito_model)
     sft_args += f"--chat-template-path {template} --apply-chat-template-kwargs '{json.dumps(template_kwargs)}' "
     return (
-        f"{_ckpt_args(args)} {sft_args} {_multimodal_args(args)} {_optimizer_args(args, lr=args.sft_lr)} "
+        f"{_ckpt_args(args)} {sft_args} {_multimodal_args(args)} {_optimizer_args(args, lr=f"{args.sft_lr:g}")} "
         f"{command_utils.get_default_wandb_args(__file__, run_id=args.run_id)} "
         f"{_perf_args(args)} {_misc_args(args, actor_gpus=args.num_gpus_per_node)} {args.extra_args} "
     )
@@ -739,9 +740,9 @@ def _multimodal_args(args: ScriptArgs) -> str:
     )
 
 
-def _optimizer_args(args: ScriptArgs, *, lr: float) -> str:
+def _optimizer_args(args: ScriptArgs, *, lr: str) -> str:
     optimizer_args = (
-        f"--optimizer adam --lr {lr:g} --lr-decay-style constant --weight-decay 0.0 --adam-beta1 0.9 --adam-beta2 0.999 "
+        f"--optimizer adam --lr {lr} --lr-decay-style constant --weight-decay 0.0 --adam-beta1 0.9 --adam-beta2 0.999 "
     )
     if args.optimizer_cpu_offload:
         optimizer_args += "--optimizer-cpu-offload --overlap-cpu-optimizer-d2h-h2d --use-precision-aware-optimizer "
