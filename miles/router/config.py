@@ -8,9 +8,13 @@ class MilesRouterConfig(FrozenStrictBaseModel):
     timeout: float | None
     health_check_interval: float
     health_check_failure_threshold: int
+    # header whose value places a request by consistent hash; None places every request on the least-busy engine
+    routing_key_header: str | None
 
 
-def compute_miles_router_config(args, *, host: str, port: int) -> MilesRouterConfig:
+def compute_miles_router_config(
+    args, *, host: str, port: int, routing_key_header: str | None = None
+) -> MilesRouterConfig:
     return MilesRouterConfig(
         host=host,
         port=port,
@@ -18,4 +22,5 @@ def compute_miles_router_config(args, *, host: str, port: int) -> MilesRouterCon
         timeout=args.miles_router_timeout,
         health_check_interval=args.rollout_health_check_interval,
         health_check_failure_threshold=args.miles_router_health_check_failure_threshold,
+        routing_key_header=routing_key_header,
     )

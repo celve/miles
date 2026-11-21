@@ -120,17 +120,28 @@ class SGLangRouterBackend(RouterBackend):
 
 class MilesRouterBackend(RouterBackend):
     kind = RouterKind.MILES
-    features = RouterFeatures(pd_disaggregation=False, routing_key_header=None)
+    features = RouterFeatures(pd_disaggregation=False, routing_key_header="X-SMG-Routing-Key")
+    # the one policy the Miles router reads; any other leaves it least-busy
+    _KEY_POLICY = "consistent_hashing"
+
+    def __init__(self, args: Namespace) -> None:
+        super().__init__(args)
+        self._routes_by_key = resolve_router_policies(args)["policy"] == self._KEY_POLICY
 
     def _launch_argv(
         self, ctx: LaunchCommandContext, *, model_cfg: "ModelConfig", interpreter_prefix: list[str]
     ) -> list[str]:
         primary = ctx.self_addrs["primary"]
-        router_config = compute_miles_router_config(self.args, host=primary.host, port=primary.port)
+        router_config = compute_miles_router_config(
+            self.args,
+            host=primary.host,
+            port=primary.port,
+            routing_key_header=self.features.routing_key_header if self._routes_by_key else None,
+        )
         return [*interpreter_prefix, "-m", "miles.router.router", *config_to_argv(router_config)]
 
     def _router_routes_by_key(self, model_cfg: "ModelConfig | None") -> bool:
-        return False
+        return self._routes_by_key
 
 
 _BACKEND_CLASSES: dict[RouterKind, type[RouterBackend]] = {

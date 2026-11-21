@@ -7,7 +7,9 @@ from tests.fast.fixtures.args_fixtures import parser_defaults, sglang_router_arg
 from miles.backends.sglang_utils.sglang_api_client import WorkerType
 from miles.backends.sglang_utils.sglang_config import ModelConfig, ServerGroupConfig
 from miles.router.backend import _BACKEND_CLASSES, RouterKind, make_router_backend
+from miles.router.config import MilesRouterConfig
 from miles.utils.args.configs.router import RouterConfig
+from miles.utils.workers.argv_utils import parse_config_argv
 
 
 def _model_cfg(*worker_types: WorkerType) -> ModelConfig:
@@ -32,14 +34,18 @@ def test_every_router_kind_has_its_own_backend():
         ("sglang", "manual", {"X-SMG-Routing-Key": "key-1"}),
         ("sglang", "cache_aware", {}),
         ("sglang", None, {}),
+        ("miles", "consistent_hashing", {"X-SMG-Routing-Key": "key-1"}),
         ("miles", "manual", {}),
+        ("miles", None, {}),
     ],
     ids=[
         "sgl-router-consistent-hashing",
         "sgl-router-manual",
         "sgl-router-cache-aware",
         "sgl-router-default",
-        "miles-router",
+        "miles-router-consistent-hashing",
+        "miles-router-manual",
+        "miles-router-default",
     ],
 )
 def test_a_routing_key_header_is_sent_only_to_a_router_that_reads_it(router, policy, expected):
@@ -125,3 +131,15 @@ def test_a_key_is_sent_when_any_models_router_reads_it(model_cfgs, expected):
     backend = make_router_backend(Namespace(**flags | RouterConfig.from_args(Namespace(**flags))))
 
     assert backend.routes_by_key(model_cfgs) is expected
+
+
+@pytest.mark.parametrize("policy, expected", [("consistent_hashing", "X-SMG-Routing-Key"), (None, None)])
+def test_the_miles_router_is_launched_to_route_by_the_key_its_backend_sends(policy, expected):
+    args = Namespace(**parser_defaults() | {"router": "miles", "sglang_router_policy": policy})
+    ctx = SimpleNamespace(self_addrs={"primary": SimpleNamespace(host="10.0.0.1", port=3000)})
+
+    argv = make_router_backend(args).launch_argv(ctx, model_cfg=_REGULAR, interpreter_prefix=["python"])
+
+    config = parse_config_argv(MilesRouterConfig, argv[3:])
+    assert config.routing_key_header == expected
+    assert make_router_backend(args).routing_headers("key-1", [_REGULAR]) == ({expected: "key-1"} if expected else {})
