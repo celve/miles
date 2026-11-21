@@ -67,6 +67,11 @@ Args:
         ``0,final``; ``every`` runs them at every eval; a rollout no eval reaches is refused). The suggested length only splits eval: --seconds sets every clip's length.
         VidProM and MovieGenBench are CC-BY-NC-4.0: prepare fetches them at pinned revisions and nothing copies them.
     --model-dir, --data-dir: where models and the requests live; checkpoints, images and clips go under --output-dir.
+    --sft-data: an SFT run instead of RL, on the train.jsonl of a directory ``keyframe.sft_data`` wrote from recorded
+        episodes of any planner, re-rendered for this one by ``keyframe.sft_rollout``; --sft-epochs (2) at --sft-lr
+        (1e-5), --rollout-batch-size episodes a step, all GPUs training. It saves under the run's ``checkpoints`` and
+        exports HF weights to its ``hf``.
+    --init-checkpoint: such an SFT run's directory, which an RL run then starts from and keeps as its KL reference.
 
 Example:
     python examples/experimental/video_gen_agent/keyframe/run_qwen35_9b_keyframe.py --num-gpus-per-node 4
@@ -74,6 +79,8 @@ Example:
     python examples/experimental/video_gen_agent/keyframe/run_qwen35_9b_keyframe.py --image-model Qwen/Qwen-Image-2.1-Turbo
     python examples/experimental/video_gen_agent/keyframe/run_qwen35_9b_keyframe.py --planner qwen3.8-27b
     python examples/experimental/video_gen_agent/keyframe/run_qwen35_9b_keyframe.py --video-mode h3-ref --requests t2v-compbench
+    python examples/experimental/video_gen_agent/keyframe/run_qwen35_9b_keyframe.py --run-id sft --sft-data /root/sft
+    python examples/experimental/video_gen_agent/keyframe/run_qwen35_9b_keyframe.py --init-checkpoint /root/shared_data/sft
 """
 
 import math
@@ -302,10 +309,15 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     model_dir: str = "/root/models"
     data_dir: str = "/root/datasets"
     megatron_path: str = "/root/Megatron-LM"
+    sft_data: str | None = None
+    sft_epochs: int = 2
+    sft_lr: float = 1e-5
+    init_checkpoint: str | None = None
     extra_args: str = ""
 
     def __post_init__(self):
         assert self.num_nodes == 1, "the recipe places its trainer, engines and judge on one node"
+        assert not (self.sft_data and self.init_checkpoint), "--init-checkpoint starts an RL run, not an SFT one"
         assert self.planner in _PLANNERS, f"--planner is one of {sorted(_PLANNERS)}"
         if self.optimizer_cpu_offload is None:
             self.optimizer_cpu_offload = self.recipe.optimizer_cpu_offload
@@ -587,18 +599,28 @@ def _agent_env(args: ScriptArgs) -> dict[str, str]:
     return env
 
 
-def _train_args(args: ScriptArgs) -> str:
+def _ckpt_args(args: ScriptArgs) -> str:
     planner_path = args.local(args.recipe.repo)
-    reasoning_parser, tool_call_parser = resolve_reasoning_and_tool_call_parser(args.recipe.tito_model)
-
+    hf_path, ref_path = planner_path, f"{planner_path}_torch_dist"
+    if args.init_checkpoint:
+        # The SFT run's weights: the policy starts from them, the KL reference stays on them, and step 0's eval
+        # engine, which loads --hf-checkpoint rather than the trainer's weights, serves them too.
+        hf_path, ref_path = f"{args.init_checkpoint}/hf", f"{args.init_checkpoint}/checkpoints"
     # A fresh --load directory starts the run from the --ref-load weights at rollout 0.
-    ckpt_args = (
-        f"--hf-checkpoint {planner_path} "
-        f"--ref-load {planner_path}_torch_dist "
+    return (
+        f"--hf-checkpoint {hf_path} "
+        f"--ref-load {ref_path} "
         f"--load {args.run_dir}/checkpoints --save {args.run_dir}/checkpoints --save-interval 50 "
         "--megatron-to-hf-mode raw "
         "--custom-model-provider-path miles_plugins.models.qwen3_5.qwen3_5_mm_model_provider "
     )
+
+
+def _train_args(args: ScriptArgs) -> str:
+    if args.sft_data:
+        return _sft_train_args(args)
+    reasoning_parser, tool_call_parser = resolve_reasoning_and_tool_call_parser(args.recipe.tito_model)
+    ckpt_args = _ckpt_args(args)
 
     # 2,048 tokens a turn: the multi-turn recipe lost held-out episodes to thinking turns cut at 1,024.
     rollout_args = (
@@ -627,12 +649,7 @@ def _train_args(args: ScriptArgs) -> str:
         f"--custom-eval-rollout-log-function-path {AGENT}.multiturn.episode_metrics.log_eval_episodes "
     )
 
-    multimodal_args = (
-        "--multimodal-token-space-processing "
-        "--sglang-enable-token-space-processor "
-        f"--shared-media-dir {args.run_dir}/media "
-        "--trainer-mm-processor-worker-num 8 --trainer-mm-io-worker-num 8 "
-    )
+    multimodal_args = _multimodal_args(args)
     if args.feature_cache:
         # Images are written by content hash and never rewritten, so a cached path never goes stale.
         multimodal_args += (
@@ -672,11 +689,7 @@ def _train_args(args: ScriptArgs) -> str:
         "--use-tis "
     )
 
-    optimizer_args = (
-        "--optimizer adam --lr 1e-6 --lr-decay-style constant --weight-decay 0.0 --adam-beta1 0.9 --adam-beta2 0.999 "
-    )
-    if args.optimizer_cpu_offload:
-        optimizer_args += "--optimizer-cpu-offload --overlap-cpu-optimizer-d2h-h2d --use-precision-aware-optimizer "
+    optimizer_args = _optimizer_args(args, lr=1e-6)
 
     sglang_args = (
         f"--sglang-config {command_utils.encode_pseudo_file(yaml.safe_dump(_sglang_config(args)))} "
@@ -685,7 +698,53 @@ def _train_args(args: ScriptArgs) -> str:
         "--sglang-mem-fraction-static 0.6 "
     )
 
-    perf_args = (
+    return (
+        f"{ckpt_args} {rollout_args} {agent_args} {multimodal_args} {reward_args} {eval_args} {grpo_args} "
+        f"{optimizer_args} {command_utils.get_default_wandb_args(__file__, run_id=args.run_id)} "
+        f"{sglang_args} {_perf_args(args)} {_misc_args(args, actor_gpus=args.train_gpus)} {args.extra_args} "
+    )
+
+
+def _sft_train_args(args: ScriptArgs) -> str:
+    """Supervised training on recorded episodes: no engines, every GPU a data-parallel copy of the trainer."""
+    sft_args = (
+        f"--rollout-function-path {AGENT}.keyframe.sft_rollout.generate_rollout "
+        f"--prompt-data {args.sft_data}/train.jsonl --input-key messages --tool-key tools --rollout-shuffle "
+        f"--num-epoch {args.sft_epochs} "
+        f"--rollout-batch-size {args.rollout_batch_size} --global-batch-size {args.rollout_batch_size} "
+        "--max-seq-len 16384 "
+        "--loss-type sft_loss --calculate-per-token-loss --disable-compute-advantages-and-returns "
+        "--debug-train-only "
+        f"--tito-model {args.recipe.tito_model} "
+        f"--save-hf {args.run_dir}/hf "
+    )
+    return (
+        f"{_ckpt_args(args)} {sft_args} {_multimodal_args(args)} {_optimizer_args(args, lr=args.sft_lr)} "
+        f"{command_utils.get_default_wandb_args(__file__, run_id=args.run_id)} "
+        f"{_perf_args(args)} {_misc_args(args, actor_gpus=args.num_gpus_per_node)} {args.extra_args} "
+    )
+
+
+def _multimodal_args(args: ScriptArgs) -> str:
+    return (
+        "--multimodal-token-space-processing "
+        "--sglang-enable-token-space-processor "
+        f"--shared-media-dir {args.run_dir}/media "
+        "--trainer-mm-processor-worker-num 8 --trainer-mm-io-worker-num 8 "
+    )
+
+
+def _optimizer_args(args: ScriptArgs, *, lr: float) -> str:
+    optimizer_args = (
+        f"--optimizer adam --lr {lr:g} --lr-decay-style constant --weight-decay 0.0 --adam-beta1 0.9 --adam-beta2 0.999 "
+    )
+    if args.optimizer_cpu_offload:
+        optimizer_args += "--optimizer-cpu-offload --overlap-cpu-optimizer-d2h-h2d --use-precision-aware-optimizer "
+    return optimizer_args
+
+
+def _perf_args(args: ScriptArgs) -> str:
+    return (
         f"--tensor-model-parallel-size {args.train_gpus} "
         "--sequence-parallel "
         "--pipeline-model-parallel-size 1 "
@@ -697,22 +756,18 @@ def _train_args(args: ScriptArgs) -> str:
         "--max-tokens-per-gpu 20480 "
     )
 
-    misc_args = (
+
+def _misc_args(args: ScriptArgs, *, actor_gpus: int) -> str:
+    return (
         "--attention-dropout 0.0 "
         "--hidden-dropout 0.0 "
         "--accumulate-allreduce-grads-in-fp32 "
         "--attention-softmax-in-fp32 "
         "--attention-backend flash "
         f"--actor-num-nodes {args.num_nodes} "
-        f"--actor-num-gpus-per-node {args.train_gpus} "
+        f"--actor-num-gpus-per-node {actor_gpus} "
         f"--num-gpus-per-node {args.num_gpus_per_node} "
         f"--dump-details {args.run_dir}/dump_details "
-    )
-
-    return (
-        f"{ckpt_args} {rollout_args} {agent_args} {multimodal_args} {reward_args} {eval_args} {grpo_args} "
-        f"{optimizer_args} {command_utils.get_default_wandb_args(__file__, run_id=args.run_id)} "
-        f"{sglang_args} {perf_args} {misc_args} {args.extra_args} "
     )
 
 
