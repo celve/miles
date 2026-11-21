@@ -43,6 +43,7 @@ export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && ray job submit
   --rm-type pickscore
   --diffusion-pickscore-num-workers 1
   --diffusion-pickscore-num-gpus-per-worker 1.0
+  --diffusion-pickscore-placement dedicated
   --diffusion-pickscore-batch-size 8
   --diffusion-pickscore-model-path /root/models/PickScore_v1
   --diffusion-pickscore-processor-path /root/models/CLIP-ViT-H-14-laion2B-s32B-b79K 
@@ -53,7 +54,7 @@ export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && ray job submit
   --diffusion-lora-alpha 128
   --diffusion-lora-init gaussian 
   --use-miles-router
-  --sglang-server-concurrency 8
+  --sglang-server-concurrency 64
   --update-weight-buffer-size 2147483648 
   --train-backend fsdp
   --diffusion-forward-dtype bf16

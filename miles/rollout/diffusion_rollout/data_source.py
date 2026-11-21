@@ -33,6 +33,11 @@ class DiffusionPromptDataSource(DataSource):
         """The prompt list; its length is what `--num-epoch` counts."""
         return self.prompts
 
+    @property
+    def sample_index_offset(self) -> int:
+        # Resuming with a different group size keeps both checkpointed indices.
+        return self.sample_index - self.sample_group_index * self.args.n_samples_per_prompt
+
     def get_samples(self, num_samples: int) -> list[list[Sample]]:
         groups = []
         for _ in range(num_samples):

@@ -1,7 +1,11 @@
+import asyncio
+import json
 import random
 from argparse import Namespace
+from itertools import permutations
 from types import SimpleNamespace
 
+import httpx
 import msgpack
 import numpy as np
 import pytest
@@ -9,12 +13,17 @@ import torch
 from safetensors.torch import save
 
 from miles.ray.rollout.rollout_executor import RolloutExecutor
+from miles.rollout.base_types import GenerateFnInput
+from miles.rollout.diffusion_rollout.client import ImageClient, parse_rollout_response
 from miles.rollout.diffusion_rollout.data_source import DiffusionPromptDataSource
-from miles.rollout.diffusion_rollout.response import parse_rollout_response
+from miles.rollout.diffusion_rollout.dispatch import MicrogroupDispatcher
+from miles.rollout.diffusion_rollout.generate import generate, use_image_client
 from miles.rollout.diffusion_rollout.rollout_fn import build_sampling_params
 from miles.rollout.diffusion_rollout.step_strategy import epoch_global_random_choice, sde_window
 from miles.rollout.rm_hub.ocr import image_to_rgb_uint8, ocr_reward, ocr_target_text
+from miles.utils.diffusion.types import DiffusionRollout
 from miles.utils.simple_checkpointer import save_simple_checkpoint
+from miles.utils.types import Sample
 
 
 def _tensor(t):
@@ -250,3 +259,102 @@ def test_drawing_every_candidate_takes_them_all_in_order():
 def test_candidate_steps_must_be_given_and_inside_the_schedule(candidates, message):
     with pytest.raises(ValueError, match=message):
         _choice(0, candidates=candidates)
+
+
+def _index_window(args, sample, num_steps, seed):
+    return [sample.index % num_steps], [num_steps]
+
+
+@pytest.mark.parametrize("order", list(permutations(range(3))))
+@pytest.mark.parametrize("tail_order", [(3, 4), (4, 3)])
+async def test_first_arrival_sends_the_same_body_and_every_follower_gets_its_image(order, tail_order):
+    args = _request_args(
+        loss_type="flow_grpo",
+        diffusion_step_strategy_path=f"{__name__}._index_window",
+        n_samples_per_prompt=5,
+        diffusion_microgroup_size=3,
+        rollout_seed=2**31 - 12,
+        group_rm=True,
+        sglang_router_ip="localhost",
+        sglang_router_port=1,
+    )
+    samples = [Sample(group_index=2, index=i, prompt="p") for i in range(10, 15)]
+    sampling_params = build_sampling_params(args)
+    requests = []
+
+    async def respond(request):
+        assert request.url.path == "/rollout/generate"
+        body = json.loads(request.content)
+        requests.append(body)
+        return httpx.Response(
+            200,
+            content=msgpack.packb(
+                [{"request_id": str(position)} for position in range(body["num_outputs_per_prompt"])]
+            ),
+        )
+
+    client = ImageClient(args, {})
+    await client._http.aclose()
+    client._http = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+
+    try:
+        with use_image_client(client):
+            arrivals = [*order, *tail_order]
+            results = await asyncio.gather(
+                *(
+                    generate(
+                        GenerateFnInput(
+                            state=SimpleNamespace(args=args),
+                            sample=samples[position],
+                            sampling_params={**sampling_params, "sampling_seed": args.rollout_seed + position},
+                            evaluation=False,
+                        )
+                    )
+                    for position in arrivals
+                )
+            )
+        assert [result.samples for result in results] == [samples[i] for i in arrivals]
+        assert requests == [
+            {
+                **sampling_params,
+                "seed": 2**31 - 2 + start,
+                "rollout_sde_step_indices": [start],
+                "rollout_return_step_indices": None,
+                "prompt": "p",
+                "num_outputs_per_prompt": size,
+            }
+            for start, size in [(0, 3), (3, 2)]
+        ]
+        assert [sample.diffusion.seed for sample in samples] == list(range(2**31 - 2, 2**31 + 3))
+        assert [sample.diffusion.request_id for sample in samples] == ["0", "1", "2", "0", "1"]
+        assert [sample.diffusion.sde_step_indices for sample in samples] == [[0], [0], [0], [3], [3]]
+        assert all(sample.status == Sample.Status.COMPLETED for sample in samples)
+        assert client.dispatcher._inflight == {}
+    finally:
+        await client.dispose()
+
+
+async def test_reset_releases_a_result_when_a_follower_never_arrived():
+    args = _request_args(
+        loss_type="flow_grpo",
+        diffusion_step_strategy_path=f"{__name__}._index_window",
+        n_samples_per_prompt=2,
+        diffusion_microgroup_size=2,
+        rollout_seed=0,
+        group_rm=True,
+    )
+    params = build_sampling_params(args)
+    calls = []
+
+    async def request(body):
+        calls.append(body)
+        return [DiffusionRollout(), DiffusionRollout()]
+
+    dispatcher = MicrogroupDispatcher(args, request, {})
+    first, _ = await dispatcher.generate(Sample(group_index=0, index=1), params)
+    assert len(dispatcher._inflight) == 1
+    dispatcher.reset()
+    assert dispatcher._inflight == {}
+
+    second, _ = await dispatcher.generate(Sample(group_index=0, index=0), params)
+    assert len(calls) == 2 and first.seed == 1 and second.seed == 0
