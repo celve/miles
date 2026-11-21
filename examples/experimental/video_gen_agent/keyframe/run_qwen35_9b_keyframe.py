@@ -45,11 +45,11 @@ Args:
         h3-ref modes, one asset per subject or object; 3 otherwise; seconds: 2, or 4 in h3-ref mode).
     --max-prompt-words: a longer generator prompt gets an error reply (default 0, no cap: Linyu, 2026-11-10, "more
         detailed prompt might generate better video"); 120 is the survey's cap.
-    --reward: the signal terms, ``hpsv3+vqascore`` (default), ``hpsv3+videoalign-ta``, ``hpsv3+unifiedreward``, ``hpsv3``,
-        ``pickscore``, ``pairwise`` or ``hpsv3+vqascore+motion``; ``hpsv3+videoalign-ta`` puts VideoAlign's text-alignment
-        head in VQAScore's place, which LIN-3047 found never flat within a group where VQAScore was flat in 32% of
-        them; --adherence-gate adds the judge's prompt-adherence gate, off by
-        default. ``pairwise`` is the Qwen3-VL judge's probability that the clip beats its request's one-shot clip
+    --reward: the signal terms, ``hpsv3+vqascore`` (default), ``hpsv3+videoalign-ta``, ``hpsv3+unifiedreward``,
+        ``hpsv3``, ``pickscore``, ``pairwise`` or ``hpsv3+vqascore+motion``; ``hpsv3+videoalign-ta`` puts VideoAlign's
+        text-alignment head in VQAScore's place, since LIN-3047 found it never flat within a group where VQAScore was
+        flat in 32% of them; --adherence-gate adds the judge's prompt-adherence gate, off by default.
+        ``pairwise`` is the Qwen3-VL judge's probability that the clip beats its request's one-shot clip
         (B0-ref in reference mode), shown both in both orders, with the OCR gate and no motion gate (LIN-2858); its
         anchors must be in --anchor-dir (default ``{data-dir}/video_gen_anchors_{video-mode}``, plus ``_{seconds}s`` for a
         --seconds other than the mode's default) before the run, made
@@ -803,7 +803,11 @@ def _reward_pools(args: ScriptArgs) -> list[dict]:
         ),
         "videoalign_ta": (
             "miles.rollout.rm_hub.video.videoalign.VideoAlignScorer",
-            {"checkpoint_path": args.local(VIDEOALIGN), "base_model_path": args.local(VIDEOALIGN_BASE), "heads": ["TA"]},
+            {
+                "checkpoint_path": args.local(VIDEOALIGN),
+                "base_model_path": args.local(VIDEOALIGN_BASE),
+                "heads": ["TA"],
+            },
         ),
         "pickscore": (
             "miles.rollout.rm_hub.video.pickscore.VideoPickScoreScorer",
