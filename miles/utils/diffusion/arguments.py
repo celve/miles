@@ -51,6 +51,11 @@ _UNSUPPORTED = [
         lambda a: a.diffusion_eval_num_steps is not None and a.diffusion_eval_num_steps < 1,
     ),
     ("fully async or partial rollout", lambda a: a.fully_async or a.partial_rollout),
+    (
+        "--dynamic-sampling-filter-path with epoch_global_random_choice, since refill groups can draw different SDE steps",
+        lambda a: a.dynamic_sampling_filter_path is not None
+        and a.diffusion_step_strategy_path == f"{step_strategy.__name__}.epoch_global_random_choice",
+    ),
     ("--over-sampling-batch-size without diffusion engine abort", lambda a: a.over_sampling_batch_size is not None),
     (
         "--rollout-sample-filter-path, which marks samples the diffusion converter cannot skip",

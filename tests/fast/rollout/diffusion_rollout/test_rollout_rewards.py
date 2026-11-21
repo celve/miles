@@ -22,6 +22,7 @@ from miles.utils.args.custom_view import ImmutableNamespace
 from miles.utils.diffusion.types import DiffusionRollout
 from miles.utils.eval_config import EvalDatasetConfig
 from miles.utils.function_registry import function_registry
+from miles.utils.retry_utils import NonRetryableError
 from miles.utils.types import Sample
 
 
@@ -123,6 +124,22 @@ async def test_ocr_runs_through_rm_hub_with_a_pool_in_both_reward_modes(group_rm
     assert [sample.diffusion.rollout_id for sample in group] == [8] * 4
     assert [sample.lineage.source_sample_index for sample in group] == list(range(4))
     assert fn.reward_pools["ocr"].scored == [(5, 6, 3)] * 4
+
+
+async def failing_reward(args, samples):
+    raise RuntimeError("group scorer unavailable")
+
+
+async def test_group_reward_failure_stops_the_diffusion_rollout():
+    fn = _rollout(group_rm=True, custom_rm_path=CustomFunctionConfig(path=f"{__name__}.failing_reward"))
+    fn.data_source.get_samples = Mock(side_effect=[[_group()], AssertionError("unexpected refill")])
+
+    async with _fake_engine(fn):
+        with pytest.raises(NonRetryableError, match="group scorer unavailable") as failure:
+            await fn(RolloutFnTrainInput(rollout_id=0))
+
+    assert isinstance(failure.value.__cause__, RuntimeError)
+    fn.data_source.get_samples.assert_called_once_with(1)
 
 
 async def constant_reward(args, samples):
