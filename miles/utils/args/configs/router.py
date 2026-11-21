@@ -21,7 +21,10 @@ class RouterConfig(BaseConfig):
     sglang_router_port: A[int | None, Arg(help="Port of the SGLang router")] = None
     sglang_router_policy: A[
         str | None,
-        Arg(help="Routing policy for the SGLang router (e.g., 'consistent_hashing', 'round_robin')"),
+        Arg(
+            help="Routing policy for the SGLang router (e.g., 'consistent_hashing', 'round_robin'); the Miles router "
+            "reads only 'consistent_hashing', placing each session on one engine, and is least-busy otherwise"
+        ),
     ] = None
     sglang_router_request_timeout_secs: A[
         int,

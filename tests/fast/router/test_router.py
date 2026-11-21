@@ -26,6 +26,7 @@ def make_router_config(router_port: int, **overrides) -> MilesRouterConfig:
         health_check_failure_threshold=3,
         max_connections=100,
         timeout=None,
+        routing_key_header=None,
     )
     defaults.update(overrides)
     return MilesRouterConfig(**defaults)
@@ -300,6 +301,54 @@ class TestLoadBalancing:
 
         with pytest.raises(RuntimeError, match="No healthy workers"):
             router._use_url()
+
+
+_KEY_HEADER = "X-SMG-Routing-Key"
+_WORKERS = [f"http://w{i}:8000" for i in range(4)]
+
+
+class TestRoutingByKey:
+    def test_a_key_keeps_its_worker_however_loaded(self, router_factory):
+        router = router_factory(routing_key_header=_KEY_HEADER)
+        router.worker_request_counts = dict.fromkeys(_WORKERS, 0)
+        owner = router._use_url("session-1")
+
+        router.worker_request_counts[owner] += 50
+
+        assert router._use_url("session-1") == owner
+
+    def test_only_the_keys_of_a_worker_that_leaves_the_pool_move(self, router_factory):
+        router = router_factory(routing_key_header=_KEY_HEADER)
+        router.worker_request_counts = dict.fromkeys(_WORKERS, 0)
+        keys = [f"session-{i}" for i in range(200)]
+        before = {key: router._use_url(key) for key in keys}
+
+        router.dead_workers = {_WORKERS[0]}
+        after = {key: router._use_url(key) for key in keys}
+
+        moved = {key for key in keys if after[key] != before[key]}
+        assert moved == {key for key in keys if before[key] == _WORKERS[0]}
+        assert set(before.values()) == set(_WORKERS)
+        assert _WORKERS[0] not in after.values()
+
+    def test_a_key_with_no_healthy_worker_raises(self, router_factory):
+        router = router_factory(routing_key_header=_KEY_HEADER)
+        router.worker_request_counts = {_WORKERS[0]: 0}
+        router.dead_workers = {_WORKERS[0]}
+
+        with pytest.raises(RuntimeError, match="No healthy workers"):
+            router._use_url("session-1")
+
+    def test_the_key_header_is_matched_case_insensitively(self, router_factory):
+        router = router_factory(routing_key_header=_KEY_HEADER)
+
+        assert router._routing_key({"x-smg-routing-key": "session-1"}) == "session-1"
+        assert router._routing_key({"content-type": "application/json"}) is None
+
+    def test_a_router_without_a_key_header_ignores_the_key(self, router_factory):
+        router = router_factory()
+
+        assert router._routing_key({_KEY_HEADER: "session-1"}) is None
 
 
 class TestFinishingARequestAfterDeregistration:
@@ -578,6 +627,38 @@ class TestProxyIntegration:
         all_requests = worker1.request_log + worker2.request_log
         assert len(all_requests) == 4
         assert all(req == payload for req in all_requests)
+
+    def test_a_sessions_turns_stay_on_one_engine_while_it_is_the_busier_one(self, mock_worker_factory):
+        config = make_router_config(find_available_port(20000), routing_key_header=_KEY_HEADER)
+        router = MilesRouter(config, verbose=False)
+        server = UvicornThreadServer(router.app, host=config.host, port=config.port)
+        server.start()
+        try:
+            workers = [mock_worker_factory(), mock_worker_factory()]
+            for worker in workers:
+                requests.post(f"{server.url}/add_worker", params={"url": worker.url}, timeout=5.0).raise_for_status()
+
+            def send_turn(session_id: str) -> str:
+                logged = [len(worker.request_log) for worker in workers]
+                payload = {"input_ids": [1, 2, 3], "return_logprob": True}
+                requests.post(
+                    f"{server.url}/generate", json=payload, headers={_KEY_HEADER: session_id}, timeout=10.0
+                ).raise_for_status()
+                (served,) = [w.url for w, n in zip(workers, logged, strict=True) if len(w.request_log) > n]
+                return served
+
+            owners = {}
+            for i in range(16):
+                session_id = f"session-{i}"
+                owners[session_id] = send_turn(session_id)
+                # other sessions' turns in flight on this engine
+                router.worker_request_counts[owners[session_id]] += 5
+                assert send_turn(session_id) == owners[session_id]
+                router.worker_request_counts[owners[session_id]] -= 5
+
+            assert set(owners.values()) == {worker.url for worker in workers}
+        finally:
+            server.stop()
 
     def test_proxy_health_endpoint(self, router_env: RouterEnv, mock_worker: MockSGLangServer):
         requests.post(f"{router_env.url}/add_worker", params={"url": mock_worker.url}, timeout=5.0)
