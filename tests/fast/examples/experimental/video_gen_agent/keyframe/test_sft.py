@@ -255,6 +255,24 @@ def test_the_set_writes_the_kept_messages_with_their_tools_and_lists_request_ids
     assert "0-0" in manifest and '"content"' not in manifest
 
 
+@pytest.mark.parametrize("keep", [False, True])
+def test_the_set_drops_the_teachers_thinking_unless_asked_to_keep_it(monkeypatch, tmp_path, keep):
+    _dump(tmp_path / "dump", {0: [(0.9, False), (0.1, False)]})
+    path = tmp_path / "dump" / "rollout_data" / "0.pt"
+    data = torch.load(path, weights_only=False)
+    for sample in data["samples"]:
+        sample["metadata"]["video_gen"]["messages"].append({"role": "assistant", "content": "", "reasoning_content": "t"})
+    torch.save(data, path)
+    argv = ["sft_data", str(tmp_path / "dump"), "--out", str(tmp_path / "set"), *(["--keep-thinking"] if keep else [])]
+    monkeypatch.setattr("sys.argv", argv)
+
+    sft_data.main()
+
+    rows = [json.loads(line) for split in ("train", "heldout") for line in (tmp_path / "set" / f"{split}.jsonl").open()]
+    assert [("reasoning_content" in row["messages"][-1]) for row in rows] == [keep]
+    assert rows[0]["messages"][0] == {"role": "user", "content": "0-0"}
+
+
 def test_an_sft_run_trains_every_gpu_on_the_set_with_the_planners_template(monkeypatch, tmp_path):
     args = _config(monkeypatch, tmp_path, sft_data="/sft", num_gpus_per_node=8, video_mode="h3-ref")
 

@@ -3,7 +3,8 @@
 A group is one request's ``--n-samples-per-prompt`` episodes. Its top episode by reward is kept when no gate fired on
 it and its reward is at least ``--margin`` standard deviations (over the whole group) above the group mean. The kept
 episodes' recorded messages are written for ``sft_rollout.py``, split into train and held-out rows by a hash of the
-request id; ``manifest.json`` lists what was kept by request id only.
+request id; ``manifest.json`` lists what was kept by request id only. Assistant turns lose their ``reasoning_content``
+unless ``--keep-thinking``: the student learns the teacher's plans, not its (much longer) thinking.
 
 usage: python -m examples.experimental.video_gen_agent.keyframe.sft_data <dump_details>... --out DIR
 """
@@ -59,6 +60,12 @@ def select(episodes: list[dict], margin: float) -> list[dict]:
     return kept
 
 
+def _messages(messages: list[dict], keep_thinking: bool) -> list[dict]:
+    if keep_thinking:
+        return messages
+    return [{k: v for k, v in m.items() if k != "reasoning_content"} if m["role"] == "assistant" else m for m in messages]
+
+
 def _heldout(request_id: str, percent: int) -> bool:
     return int(hashlib.sha256(request_id.encode()).hexdigest(), 16) % 100 < percent
 
@@ -69,6 +76,7 @@ def main() -> None:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--margin", type=float, default=0.5)
     parser.add_argument("--heldout-percent", type=int, default=5)
+    parser.add_argument("--keep-thinking", action="store_true", help="keep each assistant turn's reasoning_content")
     args = parser.parse_args()
 
     episodes = [e for dump in args.dumps for e in _episodes(dump)]
@@ -81,7 +89,7 @@ def main() -> None:
         split = "heldout" if _heldout(episode["request_id"], args.heldout_percent) else "train"
         rows[split].append(
             {
-                "messages": video_gen["messages"],
+                "messages": _messages(video_gen["messages"], args.keep_thinking),
                 "tools": tools_for(video_gen["video_mode"]),
                 "request_id": episode["request_id"],
             }
@@ -92,6 +100,7 @@ def main() -> None:
     manifest = {
         "dumps": [str(d) for d in args.dumps],
         "margin": args.margin,
+        "keep_thinking": args.keep_thinking,
         "episodes": len(episodes),
         "groups": groups,
         "kept": {split: [r["request_id"] for r in split_rows] for split, split_rows in rows.items()},
