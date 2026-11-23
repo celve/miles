@@ -13,8 +13,10 @@ from miles.utils.args.configs.backend_fields import TrainerBackendTraitConfig
 from miles.utils.args.configs.data import DataConfig
 from miles.utils.args.configs.reward_model import RewardModelRolloutOnlyConfig
 from miles.utils.args.configs.rollout import RolloutRelatedConfig, RolloutRelatedRolloutOnlyConfig
+from miles.utils.args.custom_function import CustomFunctionConfig
 
 _HOOKS = {
+    "custom_generate_function_path": "miles.rollout.diffusion_rollout.generate.generate",
     "rollout_function_path": "miles.rollout.diffusion_rollout.rollout_fn.DiffusionRolloutFn",
     "data_source_path": "miles.rollout.diffusion_rollout.data_source.DiffusionPromptDataSource",
     "custom_convert_samples_to_train_data_path": "miles.rollout.diffusion_rollout.conversion.convert_samples_to_train_data",
@@ -36,11 +38,26 @@ _UNSUPPORTED = [
     ),
     ("on-policy distillation (--use-opd)", lambda a: a.use_opd),
     (
-        "evaluation (--eval-interval, --eval-prompt-data)",
-        lambda a: a.eval_interval is not None or bool(a.eval_prompt_data),
+        "a dedicated checkpoint eval fleet (--eval-num-gpus); use the colocated engines for eval",
+        lambda a: a.eval_num_gpus > 0,
+    ),
+    ("--group-rm with scheduled evaluation", lambda a: a.group_rm and a.eval_interval is not None),
+    (
+        "--diffusion-eval-num-steps < 1",
+        lambda a: a.diffusion_eval_num_steps is not None and a.diffusion_eval_num_steps < 1,
     ),
     ("fully async or partial rollout", lambda a: a.fully_async or a.partial_rollout),
-    ("dynamic sampling filters", lambda a: a.dynamic_sampling_filter_path is not None),
+    ("--over-sampling-batch-size without diffusion engine abort", lambda a: a.over_sampling_batch_size is not None),
+    (
+        "--rollout-sample-filter-path, which marks samples the diffusion converter cannot skip",
+        lambda a: a.rollout_sample_filter_path is not None,
+    ),
+    (
+        "--recompute-logprobs-via-prefill, which requires text token log-probs",
+        lambda a: a.recompute_logprobs_via_prefill,
+    ),
+    ("--disable-rollout-global-dataset, which the shared rollout requires", lambda a: not a.rollout_global_dataset),
+    ("--diffusion-microgroup-size < 1", lambda a: a.diffusion_microgroup_size < 1),
     (
         "a reward other than --rm-type ocr or a --custom-rm-path",
         lambda a: a.custom_rm_path is None and a.rm_type != "ocr",
@@ -104,7 +121,6 @@ _UNREAD = {
         "rollout_top_k",
         "rollout_max_response_len",
         "rollout_top_logprobs_num",
-        "custom_generate_function_path",
         "custom_agent_function_path",
         "rollout_data_postprocess_path",
     ],
@@ -183,13 +199,15 @@ def validate_diffusion_batch_size(args) -> None:
 
 def _derive_hooks(args) -> None:
     """`--model-kind diffusion` sets its four hooks; an explicit different one is an error."""
-    unset = {None, DataConfig.model_fields["data_source_path"].default.path}
+    default_source = DataConfig.model_fields["data_source_path"].default.path
     wrong = {}
     for name, hook in _HOOKS.items():
-        if vars(args)[name] in unset:
+        value = vars(args)[name]
+        path = value.path if isinstance(value, CustomFunctionConfig) else value
+        if path is None or (name == "data_source_path" and path == default_source):
             vars(args)[name] = hook
-        elif vars(args)[name] != hook:
-            wrong[name] = vars(args)[name]
+        elif path != hook:
+            wrong[f"--{name.replace('_', '-')}"] = path
     if wrong:
         raise ValueError(f"--model-kind diffusion sets its own hooks {_HOOKS}; got {wrong}")
 
@@ -208,4 +226,8 @@ def validate_diffusion_sglang_config(sglang) -> None:
             raise ValueError(
                 f"--model-kind diffusion serves regular single-GPU engine groups, got {group.worker_type.value} "
                 f"with {group.num_gpus_per_engine} GPUs per engine"
+            )
+        if int(group.overrides.get("batching_max_size") or 1) > 1:
+            raise ValueError(
+                "--model-kind diffusion uses client batching and requires server-group batching_max_size <= 1"
             )

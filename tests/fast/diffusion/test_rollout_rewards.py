@@ -1,16 +1,27 @@
 import asyncio
+import json
 from argparse import Namespace
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
+import httpx
+import msgpack
 import pytest
 import torch
+from safetensors.torch import save
 from tests.fast.fixtures.args_fixtures import parser_defaults
 
-from miles.rollout.base_types import RolloutFnConstructorInput
+from miles.ray.rollout.rollout_executor import RolloutExecutor
+from miles.rollout.base_types import RolloutFnConstructorInput, RolloutFnTrainInput
 from miles.rollout.diffusion_rollout import rollout_fn
+from miles.rollout.diffusion_rollout.data_source import DiffusionPromptDataSource
+from miles.rollout.submission_scheduler import SampleBackfillSubmission
 from miles.utils.args.custom_function import CustomFunctionConfig
 from miles.utils.args.custom_view import ImmutableNamespace
-from miles.utils.diffusion.types import DiffusionRollout
-from miles.utils.types import Sample
+from miles.utils.eval_config import EvalDatasetConfig
+from miles.utils.function_registry import function_registry
+from miles.utils.retry_utils import NonRetryableError
 
 
 def fixed_steps(args, sample, num_steps, seed):
@@ -20,77 +31,237 @@ def fixed_steps(args, sample, num_steps, seed):
 class _FakeOcrPool:
     def __init__(self, num_workers):
         self.scored = []
+        self.closed = False
 
     async def score(self, images, prompts):
         self.scored.append(images[0].shape)
         return [float(len(prompts[0]))]
 
     def shutdown(self):
-        pass
+        self.closed = True
 
 
-def _rollout(monkeypatch, **overrides):
-    args = Namespace(
+def _rollout(monkeypatch, tmp_path, **overrides):
+    prompts = tmp_path / "prompts.jsonl"
+    prompts.write_text(json.dumps({"input": 'write "abc"'}) + "\n")
+    args = ImmutableNamespace(
         **parser_defaults()
         | dict(
+            prompt_data=str(prompts),
             sglang_router_ip="127.0.0.1",
             sglang_router_port=1,
+            sglang=SimpleNamespace(models=[], common_value=lambda name: False),
+            inference_runtime_mut_state=SimpleNamespace(engine_count=1),
+            custom_generate_function_path="miles.rollout.diffusion_rollout.generate.generate",
             diffusion_step_strategy_path=f"{__name__}.fixed_steps",
             diffusion_microgroup_size=2,
             n_samples_per_prompt=4,
+            rollout_batch_size=1,
+            over_sampling_batch_size=1,
             rm_type="ocr",
         )
         | overrides
     )
     monkeypatch.setattr(rollout_fn, "OcrRewardPool", _FakeOcrPool)
-    monkeypatch.setattr(
-        rollout_fn,
-        "parse_rollout_response",
-        lambda raw: [DiffusionRollout(generated_output=torch.zeros(3, 1, 4, 4)) for _ in range(raw)],
+    return rollout_fn.DiffusionRolloutFn(
+        RolloutFnConstructorInput(args=args, data_source=DiffusionPromptDataSource(args))
     )
-    fn = rollout_fn.DiffusionRolloutFn(RolloutFnConstructorInput(args=args, data_source=None))
-    fn.semaphore = asyncio.Semaphore(1)
-
-    async def post(payload):
-        return payload["num_outputs_per_prompt"]
-
-    fn._post = post
-    reward_calls = []
-
-    async def spy(args, samples, **kwargs):
-        reward_calls.append(len(samples))
-        return await real(args, samples, **kwargs)
-
-    real = rollout_fn.batched_async_rm
-    monkeypatch.setattr(rollout_fn, "batched_async_rm", spy)
-    return fn, reward_calls
 
 
-def _group():
-    return [Sample(group_index=0, index=i, prompt='write "abc"') for i in range(4)]
+@asynccontextmanager
+async def _fake_engine(fn):
+    calls = []
+    tensor = save({"t": torch.zeros(3, 1, 5, 6)})
+
+    async def respond(request):
+        body = json.loads(request.content)
+        calls.append(body)
+        return httpx.Response(
+            200,
+            content=msgpack.packb(
+                [{"generated_output": {"__tensor__": True, "data": tensor}}] * body["num_outputs_per_prompt"]
+            ),
+        )
+
+    await fn.client._http.aclose()
+    fn.client._http = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    try:
+        async with asyncio.timeout(5):
+            yield calls
+    finally:
+        await fn.dispose()
 
 
-@pytest.mark.parametrize("group_rm,calls", [(False, [2, 2]), (True, [4])])
-async def test_rewards_come_from_rm_hub_per_microgroup_or_per_group(monkeypatch, group_rm, calls):
-    fn, reward_calls = _rollout(monkeypatch, group_rm=group_rm)
+@pytest.mark.parametrize("group_rm", [False, True])
+async def test_ocr_runs_through_rm_hub_with_the_rollouts_pool(monkeypatch, tmp_path, group_rm):
+    fn = _rollout(monkeypatch, tmp_path, group_rm=group_rm)
+    async with _fake_engine(fn) as requests:
+        (group,) = (await fn(RolloutFnTrainInput(rollout_id=8))).samples
 
-    group = await fn._generate_group(_group())
-
-    assert reward_calls == calls
+    assert [request["num_outputs_per_prompt"] for request in requests] == [2, 2]
     assert [sample.reward for sample in group] == [float(len('write "abc"'))] * 4
-    assert fn.reward_pool.scored == [(4, 4, 3)] * 4
+    assert [sample.diffusion.rollout_id for sample in group] == [8] * 4
+    assert [sample.lineage.source_sample_index for sample in group] == list(range(4))
+    assert fn.reward_pool.scored == [(5, 6, 3)] * 4
+    assert fn.reward_pool.closed
 
 
-async def constant_reward(args, samples):
-    return [0.5] * len(samples)
+async def reward_by_batch_size(args, samples):
+    return [len(samples) / 10] * len(samples)
 
 
-async def test_a_custom_reward_replaces_ocr_without_receiving_the_ocr_pool(monkeypatch):
-    fn, _ = _rollout(monkeypatch, custom_rm_path=CustomFunctionConfig(path=f"{__name__}.constant_reward"))
-    # rm_hub builds the hook's config from the run config, which iterates like the parsed one.
-    fn.args = ImmutableNamespace(**vars(fn.args))
-
-    group = await fn._generate_group(_group())
+@pytest.mark.parametrize("group_rm,reward", [(False, 0.2), (True, 0.4)])
+async def test_a_custom_reward_preserves_the_scoring_granularity(monkeypatch, tmp_path, group_rm, reward):
+    fn = _rollout(
+        monkeypatch,
+        tmp_path,
+        custom_rm_path=CustomFunctionConfig(path=f"{__name__}.reward_by_batch_size"),
+        group_rm=group_rm,
+    )
+    async with _fake_engine(fn):
+        (group,) = (await fn(RolloutFnTrainInput(rollout_id=0))).samples
 
     assert fn.reward_pool is None
-    assert [sample.reward for sample in group] == [0.5] * 4
+    assert [sample.reward for sample in group] == [reward] * 4
+
+
+async def failing_reward(args, samples):
+    raise RuntimeError("group scorer unavailable")
+
+
+async def test_group_reward_failure_stops_the_diffusion_rollout(monkeypatch, tmp_path):
+    fn = _rollout(
+        monkeypatch,
+        tmp_path,
+        group_rm=True,
+        custom_rm_path=CustomFunctionConfig(path=f"{__name__}.failing_reward"),
+    )
+    get_samples = fn.data_source.get_samples
+
+    def get_once(count):
+        assert fn.data_source.sample_group_index == 0, "unexpected refill after group reward failure"
+        return get_samples(count)
+
+    monkeypatch.setattr(fn.data_source, "get_samples", get_once)
+    async with _fake_engine(fn):
+        with pytest.raises(NonRetryableError, match="group scorer unavailable") as failure:
+            await fn(RolloutFnTrainInput(rollout_id=0))
+
+    assert isinstance(failure.value.__cause__, RuntimeError)
+
+
+async def test_sample_submission_and_all_samples_hook_use_the_shared_loop(monkeypatch, tmp_path):
+    fn = _rollout(
+        monkeypatch, tmp_path, rollout_submission_granularity="sample", rollout_all_samples_process_path="test_process"
+    )
+    completions = []
+    processed = []
+    sample_done = SampleBackfillSubmission.sample_done_callback
+
+    def on_done(scheduler):
+        sample_done(scheduler)
+        completions.append(scheduler.samples_in_flight)
+
+    def process_all(args, groups, data_source):
+        assert data_source == fn.data_source.get_samples
+        processed.extend((sample.index, sample.reward) for group in groups for sample in group)
+
+    monkeypatch.setattr(SampleBackfillSubmission, "sample_done_callback", on_done)
+    async with _fake_engine(fn):
+        with function_registry.temporary("test_process", process_all):
+            (group,) = (await fn(RolloutFnTrainInput(rollout_id=0))).samples
+
+    assert completions == [3, 2, 1, 0]
+    assert processed == [(sample.index, sample.reward) for sample in group]
+    assert [sample.index for sample in group] == [0, 1, 2, 3]
+
+
+async def test_resuming_with_a_new_group_size_keeps_seeds_and_positions(monkeypatch, tmp_path):
+    fn = _rollout(monkeypatch, tmp_path)
+    previous_args = Namespace(**(dict(fn.state.args) | {"n_samples_per_prompt": 3}))
+    previous_source = DiffusionPromptDataSource(previous_args)
+    previous_source.get_samples(1)
+    previous_source.save(tmp_path / "checkpoint")
+    fn.data_source.load(tmp_path / "checkpoint")
+
+    async with _fake_engine(fn) as requests:
+        (group,) = (await fn(RolloutFnTrainInput(rollout_id=1))).samples
+
+    assert [sample.index for sample in group] == [3, 4, 5, 6]
+    assert [sample.diffusion.seed for sample in group] == list(
+        range(fn.state.args.rollout_seed + 4, fn.state.args.rollout_seed + 8)
+    )
+    assert [request["num_outputs_per_prompt"] for request in requests] == [2, 2]
+
+
+@pytest.mark.parametrize("eval_steps", [None, 3])
+async def test_executor_scores_image_only_eval_with_a_seed_per_repeat(tmp_path, monkeypatch, eval_steps):
+    prompts = tmp_path / "eval.jsonl"
+    prompts.write_text('{"question":"first","attrs":{"tag":1},"target":"a"}\n{"question":"second","target":"b"}\n')
+    dataset = EvalDatasetConfig(
+        name="ocr",
+        path=str(prompts),
+        input_key="question",
+        metadata_key="attrs",
+        label_key="target",
+        n_samples_per_eval_prompt=3,
+    )
+    fn = _rollout(
+        monkeypatch, tmp_path, eval_datasets=[dataset], diffusion_eval_num_steps=eval_steps, eval_uses_snapshots=False
+    )
+    executor = object.__new__(RolloutExecutor)
+    executor.args = fn.state.args
+    executor.eval_generate_rollout = fn
+    executor.use_legacy_rollout_v1 = False
+    executor._refresh_inference_runtime_mut_state = AsyncMock()
+    executor._metric_checker = None
+    executor.custom_convert_samples_to_train_data_func = Mock(side_effect=AssertionError("converted eval images"))
+    results = {}
+    monkeypatch.setattr(
+        "miles.ray.rollout.rollout_executor.log_eval_rollout_data",
+        lambda rollout_id, args, data, metrics: results.update(data),
+    )
+
+    async with _fake_engine(fn) as requests:
+        await executor.eval(0)
+
+    samples = results["ocr"]["samples"]
+    seeds = [fn.state.args.rollout_seed + j for j in range(3)]
+    assert sorted((r["prompt"], r["seed"]) for r in requests) == [(p, s) for p in ("first", "second") for s in seeds]
+    assert all(r["rollout"] is False and r["num_outputs_per_prompt"] == 1 for r in requests)
+    assert all(r["num_inference_steps"] == (eval_steps or fn.state.args.diffusion_num_steps) for r in requests)
+    assert all(not r["rollout_return_dit_trajectory"] and not r["rollout_return_denoising_env"] for r in requests)
+    assert [(s.index, s.diffusion.seed) for s in samples] == list(enumerate(seeds * 2))
+    assert all(s.diffusion.dit_trajectory is None for s in samples)
+    assert [(s.label, s.metadata) for s in samples] == [("a", {"tag": 1})] * 3 + [("b", {})] * 3
+    assert results["ocr"]["rewards"] == [5.0] * 3 + [6.0] * 3
+    executor.custom_convert_samples_to_train_data_func.assert_not_called()
+
+
+async def filter_test_reward(args, samples):
+    return [float(sample.index % 2) if sample.prompt == "keep" else 0.0 for sample in samples]
+
+
+async def test_reward_std_filter_refills_a_dropped_diffusion_group(monkeypatch, tmp_path):
+    from tests.fast.diffusion.test_validation import _parse_diffusion_run
+
+    filter_path = "miles.rollout.filter_hub.common_filters.apply_reward_nonzero_std_filter"
+    config = _parse_diffusion_run("--global-batch-size", "64", "--dynamic-sampling-filter-path", filter_path)
+    fn = _rollout(
+        monkeypatch,
+        tmp_path,
+        dynamic_sampling_filter_path=config.dynamic_sampling_filter_path,
+        custom_rm_path=CustomFunctionConfig(path=f"{__name__}.filter_test_reward"),
+    )
+    prompts = tmp_path / "train.jsonl"
+    prompts.write_text('{"input":"drop"}\n{"input":"keep"}\n')
+    fn.data_source = DiffusionPromptDataSource(
+        Namespace(**(dict(fn.state.args) | {"prompt_data": str(prompts), "rollout_shuffle": False}))
+    )
+    async with asyncio.timeout(5), _fake_engine(fn) as requests:
+        output = await fn(RolloutFnTrainInput(rollout_id=1))
+
+    (group,) = output.samples
+    assert output.metrics["rollout/dynamic_filter/drop_zero_std_0.0"] == 1
+    assert [sample.index for sample in group] == [4, 5, 6, 7]
+    assert [r["prompt"] for r in requests] == ["drop", "drop", "keep", "keep"]
