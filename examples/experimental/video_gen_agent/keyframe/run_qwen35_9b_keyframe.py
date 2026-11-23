@@ -71,8 +71,9 @@ Args:
         episodes of any planner, re-rendered for this one by ``keyframe.sft_rollout``; --sft-epochs (2) at --sft-lr
         (1e-5), --rollout-batch-size episodes a step, all GPUs training; Miles takes floor(rows / batch) steps an
         epoch with its cursor running on across epochs, so a run draws epochs x floor(rows / batch) x batch
-        episodes and its last pass is partial. It saves under the run's ``checkpoints`` and exports HF weights
-        to its ``hf``; ``keyframe.sft_heldout_loss`` scores the held-out rows on that export and on the base planner.
+        episodes, its last pass partial when the rows do not divide by the batch. It saves under the run's
+        ``checkpoints`` and exports HF weights to its ``hf``; ``keyframe.sft_heldout_loss`` scores the held-out rows
+        on that export and on the base planner.
     --init-checkpoint: such an SFT run's directory, which an RL run then starts from and keeps as its KL reference.
 
 Example:
