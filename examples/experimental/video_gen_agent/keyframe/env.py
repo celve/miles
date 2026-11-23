@@ -223,6 +223,11 @@ class _Episode:
         return f"Images left: {self.images_left}. Turns left: {self.options.max_turns - self.turns}."
 
 
+def tools_for(video_mode: str) -> list[dict]:
+    """The tools the planner is offered in an env mode."""
+    return REFERENCE_TOOLS if video_mode == "reference" else TOOLS
+
+
 async def run_agent(base_url: str, prompt: list[dict], request_kwargs: dict, metadata: dict, **kwargs) -> dict:
     try:
         options = KeyframeEnvOptions.from_env()
@@ -251,6 +256,8 @@ async def run_agent(base_url: str, prompt: list[dict], request_kwargs: dict, met
             "submitted": episode.submitted,
             "turns": episode.turns,
             "turn_stats": episode.turn_stats,
+            # The conversation as the env sent and received it, so any planner's episode can be re-rendered for SFT.
+            "messages": messages,
         },
         "agent_metrics": {"total_tool_time": episode.generation_time},
     }
@@ -258,8 +265,7 @@ async def run_agent(base_url: str, prompt: list[dict], request_kwargs: dict, met
 
 async def _play(episode: _Episode, messages: list[dict], base_url: str, request_kwargs: dict) -> None:
     while episode.submitted is None and episode.turns < episode.options.max_turns:
-        tools = REFERENCE_TOOLS if episode.options.video_mode == "reference" else TOOLS
-        payload = {**request_kwargs, "model": "default", "messages": messages, "tools": tools}
+        payload = {**request_kwargs, "model": "default", "messages": messages, "tools": tools_for(episode.options.video_mode)}
         for image in episode.images.values():
             image.shown = True
         started = time.monotonic()
