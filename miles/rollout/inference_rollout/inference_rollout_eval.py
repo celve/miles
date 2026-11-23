@@ -2,6 +2,7 @@ import asyncio
 import copy
 import logging
 import uuid
+from argparse import Namespace
 from typing import Any
 
 from tqdm import tqdm
@@ -42,16 +43,11 @@ async def run_eval_datasets(
     return {k: v for r in results_list for k, v in r.items()}
 
 
-async def eval_rollout_single_dataset(
-    state: GenerateState,
+def _load_text_eval_prompts(
+    args: Namespace,
     dataset_cfg: EvalDatasetConfig,
     prompt_dataset_cache: dict[Any, Dataset],
-    *,
-    kv_cache_namespace: str | None = None,
-) -> dict[str, dict[str, list[Any]]]:
-    args = state.args
-    assert not args.group_rm, "Group RM is not supported for eval rollout"
-
+) -> list[Sample]:
     cache_key = dataset_cfg.cache_key + (args.hf_checkpoint, args.apply_chat_template, args.chat_template_path)
     if cache_key not in prompt_dataset_cache:
         tokenizer = load_tokenizer(
@@ -77,20 +73,41 @@ async def eval_rollout_single_dataset(
             media_dir=args.shared_media_dir,
             token_space_processing=args.multimodal_token_space_processing,
         )
-    dataset = prompt_dataset_cache[cache_key]
+    return prompt_dataset_cache[cache_key].samples
 
-    base_sampling_params = compute_sampling_params(
-        args,
-        temperature=dataset_cfg.temperature,
-        top_p=dataset_cfg.top_p,
-        top_k=dataset_cfg.top_k,
-        max_new_tokens=dataset_cfg.max_response_len,
+
+async def eval_rollout_single_dataset(
+    state: GenerateState,
+    dataset_cfg: EvalDatasetConfig,
+    prompt_dataset_cache: dict[Any, Dataset],
+    *,
+    kv_cache_namespace: str | None = None,
+) -> dict[str, dict[str, list[Any]]]:
+    args = state.args
+    assert not args.group_rm, "Group RM is not supported for eval rollout"
+
+    hooks = state.hooks
+    prompts = (
+        hooks.eval_prompts(args, dataset_cfg)
+        if hooks.eval_prompts is not None
+        else _load_text_eval_prompts(args, dataset_cfg, prompt_dataset_cache)
+    )
+    base_sampling_params = (
+        hooks.eval_sampling_params(args, dataset_cfg)
+        if hooks.eval_sampling_params is not None
+        else compute_sampling_params(
+            args,
+            temperature=dataset_cfg.temperature,
+            top_p=dataset_cfg.top_p,
+            top_k=dataset_cfg.top_k,
+            max_new_tokens=dataset_cfg.max_response_len,
+        )
     )
 
     tasks = []
     # do multiple samples for eval prompts
     sample_index = 0
-    for _i, prompt_sample in enumerate(dataset.samples):
+    for prompt_sample in prompts:
         for j in range(dataset_cfg.n_samples_per_eval_prompt):
             # use the same prompt for multiple samples
             sample = copy.deepcopy(prompt_sample)
@@ -102,9 +119,9 @@ async def eval_rollout_single_dataset(
             if router_routes_by_key(args):
                 sample.routing_key = str(uuid.uuid4())
             sampling_params = base_sampling_params
-            if args.sglang.common_value("enable_deterministic_inference"):
+            if hooks.eval_seed_key or args.sglang.common_value("enable_deterministic_inference"):
                 sampling_params = base_sampling_params.copy()
-                sampling_params["sampling_seed"] = args.rollout_seed + j
+                sampling_params[hooks.eval_seed_key or "sampling_seed"] = args.rollout_seed + j
             tasks.append(
                 asyncio.create_task(
                     generate_and_rm(
