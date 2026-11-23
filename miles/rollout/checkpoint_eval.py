@@ -34,7 +34,12 @@ logger = logging.getLogger(__name__)
 
 
 def retarget_args(
-    *, args: ImmutableNamespace, router_ip: str, router_port: int, engine_gpu_counts: Sequence[int]
+    *,
+    args: ImmutableNamespace,
+    router_ip: str,
+    router_port: int,
+    engine_gpu_counts: Sequence[int],
+    server_concurrency: int | None = None,
 ) -> ImmutableNamespace:
     """Shallow-copy ``args`` with the router address and GPU sizing swapped for eval.
 
@@ -48,6 +53,8 @@ def retarget_args(
         "sglang_router_ip": router_ip,
         "sglang_router_port": router_port,
     }
+    if server_concurrency is not None:
+        values["sglang_server_concurrency"] = server_concurrency
     return type(args).model_validate(values)
 
 
