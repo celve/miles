@@ -3,6 +3,7 @@ from contextvars import ContextVar
 
 from miles.rollout.base_types import GenerateFnInput, GenerateFnOutput
 from miles.rollout.diffusion_rollout.client import ImageClient
+from miles.rollout.rm_hub import batched_async_rm
 from miles.utils.retry_utils import NonRetryableError
 from miles.utils.types import Sample
 
@@ -21,9 +22,15 @@ def use_image_client(client: ImageClient):
 async def generate(input: GenerateFnInput) -> GenerateFnOutput:
     sample = input.sample
     try:
-        sample.diffusion, sample.reward = await _image_client.get().generate(sample, input.sampling_params)
+        client = _image_client.get()
+        if input.evaluation:
+            sample.diffusion = await client.generate_eval(sample, input.sampling_params)
+        else:
+            sample.diffusion, sample.reward = await client.generate(sample, input.sampling_params)
     except Exception as exc:
         # The client already retries HTTP failures, and refilling would advance diffusion's deterministic prompt schedule.
         raise NonRetryableError(f"diffusion generation failed for sample {sample.index}: {exc}") from exc
     sample.status = Sample.Status.COMPLETED
+    if input.evaluation:
+        await batched_async_rm(input.args, [sample], inplace_set_reward_field=True)
     return GenerateFnOutput(samples=sample)

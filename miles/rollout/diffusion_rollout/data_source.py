@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from miles.rollout.data_source import DataSource
+from miles.utils.eval_config import EvalDatasetConfig
 from miles.utils.simple_checkpointer import load_simple_checkpoint, save_simple_checkpoint
 from miles.utils.types import Sample
 
@@ -90,6 +91,21 @@ class DiffusionPromptDataSource(DataSource):
         self.order = self._epoch_order()
         self.sample_group_index = state["sample_group_index"]
         self.sample_index = state["sample_index"]
+
+
+def read_eval_prompts(args, dataset_cfg: EvalDatasetConfig) -> list[Sample]:
+    rows = _read_prompts(
+        dataset_cfg.path,
+        prompt_key=dataset_cfg.input_key,
+        metadata_key=dataset_cfg.metadata_key,
+        label_key=dataset_cfg.label_key,
+    )
+    if not rows:
+        raise ValueError(f"no prompts under key {dataset_cfg.input_key!r} in {dataset_cfg.path}")
+    return [
+        Sample(group_index=i, prompt=prompt, metadata=metadata, label=label)
+        for i, (prompt, metadata, label) in enumerate(rows)
+    ]
 
 
 def _read_prompts(
