@@ -60,6 +60,7 @@ _COMPLETE_CONFIG_KWARGS = dict(
     timeout=5.0,
     health_check_interval=1.0,
     health_check_failure_threshold=3,
+    routing_key_header=None,
 )
 
 
