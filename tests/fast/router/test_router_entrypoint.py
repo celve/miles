@@ -56,6 +56,7 @@ class TestRunRouter:
             timeout=None,
             health_check_interval=1.0,
             health_check_failure_threshold=2,
+            routing_key_header=None,
         )
         router_recorder = RouterRecorder()
         uvicorn_recorder = UvicornRunRecorder()
