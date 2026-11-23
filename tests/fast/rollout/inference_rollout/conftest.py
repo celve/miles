@@ -9,7 +9,7 @@ from tests.fast.fixtures.args_fixtures import sglang_router_args
 from tests.fast.fixtures.sglang_config_fixtures import make_sglang_config
 
 from miles.rollout.base_types import GenerateFnInput, GenerateFnOutput
-from miles.rollout.inference_rollout.inference_rollout_common import GenerateState
+from miles.rollout.inference_rollout.inference_rollout_common import GenerateState, RolloutGenerationHooks
 from miles.utils.arguments import parse_args
 from miles.utils.eval_config import EvalDatasetConfig
 from miles.utils.types import Sample
@@ -25,6 +25,7 @@ class FakeGenerateState(GenerateState):
             sglang=make_sglang_config(enable_deterministic_inference=False),
         )
         self.generate_fn_semaphore = asyncio.Semaphore(2)
+        self.hooks = RolloutGenerationHooks()
         self.aborted = False
         self.generate_function = generate_function
         self.sample_generate_functions = {}
