@@ -264,7 +264,7 @@ def test_the_parsed_diffusion_run_rejects_incompatible_shared_loop_options(argv)
 
 
 def test_the_parsed_diffusion_run_accepts_its_own_explicit_generate_hook():
-    path = _HOOKS["custom_generate_function_path"]
+    path = "miles.rollout.diffusion_rollout.generate.generate"
     config = _parse_diffusion_run("--global-batch-size", "64", "--custom-generate-function-path", path)
 
     assert config.custom_generate_function_path.path == path
