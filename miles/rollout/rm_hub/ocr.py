@@ -4,6 +4,8 @@ import asyncio
 import logging
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 import numpy as np
 import torch
@@ -101,8 +103,22 @@ class OcrRewardPool:
         self._executor.shutdown(cancel_futures=True)
 
 
-async def ocr_rm(args, sample: Sample, *, ocr_pool: OcrRewardPool) -> float:
+_group_ocr_pool: ContextVar[OcrRewardPool] = ContextVar("group_ocr_pool")
+
+
+@contextmanager
+def use_ocr_pool(pool: OcrRewardPool):
+    token = _group_ocr_pool.set(pool)
+    try:
+        yield
+    finally:
+        _group_ocr_pool.reset(token)
+
+
+async def ocr_rm(args, sample: Sample, *, ocr_pool: OcrRewardPool | None = None) -> float:
     """`--rm-type ocr`: the reward of one generated image, scored on the rollout's own pool."""
     assert sample.diffusion is not None, "--rm-type ocr scores diffusion samples only"
+    if ocr_pool is None:
+        ocr_pool = _group_ocr_pool.get()
     image = image_to_rgb_uint8(sample.diffusion.generated_output)
     return (await ocr_pool.score([image], [sample.prompt]))[0]

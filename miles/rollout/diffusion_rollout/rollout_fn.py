@@ -1,115 +1,55 @@
-"""Flow-GRPO rollout: SDE-sampled images from sglang.multimodal_gen through the Miles router, scored by `rm_hub`."""
+"""SD3.5 Flow-GRPO training on the shared per-sample inference rollout."""
 
-import asyncio
-import logging
 from argparse import Namespace
+from contextlib import nullcontext
 from typing import Any
 
-import httpx
-
 from miles.rollout.base_types import (
-    BaseRolloutFn,
     RolloutFnConstructorInput,
-    RolloutFnInput,
+    RolloutFnEvalInput,
     RolloutFnTrainInput,
     RolloutFnTrainOutput,
 )
-from miles.rollout.diffusion_rollout.response import parse_rollout_response
-from miles.rollout.inference_rollout.inference_rollout_train import get_worker_urls
-from miles.rollout.rm_hub import batched_async_rm
-from miles.rollout.rm_hub.ocr import OcrRewardPool
-from miles.utils.function_registry import load_function
-from miles.utils.types import Sample
-
-logger = logging.getLogger(__name__)
-
-_MAX_RETRIES = 60
+from miles.rollout.diffusion_rollout.client import ImageClient
+from miles.rollout.diffusion_rollout.generate import use_image_client
+from miles.rollout.inference_rollout.inference_rollout_common import InferenceRolloutFn, RolloutGenerationHooks
+from miles.rollout.rm_hub.ocr import OcrRewardPool, use_ocr_pool
 
 
-class DiffusionRolloutFn(BaseRolloutFn):
+class DiffusionRolloutFn(InferenceRolloutFn):
     def __init__(self, input: RolloutFnConstructorInput) -> None:
         super().__init__(input)
         args = input.args
-        self.args = args
-        self.data_source = input.data_source
-        self.url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/rollout/generate"
-        self.step_strategy = load_function(args.diffusion_step_strategy_path)
-        self.sampling_params = build_sampling_params(args)
-        self.semaphore: asyncio.Semaphore | None = None
-        # rm_hub runs --custom-rm-path ahead of --rm-type, so the OCR pool exists only when OCR actually scores.
+        # rm_hub runs --custom-rm-path ahead of --rm-type.
         uses_ocr = args.rm_type == "ocr" and args.custom_rm_path is None
         self.reward_pool = OcrRewardPool(num_workers=args.diffusion_ocr_num_workers) if uses_ocr else None
-        self.reward_kwargs = {"ocr_pool": self.reward_pool} if self.reward_pool is not None else {}
-        self.client = httpx.AsyncClient(limits=httpx.Limits(max_keepalive_connections=0), timeout=httpx.Timeout(None))
+        reward_kwargs = {"ocr_pool": self.reward_pool} if self.reward_pool is not None else {}
+        self.client = ImageClient(args, reward_kwargs)
 
-    async def __call__(self, input: RolloutFnInput) -> RolloutFnTrainOutput:
-        assert isinstance(input, RolloutFnTrainInput), "diffusion runs have no eval rollout yet"
-        if self.semaphore is None:
-            num_engines = len(await get_worker_urls(self.args))
-            self.semaphore = asyncio.Semaphore(self.args.sglang_server_concurrency * num_engines)
-        groups = self.data_source.get_samples(self.args.rollout_batch_size)
-        groups = await asyncio.gather(*(self._generate_group(group) for group in groups))
-        for sample in (sample for group in groups for sample in group):
-            sample.diffusion.rollout_id = input.rollout_id
-        logger.info(f"Rollout {input.rollout_id}: first prompt {groups[0][0].prompt!r}, reward {groups[0][0].reward}")
-        return RolloutFnTrainOutput(samples=sorted(groups, key=lambda group: group[0].index))
-
-    async def _generate_group(self, group: list[Sample]) -> list[Sample]:
-        # N-spaced seeds keep each request's [seed, seed + n) disjoint across prompt groups.
-        seed_base = (self.args.rollout_seed + group[0].group_index * self.args.n_samples_per_prompt) % (2**31)
-        size = self.args.diffusion_microgroup_size
-        microgroups = await asyncio.gather(
-            *(
-                self._generate_microgroup(group[start : start + size], seed=seed_base + start)
-                for start in range(0, len(group), size)
-            )
+    def generation_hooks(self) -> RolloutGenerationHooks:
+        return RolloutGenerationHooks(
+            sampling_params=build_sampling_params,
+            load_tokenizer=False,
+            engine_abort=False,
+            retry_group_reward_errors=False,
         )
-        group = [sample for microgroup in microgroups for sample in microgroup]
-        if self.args.group_rm:
-            await batched_async_rm(self.args, group, inplace_set_reward_field=True, **self.reward_kwargs)
-        return group
 
-    async def _generate_microgroup(self, microgroup: list[Sample], *, seed: int) -> list[Sample]:
-        num_steps = self.sampling_params["num_inference_steps"]
-        sde_steps, _returned_latents = self.step_strategy(self.args, microgroup[0], num_steps, seed)
-        payload = {
-            **self.sampling_params,
-            "seed": seed,
-            # The trainer slices the full trajectory itself, so the engine returns every latent.
-            "rollout_sde_step_indices": sde_steps,
-            "rollout_return_step_indices": None,
-            "prompt": microgroup[0].prompt,
-            "num_outputs_per_prompt": len(microgroup),
-        }
-        async with self.semaphore:
-            raw = await self._post(payload)
-        rollouts = await asyncio.to_thread(parse_rollout_response, raw)
-        for index, (sample, rollout) in enumerate(zip(microgroup, rollouts, strict=True)):
-            # The engine expands one seed to [seed, seed + n); record each image's own.
-            rollout.seed = seed + index
-            rollout.sde_step_indices = list(sde_steps)
-            sample.diffusion = rollout
-            sample.status = Sample.Status.COMPLETED
+    async def _call_train(self, input: RolloutFnTrainInput) -> RolloutFnTrainOutput:
+        self.client.dispatcher.reset(index_offset=self.data_source.sample_index_offset)
+        pool = self.reward_pool
+        reward_scope = use_ocr_pool(pool) if self.state.args.group_rm and pool is not None else nullcontext()
+        with use_image_client(self.client), reward_scope:
+            output = await super()._call_train(input)
+        for group in output.samples:
+            for sample in group:
+                sample.diffusion.rollout_id = input.rollout_id
+        return output
 
-        if not self.args.group_rm:
-            await batched_async_rm(self.args, microgroup, inplace_set_reward_field=True, **self.reward_kwargs)
-        return microgroup
-
-    async def _post(self, payload: dict[str, Any]) -> bytes:
-        for attempt in range(_MAX_RETRIES):
-            try:
-                response = await self.client.post(self.url, json=payload)
-                response.raise_for_status()
-                return response.content
-            except Exception:
-                if attempt + 1 >= _MAX_RETRIES:
-                    raise
-                logger.warning(f"/rollout/generate attempt {attempt} failed, retrying", exc_info=True)
-                await asyncio.sleep(1)
-        raise AssertionError("unreachable")
+    async def _call_eval(self, input: RolloutFnEvalInput):
+        raise AssertionError("diffusion runs have no eval rollout yet")
 
     async def dispose(self) -> None:
-        await self.client.aclose()
+        await self.client.dispose()
         if self.reward_pool is not None:
             self.reward_pool.shutdown()
 

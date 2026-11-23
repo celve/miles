@@ -128,7 +128,9 @@ def test_a_foreign_hook_is_rejected():
 
 
 def _group(worker_type=WorkerType.REGULAR, num_gpus_per_engine=1, engine_kind="diffusion"):
-    return SimpleNamespace(worker_type=worker_type, num_gpus_per_engine=num_gpus_per_engine, engine_kind=engine_kind)
+    return SimpleNamespace(
+        worker_type=worker_type, num_gpus_per_engine=num_gpus_per_engine, engine_kind=engine_kind, overrides={}
+    )
 
 
 def _model(name, groups, update_weights=True):
@@ -198,7 +200,6 @@ def test_a_parsed_diffusion_run_derives_its_batch_size_from_steps_per_rollout():
         (dict(use_tis=True), "--use-tis"),
         (dict(rollout_temperature=0.7), "--rollout-temperature"),
         (dict(rollout_max_response_len=64), "--rollout-max-response-len"),
-        (dict(custom_generate_function_path="my.generate"), "--custom-generate-function-path"),
         (dict(fp16=True), "--fp16.*--diffusion-forward-dtype"),
         (dict(attn_implementation="sdpa"), "--attn-implementation"),
         (dict(apply_chat_template=True), "--apply-chat-template"),
@@ -244,3 +245,46 @@ def test_a_step_count_that_does_not_divide_the_images_is_rejected():
 def test_the_batch_size_must_be_set_and_divide_the_rollout(global_batch_size, message):
     with pytest.raises(ValueError, match=message):
         validate_diffusion_batch_size(_supported(global_batch_size=global_batch_size))
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ("--over-sampling-batch-size", "16"),
+        ("--rollout-sample-filter-path", "my.filter"),
+        ("--recompute-logprobs-via-prefill",),
+        ("--disable-rollout-global-dataset",),
+        ("--custom-generate-function-path", "my.generate"),
+        ("--diffusion-microgroup-size", "0"),
+    ],
+)
+def test_the_parsed_diffusion_run_rejects_incompatible_shared_loop_options(argv):
+    with pytest.raises(ValueError, match=argv[0]):
+        _parse_diffusion_run("--global-batch-size", "64", *argv)
+
+
+def test_the_parsed_diffusion_run_accepts_its_own_explicit_generate_hook():
+    path = "miles.rollout.diffusion_rollout.generate.generate"
+    config = _parse_diffusion_run("--global-batch-size", "64", "--custom-generate-function-path", path)
+
+    assert config.custom_generate_function_path.path == path
+
+
+def test_diffusion_rejects_engine_batching_with_the_client_batcher(tmp_path):
+    config = tmp_path / "sglang.yaml"
+    template = """sglang:
+  - name: actor
+    server_groups:
+      - worker_type: regular
+        num_gpus: 2
+        num_gpus_per_engine: 1
+        overrides:
+          batching_max_size: {size}
+"""
+    argv = ("--global-batch-size", "64", "--sglang-config", str(config))
+    config.write_text(template.format(size=1))
+    _parse_diffusion_run(*argv)
+
+    config.write_text(template.format(size=2))
+    with pytest.raises(ValueError, match="batching_max_size"):
+        _parse_diffusion_run(*argv)
