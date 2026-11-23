@@ -38,8 +38,13 @@ _UNSUPPORTED = [
     ),
     ("on-policy distillation (--use-opd)", lambda a: a.use_opd),
     (
-        "evaluation (--eval-interval, --eval-prompt-data)",
-        lambda a: a.eval_interval is not None or bool(a.eval_prompt_data),
+        "a dedicated checkpoint eval fleet (--eval-num-gpus); use the colocated engines for eval",
+        lambda a: a.eval_num_gpus > 0,
+    ),
+    ("--group-rm with scheduled evaluation", lambda a: a.group_rm and a.eval_interval is not None),
+    (
+        "--diffusion-eval-num-steps < 1",
+        lambda a: a.diffusion_eval_num_steps is not None and a.diffusion_eval_num_steps < 1,
     ),
     ("fully async or partial rollout", lambda a: a.fully_async or a.partial_rollout),
     ("--over-sampling-batch-size without diffusion engine abort", lambda a: a.over_sampling_batch_size is not None),
@@ -53,7 +58,6 @@ _UNSUPPORTED = [
     ),
     ("--disable-rollout-global-dataset, which the shared rollout requires", lambda a: not a.rollout_global_dataset),
     ("--diffusion-microgroup-size < 1", lambda a: a.diffusion_microgroup_size < 1),
-    ("dynamic sampling filters", lambda a: a.dynamic_sampling_filter_path is not None),
     (
         "a reward other than --rm-type ocr or a --custom-rm-path",
         lambda a: a.custom_rm_path is None and a.rm_type != "ocr",

@@ -26,6 +26,11 @@ class ImageClient:
     async def generate(self, sample: Sample, sampling_params: dict[str, Any]) -> tuple[DiffusionRollout, Reward]:
         return await self.dispatcher.generate(sample, sampling_params)
 
+    async def generate_eval(self, sample: Sample, sampling_params: dict[str, Any]) -> DiffusionRollout:
+        (rollout,) = await self._request({**sampling_params, "prompt": sample.prompt, "num_outputs_per_prompt": 1})
+        rollout.seed = sampling_params["seed"]
+        return rollout
+
     async def _request(self, body: dict[str, Any]) -> list[DiffusionRollout]:
         raw = await self._post(body)
         return await asyncio.to_thread(parse_rollout_response, raw)
