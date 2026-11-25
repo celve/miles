@@ -142,7 +142,7 @@ class TestDiffusionModelValidation:
                 + _POLICY
                 + _generator(
                     groups="      - worker_type: regular\n        engine_kind: diffusion\n        num_gpus: 2\n"
-                    "        overrides: {num_gpus: 2, master_port: 1234, batching_max_size: 4}\n"
+                    "        overrides: {num_gpus: 2, master_port: 1234, scheduler_port: 5000, batching_max_size: 4}\n"
                 ),
                 {},
             ),
@@ -190,6 +190,14 @@ class TestDiffusionModelValidation:
             "one_gpu",
             "colocate",
         ]
+
+    def test_the_ports_and_gpus_miles_owns_are_named(self, tmp_path):
+        groups = (
+            "      - worker_type: regular\n        engine_kind: diffusion\n        num_gpus: 2\n"
+            "        overrides: {num_gpus: 2, master_port: 1234, scheduler_port: 5000, batching_max_size: 4}\n"
+        )
+        with pytest.raises(ValueError, match=r"\['master_port', 'num_gpus', 'scheduler_port'\]"):
+            _resolve(tmp_path, "sglang:\n" + _POLICY + _generator(groups=groups))
 
     def test_update_weights_must_be_written_out(self, tmp_path):
         yaml_text = "sglang:\n" + _POLICY + _generator().replace("    update_weights: false\n", "")

@@ -4,6 +4,7 @@ import json
 import shlex
 import subprocess
 import sys
+import types
 
 import pytest
 
@@ -68,7 +69,7 @@ class TestEntryPoint:
         assert sglang_diffusion_engine_main.os.environ["CUDA_VISIBLE_DEVICES"] == expected
 
     def test_only_sglang_option_names_pass_before_the_model_loads(self):
-        """Registered names pass with native values; typos, aliases and text-server args are named."""
+        """Registered names pass, the selected pipeline's own ones included; typos, aliases and text-server args fail."""
         server_args = {
             "model_path": "/m",
             "dit_precision": "bf16",
@@ -76,6 +77,8 @@ class TestEntryPoint:
             "kv_cache_quant": "off",
             "warmup_sampling_params": {"width": 512, "height": 512},
             "enable_metrics": True,
+            "pipeline_class_name": "Flux3ImagePipeline",
+            "flux3_alpha": 6.5,
             "enable_memory_saver": False,
             "master-port": 32001,
             "typo": {},
@@ -87,6 +90,16 @@ class TestEntryPoint:
             "sglang.multimodal_gen has no server option named: "
             "['dit_config.no_such_field', 'enable_memory_saver', 'master-port', 'typo']"
         ) in result.stderr
+
+
+class TestAllocatedArgs:
+    def test_a_port_sglang_moved_is_refused_before_launch(self):
+        """The broker binds port + 1, which Miles reserved beside the port it allocated, not beside a moved one."""
+        allocated = {"num_gpus": 1, "port": 20004, "master_port": 20006}
+        resolved = types.SimpleNamespace(num_gpus=1, port=20004, master_port=20043)
+        with pytest.raises(ValueError, match=r"resolved \{'master_port': 20043\}"):
+            sglang_diffusion_engine_main.reject_moved_allocations(allocated, resolved=resolved)
+        sglang_diffusion_engine_main.reject_moved_allocations(allocated, resolved=types.SimpleNamespace(**allocated))
 
 
 def _run_entry_point(server_args: dict) -> subprocess.CompletedProcess:

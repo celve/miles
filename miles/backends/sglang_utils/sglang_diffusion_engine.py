@@ -3,6 +3,10 @@
 import json
 import shlex
 
+# Miles sets these for each engine, or leaves them to SGLang (the scheduler binds a free port when none is set);
+# sglang.multimodal_gen itself rejects any other topology that does not fit on the one GPU they give it.
+MILES_OWNED_DIFFUSION_ARGS = ("num_gpus", "master_port", "scheduler_port")
+
 
 def compute_diffusion_engine_launch_cmd(
     *,

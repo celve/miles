@@ -3,6 +3,10 @@
 import argparse
 import json
 import os
+import sys
+
+# Ports and GPUs Miles allocated for this engine; SGLang may move a busy port when it builds its args.
+_ALLOCATED_ARGS = ("num_gpus", "port", "master_port")
 
 
 def pin_gpu(base_gpu_id: int) -> None:
@@ -16,6 +20,32 @@ def reject_unknown_server_args(server_args: dict, *, option_names: set[str]) -> 
         raise ValueError(f"sglang.multimodal_gen has no server option named: {unknown}")
 
 
+def reject_moved_allocations(server_args: dict, *, resolved) -> None:
+    resolved_values = {key: getattr(resolved, key) for key in _ALLOCATED_ARGS}  # config-access-exempt: SGLang's args
+    moved = {key: value for key, value in resolved_values.items() if value != server_args[key]}
+    if moved:
+        raise ValueError(f"sglang.multimodal_gen resolved {moved}, not what Miles allocated for this engine")
+
+
+def sglang_option_names(server_args: dict) -> set[str]:
+    """The options SGLang's `serve` command takes for this model, its pipeline's own ones included."""
+    from sglang.multimodal_gen.runtime.entrypoints.cli.serve import add_multimodal_gen_serve_args
+    from sglang.multimodal_gen.runtime.utils.argparse import FlexibleArgumentParser
+
+    # SGLang picks the pipeline's extra options from the command line it is parsing.
+    selector = [
+        f"--{key.replace('_', '-')}={server_args[key]}"
+        for key in ("model_path", "pipeline_class_name")
+        if key in server_args
+    ]
+    saved_argv, sys.argv = sys.argv, [sys.argv[0], *selector]
+    try:
+        parser = add_multimodal_gen_serve_args(FlexibleArgumentParser())
+    finally:
+        sys.argv = saved_argv
+    return {action.dest for action in parser._actions} - {"help", "config"}
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-gpu-id", type=int, required=True)
@@ -27,16 +57,12 @@ def main(argv: list[str] | None = None) -> None:
     # Imported after pinning: sglang.multimodal_gen initializes CUDA on import.
     from sglang.multimodal_gen.runtime.launch_server import dispatch_launch
     from sglang.multimodal_gen.runtime.server_args import ServerArgs
-    from sglang.multimodal_gen.runtime.utils.argparse import FlexibleArgumentParser
     from sglang.multimodal_gen.runtime.utils.process import kill_process_tree
 
-    sglang_parser = FlexibleArgumentParser()
-    ServerArgs.add_cli_args(sglang_parser)
-    option_names = {action.dest for action in sglang_parser._actions} - {"help"}
-    reject_unknown_server_args(cli.server_args, option_names=option_names)
+    reject_unknown_server_args(cli.server_args, option_names=sglang_option_names(cli.server_args))
     # The dict constructor SGLang's own CLI ends in; it keeps structured values such as warmup_sampling_params.
     server_args = ServerArgs.from_dict(dict(cli.server_args))
-    assert server_args.num_gpus == 1, f"a diffusion engine runs on one GPU, but SGLang resolved {server_args.num_gpus}"
+    reject_moved_allocations(cli.server_args, resolved=server_args)
     try:
         dispatch_launch(server_args)
     finally:

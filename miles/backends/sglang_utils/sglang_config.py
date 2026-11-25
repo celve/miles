@@ -17,6 +17,7 @@ from miles.backends.sglang_utils.arguments import (
     collect_eval_sglang_overrides,
 )
 from miles.backends.sglang_utils.sglang_api_client import WorkerType
+from miles.backends.sglang_utils.sglang_diffusion_engine import MILES_OWNED_DIFFUSION_ARGS
 from miles.backends.sglang_utils.sglang_scaling_config import ServerGroupScalingConfig, SglangScalingConfig
 from miles.router.backend import RouterKind
 from miles.utils.args.configs.sglang_client import SglangClientConfig
@@ -393,11 +394,6 @@ class SglangConfig(FrozenStrictBaseModel):
         return any(m.has_pd_disaggregation for m in self.models)
 
 
-# What Miles sets for each diffusion engine; sglang.multimodal_gen itself rejects any other topology that does not
-# fit on the one GPU these give it.
-_MILES_OWNED_DIFFUSION_ARGS = ("num_gpus", "master_port")
-
-
 def _validate_diffusion_models(raw: _RawSglangConfig, args: Namespace) -> None:
     """A diffusion model is a frozen generator beside the text policy; reject every rule it breaks at once.
 
@@ -415,7 +411,7 @@ def _validate_diffusion_models(raw: _RawSglangConfig, args: Namespace) -> None:
             )
             for g in groups
         ]
-        owned_overrides = sorted({key for g in groups for key in g.overrides if key in _MILES_OWNED_DIFFUSION_ARGS})
+        owned_overrides = sorted({key for g in groups for key in g.overrides if key in MILES_OWNED_DIFFUSION_ARGS})
         broken = [
             rule
             for rule, holds in [
