@@ -345,7 +345,6 @@ class InferenceEngineSpec(BaseCommandSpec):
                 sglang_overrides=server_group_config.overrides,
                 host=ctx.self_addrs["primary"].host,
                 port=ctx.self_addrs["primary"].port,
-                nccl_port=ctx.self_addrs["nccl"].port,
                 master_port=dist_init.port,
             )
         # TODO: only node 0's seed is used by sglang; node != 0 should get node 0's number
@@ -432,7 +431,8 @@ def _compute_spec_inference_engine(
                 allow_dynamic=True,
                 num_consecutive=30 + args.sglang.get_value("dp_size", group=server_group_config),
             ),
-            PortInfo(name="nccl", static_port=10000, allow_dynamic=True),
+            # sglang.multimodal_gen picks its own NCCL port.
+            *([] if is_diffusion else [PortInfo(name="nccl", static_port=10000, allow_dynamic=True)]),
             *(
                 [PortInfo(name="disaggregation_bootstrap", static_port=11000, allow_dynamic=True)]
                 if server_group_config.worker_type == WorkerType.PREFILL

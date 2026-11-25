@@ -11,11 +11,10 @@ def compute_diffusion_engine_launch_cmd(
     sglang_overrides: dict,
     host: str,
     port: int,
-    nccl_port: int,
     master_port: int,
 ) -> str:
     server_args = compute_diffusion_server_args(
-        sglang_overrides=sglang_overrides, host=host, port=port, nccl_port=nccl_port, master_port=master_port
+        sglang_overrides=sglang_overrides, host=host, port=port, master_port=master_port
     )
     return shlex.join(
         [
@@ -30,10 +29,8 @@ def compute_diffusion_engine_launch_cmd(
     )
 
 
-def compute_diffusion_server_args(
-    *, sglang_overrides: dict, host: str, port: int, nccl_port: int, master_port: int
-) -> dict:
-    """Keyword arguments of ``sglang.multimodal_gen``'s ``ServerArgs.from_kwargs``.
+def compute_diffusion_server_args(*, sglang_overrides: dict, host: str, port: int, master_port: int) -> dict:
+    """``sglang.multimodal_gen`` server args, named as in its YAML config file (``--config``).
 
     The group's overrides, which carry the model's ``model_path``, win over these defaults, as they do for text
     engines; none of the run-wide ``--sglang-*`` text-server args apply.
@@ -42,7 +39,6 @@ def compute_diffusion_server_args(
         "trust_remote_code": True,
         "host": host.strip("[]"),
         "port": port,
-        "nccl_port": nccl_port,
         "master_port": master_port,
         "num_gpus": 1,
         "warmup_mode": "off",

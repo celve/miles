@@ -137,7 +137,6 @@ class TestDiffusionEngineSpec:
             "trust_remote_code": True,
             "host": "10.0.0.5",
             "port": 30000,
-            "nccl_port": 10000,
             "master_port": 9000,
             "num_gpus": 1,
             "warmup_mode": "off",
@@ -150,7 +149,7 @@ class TestDiffusionEngineSpec:
         """sglang.multimodal_gen serves no gate; a reserved one would make its cell wait on a port nobody opens."""
         policy, generator = _specs(diffusion_args)
         assert GATE_PORT_NAME in [info.name for info in policy.port_infos]
-        assert [info.name for info in generator.port_infos] == ["primary", "dist_init", "nccl"]
+        assert [info.name for info in generator.port_infos] == ["primary", "dist_init"]
 
     def test_the_generator_reserves_the_port_after_its_own(self, diffusion_args):
         """Its offline-request broker binds port + 1; given to another port, the engine reports itself unhealthy."""

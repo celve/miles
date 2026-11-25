@@ -393,42 +393,33 @@ class SglangConfig(FrozenStrictBaseModel):
         return any(m.has_pd_disaggregation for m in self.models)
 
 
-# Miles places each diffusion engine on one GPU and owns its ports; sglang.multimodal_gen reads these as its own.
-_DIFFUSION_TOPOLOGY_ARGS = (
-    "num_gpus",
-    "tp_size",
-    "sp_degree",
-    "ulysses_degree",
-    "ring_degree",
-    "dp_size",
-    "enable_cfg_parallel",
-    "cfg_parallel_degree",
-    "hsdp_replicate_dim",
-    "hsdp_shard_dim",
-    "base_gpu_id",
-    "gpu_ids",
-    "nccl_port",
-    "master_port",
-)
+# What Miles sets for each diffusion engine; sglang.multimodal_gen itself rejects any other topology that does not
+# fit on the one GPU these give it.
+_MILES_OWNED_DIFFUSION_ARGS = ("num_gpus", "master_port")
 
 
 def _validate_diffusion_models(raw: _RawSglangConfig, args: Namespace) -> None:
     """A diffusion model is a frozen generator beside the text policy; reject every rule it breaks at once.
 
-    Runs on the YAML as written, before the run-wide GPU checks, so a broken generator is named even when the
-    rest of the layout is also wrong.
+    Reads the YAML as written, before anything resolves it, so no generic check can preempt these rules.
     """
-    offset_cursor = _OffsetCursor(gpu=0, engine=0)
-    for index, raw_model in enumerate(raw.models):
-        model, _ = ModelConfig.resolve(raw_model, args, offset_cursor)
-        if model.engine_kind != EngineKind.DIFFUSION:
-            continue
+    for index, model in enumerate(raw.models):
         groups = model.server_groups
-        topology_overrides = sorted({key for g in groups for key in g.overrides if key in _DIFFUSION_TOPOLOGY_ARGS})
+        if not any(g.engine_kind == EngineKind.DIFFUSION for g in groups):
+            continue
+        gpus_per_engine = [
+            next(
+                n
+                for n in (g.num_gpus_per_engine, model.num_gpus_per_engine, args.rollout_num_gpus_per_engine)
+                if n is not None
+            )
+            for g in groups
+        ]
+        owned_overrides = sorted({key for g in groups for key in g.overrides if key in _MILES_OWNED_DIFFUSION_ARGS})
         broken = [
             rule
             for rule, holds in [
-                ("update_weights must be false", not model.update_weights),
+                ("update_weights must be set to false", model.update_weights is False),
                 ("it must not be the first model, whose router serves the policy", index > 0),
                 ("it must not be named eval, the name of the text eval fleet", model.name != "eval"),
                 (
@@ -443,8 +434,8 @@ def _validate_diffusion_models(raw: _RawSglangConfig, args: Namespace) -> None:
                     "every server group must be worker_type: regular",
                     all(g.worker_type == WorkerType.REGULAR for g in groups),
                 ),
-                ("num_gpus_per_engine must be 1", all(g.num_gpus_per_engine == 1 for g in groups)),
-                (f"overrides must not set the engine's GPUs or ports: {topology_overrides}", not topology_overrides),
+                ("num_gpus_per_engine must be 1", all(n == 1 for n in gpus_per_engine)),
+                (f"overrides must not set what Miles sets for the engine: {owned_overrides}", not owned_overrides),
                 ("--colocate is not supported", not args.colocate),
             ]
             if not holds

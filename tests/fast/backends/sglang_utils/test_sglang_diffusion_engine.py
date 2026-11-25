@@ -4,7 +4,6 @@ import json
 import shlex
 import subprocess
 import sys
-import types
 
 import pytest
 
@@ -19,7 +18,6 @@ def _launch_argv(**overrides) -> list[str]:
         sglang_overrides={"model_path": "/models/Z-Image-Turbo"},
         host="10.0.0.5",
         port=30000,
-        nccl_port=10001,
         master_port=9001,
     )
     return shlex.split(compute_diffusion_engine_launch_cmd(**(kwargs | overrides)))
@@ -41,7 +39,6 @@ class TestLaunchCommand:
             "trust_remote_code": True,
             "host": "10.0.0.5",
             "port": 30000,
-            "nccl_port": 10001,
             "master_port": 9001,
             "num_gpus": 1,
             "warmup_mode": "off",
@@ -70,41 +67,33 @@ class TestEntryPoint:
         sglang_diffusion_engine_main.pin_gpu(base_gpu_id)
         assert sglang_diffusion_engine_main.os.environ["CUDA_VISIBLE_DEVICES"] == expected
 
-    def test_an_unknown_server_arg_is_rejected_by_name_before_launch(self):
-        """Pipeline args such as dit_precision pass; enable_memory_saver, a text-server arg, does not."""
+    def test_sglang_names_every_unknown_arg_before_loading_the_model(self):
+        """Nested-config, pipeline and server args SGLang registers pass; typos and text-server args do not."""
         server_args = {
             "model_path": "/m",
             "dit_precision": "bf16",
             "dit_config.torch_compile_mode": "max-autotune",
+            "kv_cache_quant": "off",
+            "batching_max_size": 4,
+            "enable_metrics": True,
             "enable_memory_saver": False,
             "not_an_arg": 1,
-            "dit_configs.x": 1,
+            "dit_config.no_such_field": 1,
         }
-        result = subprocess.run(
-            [sys.executable, "-m", "miles.backends.sglang_utils.sglang_diffusion_engine_main", "--base-gpu-id", "0"]
-            + ["--server-args", json.dumps(server_args)],
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
+        result = _run_entry_point(server_args)
         assert result.returncode != 0
-        assert "does not take these server args: ['dit_configs.x', 'enable_memory_saver', 'not_an_arg']" in (
-            result.stderr
+        assert (
+            "unrecognized arguments: --enable-memory-saver false --not-an-arg 1 --dit-config.no-such-field 1"
+            in result.stderr
         )
 
 
-class TestNestedConfigArgs:
-    _PIPELINE = types.SimpleNamespace(
-        dit_config=types.SimpleNamespace(torch_compile_mode=None),
-        vae_config=types.SimpleNamespace(tile_size=None),
-        text_encoder_configs=[],
+def _run_entry_point(server_args: dict) -> subprocess.CompletedProcess:
+    # A fresh interpreter: torchtitan's compat shim, loaded by this test session, breaks sglang.multimodal_gen imports.
+    return subprocess.run(
+        [sys.executable, "-m", "miles.backends.sglang_utils.sglang_diffusion_engine_main", "--base-gpu-id", "0"]
+        + ["--server-args", json.dumps(server_args)],
+        capture_output=True,
+        text=True,
+        timeout=300,
     )
-
-    def test_fields_the_model_config_has_are_accepted(self):
-        server_args = {"model_path": "/m", "dit_config.torch_compile_mode": "x", "vae_config.tile_size": 1}
-        sglang_diffusion_engine_main.reject_unknown_nested_args(server_args, pipeline_config=self._PIPELINE)
-
-    def test_fields_sglang_would_silently_drop_are_rejected_by_name(self):
-        server_args = {"dit_config.no_such_field": 1, "t5_config.x": 1, "dit_config.torch_compile_mode": "x"}
-        with pytest.raises(ValueError, match=r"\['dit_config.no_such_field', 't5_config.x'\]"):
-            sglang_diffusion_engine_main.reject_unknown_nested_args(server_args, pipeline_config=self._PIPELINE)

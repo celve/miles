@@ -85,14 +85,14 @@ class TestEngineKindParsing:
 
 
 _RULES = {
-    "update_weights": "update_weights must be false",
+    "update_weights": "update_weights must be set to false",
     "first": "must not be the first model",
     "eval_name": "must not be named eval",
     "all_diffusion": "every server group must set engine_kind: diffusion",
     "router": "--router miles is required",
     "regular": "every server group must be worker_type: regular",
     "one_gpu": "num_gpus_per_engine must be 1",
-    "topology": "overrides must not set the engine's GPUs or ports",
+    "topology": "overrides must not set what Miles sets for the engine",
     "colocate": "--colocate is not supported",
 }
 
@@ -160,7 +160,7 @@ class TestDiffusionModelValidation:
     def test_every_broken_rule_is_named_in_one_error(self, tmp_path):
         groups = (
             "      - worker_type: prefill\n        engine_kind: diffusion\n        num_gpus: 2\n"
-            "        num_gpus_per_engine: 2\n        overrides: {tp_size: 2}\n"
+            "        num_gpus_per_engine: 2\n        overrides: {num_gpus: 2}\n"
             "      - worker_type: regular\n        num_gpus: 1\n"
         )
         yaml_text = "sglang:\n" + _generator(update_weights="true", groups=groups, name="eval") + _POLICY
@@ -168,12 +168,33 @@ class TestDiffusionModelValidation:
             _resolve(tmp_path, yaml_text, rollout_num_gpus=4, router="sglang", colocate=True)
         message = str(exc_info.value)
         assert [name for name, text in _RULES.items() if text in message] == list(_RULES)
-        assert "['tp_size']" in message
+        assert "['num_gpus']" in message
 
     def test_a_broken_generator_is_named_before_the_run_wide_gpu_check(self, tmp_path):
         """--colocate shrinks --rollout-num-gpus to the trainer's GPUs, which would otherwise fail the GPU sum first."""
         with pytest.raises(ValueError, match="Diffusion model 'generator'.*--colocate is not supported"):
             _resolve(tmp_path, "sglang:\n" + _POLICY + _generator(), rollout_num_gpus=1, colocate=True)
+
+    def test_rules_are_named_before_any_model_is_resolved(self, tmp_path):
+        """Resolving first would raise its own model_path or gpus-per-engine error and hide these."""
+        groups = (
+            "      - {worker_type: regular, engine_kind: diffusion, num_gpus: 1, num_gpus_per_engine: 0}\n"
+            "      - {worker_type: regular, num_gpus: 1, overrides: {model_path: /models/other}}\n"
+        )
+        with pytest.raises(ValueError) as exc_info:
+            _resolve(tmp_path, "sglang:\n" + _POLICY + _generator(update_weights="true", groups=groups), colocate=True)
+        message = str(exc_info.value)
+        assert [name for name, text in _RULES.items() if text in message] == [
+            "update_weights",
+            "all_diffusion",
+            "one_gpu",
+            "colocate",
+        ]
+
+    def test_update_weights_must_be_written_out(self, tmp_path):
+        yaml_text = "sglang:\n" + _POLICY + _generator().replace("    update_weights: false\n", "")
+        with pytest.raises(ValueError, match="update_weights must be set to false"):
+            _resolve(tmp_path, yaml_text)
 
     def test_a_frozen_text_model_is_not_held_to_the_diffusion_rules(self, tmp_path):
         """A frozen text ref model beside the policy predates diffusion groups and must keep resolving."""
@@ -222,3 +243,14 @@ class TestThroughTheArgumentParser:
                 "2",
                 "--colocate",
             )
+
+
+class TestTextOnlyConfigs:
+    """Behaviour main already has; these pass on main and must keep passing."""
+
+    def test_a_dedicated_eval_group_without_gpus_per_engine_takes_the_eval_default(self, tmp_path):
+        eval_model = (
+            "  - name: eval\n    server_groups:\n      - {worker_type: regular, num_gpus: 1, num_gpus_per_engine: 0}\n"
+        )
+        cfg = _resolve(tmp_path, "sglang:\n" + _POLICY + eval_model, rollout_num_gpus=1, eval_num_gpus=1)
+        assert [g.num_gpus_per_engine for g in cfg.models[1].server_groups] == [1]
