@@ -15,15 +15,15 @@ The job's GPUs hold the trainer, the policy engine, one diffusion engine per gen
 Args:
     --train-gpus, --policy-gpus, --generator-gpus, --scorer-gpus: the job's GPUs; --num-gpus-per-node is their sum.
     --scorer: hpsv3 (a reward pool in the job) or imagereward (scorer_server.py at --scorer-urls, no scorer GPUs).
-    --scorer-urls: comma-separated scorer_server.py URLs, for --scorer imagereward.
+    --scorer-urls: comma-separated scorer_server.py URLs; given alone, they select --scorer imagereward.
+    Unset, --scorer-gpus is 1 for hpsv3 and 0 for imagereward, and --num-gpus-per-node is the sum of the job's GPUs.
     --seed-per-sample: draw each image's seed per sample, as LIN-3046 did, instead of one per group.
     --training-seed: Megatron and rollout seed; unset keeps Miles' defaults (LIN-3046's seed-42 run).
     --model-dir, --data-dir: where the models and the prompt data live; checkpoints go under --output-dir.
 
 Example:
     python examples/experimental/prompt_enhancer/run_qwen25_3b_prompt_enhancer.py
-    python examples/experimental/prompt_enhancer/run_qwen25_3b_prompt_enhancer.py --scorer imagereward \
-        --scorer-gpus 0 --num-gpus-per-node 7 --scorer-urls http://127.0.0.1:18200
+    python examples/experimental/prompt_enhancer/run_qwen25_3b_prompt_enhancer.py --scorer-urls http://127.0.0.1:18200
 """
 
 from dataclasses import dataclass
@@ -69,13 +69,13 @@ _REWARD_POOL_CONFIG = """\
 
 @dataclass
 class ScriptArgs(command_utils.ExecuteTrainConfig):
-    num_gpus_per_node: int = 8
+    num_gpus_per_node: int | None = None
     train_gpus: int = 1
     policy_gpus: int = 1
     generator_gpus: int = 5
-    scorer_gpus: int = 1
-    scorer: str = "hpsv3"
-    scorer_urls: str = "http://127.0.0.1:18200"
+    scorer_gpus: int | None = None
+    scorer: str | None = None
+    scorer_urls: str | None = None
     seed_per_sample: bool = False
     training_seed: int | None = None
     num_epoch: int = 3
@@ -89,11 +89,22 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
 
     def __post_init__(self):
         assert self.num_nodes == 1, "the recipe places its trainer and engines on one node"
+        # Scorer URLs alone select ImageReward, so the parity command from before HPSv3 keeps its scorer and layout.
+        if self.scorer is None:
+            self.scorer = "imagereward" if self.scorer_urls is not None else "hpsv3"
         assert self.scorer in IMAGE_WEIGHTS, f"--scorer is one of {sorted(IMAGE_WEIGHTS)}, got {self.scorer}"
+        if self.scorer == "imagereward":
+            self.scorer_urls = self.scorer_urls or "http://127.0.0.1:18200"
+        assert self.scorer_urls is None or self.scorer == "imagereward", "--scorer-urls are ImageReward's scorers"
+        if self.scorer_gpus is None:
+            self.scorer_gpus = 1 if self.scorer == "hpsv3" else 0
         assert (self.scorer_gpus > 0) == (self.scorer == "hpsv3"), (
             "--scorer hpsv3 scores on --scorer-gpus in the job; --scorer imagereward scores outside it, on none"
         )
-        assert self.train_gpus + self.policy_gpus + self.generator_gpus + self.scorer_gpus == self.num_gpus_per_node, (
+        job_gpus = self.train_gpus + self.policy_gpus + self.generator_gpus + self.scorer_gpus
+        if self.num_gpus_per_node is None:
+            self.num_gpus_per_node = job_gpus
+        assert job_gpus == self.num_gpus_per_node, (
             f"--train-gpus {self.train_gpus}, --policy-gpus {self.policy_gpus}, --generator-gpus "
             f"{self.generator_gpus} and --scorer-gpus {self.scorer_gpus} must add up to --num-gpus-per-node "
             f"{self.num_gpus_per_node}"

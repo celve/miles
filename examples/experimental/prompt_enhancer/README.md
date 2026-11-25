@@ -38,7 +38,7 @@ The generator is declared in `--sglang-config` as a second model with `update_we
 
 ### ImageReward, for parity with LIN-3046
 
-The scorer runs outside the job on the eighth GPU.
+The scorer runs outside the job on the eighth GPU; `--scorer-urls` alone selects it (`--scorer imagereward`), and the job keeps 7 GPUs.
 
 1. A venv for the scorer (ImageReward needs transformers 4.x):
 
@@ -54,7 +54,7 @@ The scorer runs outside the job on the eighth GPU.
 
    ```bash
    CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 python examples/experimental/prompt_enhancer/run_qwen25_3b_prompt_enhancer.py \
-     --scorer imagereward --scorer-gpus 0 --num-gpus-per-node 7 --scorer-urls http://127.0.0.1:18200
+     --scorer-urls http://127.0.0.1:18200
    ```
 
 ## Evaluate on GenEval

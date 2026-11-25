@@ -34,7 +34,8 @@ def config(monkeypatch, tmp_path):
     return _parse(tmp_path, monkeypatch)
 
 
-_IMAGEREWARD = dict(scorer="imagereward", scorer_gpus=0, num_gpus_per_node=7, scorer_urls="http://a:1,http://b:2")
+# Layer 3's documented parity command: scorer URLs, nothing else.
+_IMAGEREWARD = dict(scorer_urls="http://a:1,http://b:2")
 
 
 def test_the_grpo_settings_are_lin3046s(config):
@@ -99,13 +100,25 @@ def test_hpsv3_scores_on_a_reward_pool_by_default(config, tmp_path):
     assert (pool.name, pool.num_workers, pool.uses_gpu, pool.batch_size, pool.max_wait_ms) == ("hpsv3", 1, True, 16, 50)
 
 
-def test_imagereward_keeps_lin3046s_scorer_servers_and_weight(monkeypatch, tmp_path):
+def test_scorer_urls_alone_keep_lin3046s_imagereward_job(monkeypatch, tmp_path):
     config = _parse(tmp_path, monkeypatch, **_IMAGEREWARD)
 
     reward_config = config.custom_rm_path.config
     assert (reward_config.pe_scorer_pool, reward_config.pe_scorer_urls) == (None, "http://a:1,http://b:2")
     assert reward_config.pe_image_weight == 0.25
-    assert config.reward_pools == [] and config.num_gpus_per_node == 7
+    assert config.reward_pools == [] and config.reward_scaling.num_gpus == 0
+    assert (config.num_gpus_per_node, config.rollout_num_gpus) == (7, 6)
+
+
+def test_imagereward_without_urls_uses_the_local_scorer_server():
+    args = ScriptArgs(scorer="imagereward")
+
+    assert (args.scorer_urls, args.scorer_gpus, args.num_gpus_per_node) == ("http://127.0.0.1:18200", 0, 7)
+
+
+def test_scorer_urls_with_hpsv3_are_refused():
+    with pytest.raises(AssertionError, match="ImageReward's scorers"):
+        ScriptArgs(scorer="hpsv3", scorer_urls="http://a:1")
 
 
 @pytest.mark.parametrize("scorer, scorer_gpus", [("hpsv3", 0), ("imagereward", 1), ("pickscore", 1)])
@@ -127,7 +140,7 @@ def test_without_a_training_seed_miles_defaults_stay(config):
 
 def test_a_split_that_does_not_fill_the_job_is_refused():
     with pytest.raises(AssertionError, match="must add up to"):
-        ScriptArgs(generator_gpus=2)
+        ScriptArgs(generator_gpus=2, num_gpus_per_node=8)
 
 
 def test_the_checkpoint_is_converted_on_the_trainers_gpus(monkeypatch):
