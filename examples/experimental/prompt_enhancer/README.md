@@ -51,7 +51,7 @@ The generator is declared in `--sglang-config` as a second model with `update_we
 
 ## Evaluate on GenEval
 
-Start one engine per GPU with SGLang's own CLI, render each arm, then score with GenEval's detector in its own environment ([GenEval](https://github.com/djghosh13/geneval)):
+Start one engine per GPU with SGLang's own CLI, render each arm, then score each arm with GenEval's detector in GenEval's own environment ([GenEval](https://github.com/djghosh13/geneval), set up as its README says; `GENEVAL` below is its checkout and `MASK2FORMER` its detector config):
 
 ```bash
 # SGLang derives an engine's other ports from --port, so neighbours 1 apart collide: space them and set the rest.
@@ -59,12 +59,23 @@ for g in 0 1 2 3 4 5 6 7; do
   CUDA_VISIBLE_DEVICES=$g sglang serve --model-path /root/models/Z-Image-Turbo --port $((30000 + 100 * g)) \
     --master-port $((31000 + 100 * g)) --scheduler-port $((32000 + 100 * g)) &
 done
+for g in 0 1 2 3 4 5 6 7; do
+  until curl -sf localhost:$((30000 + 100 * g))/health > /dev/null; do sleep 10; done
+done
 URLS=$(seq -s, -f "http://127.0.0.1:%g" 30000 100 30700)
-python -m examples.experimental.prompt_enhancer.geneval --policy /root/models/Qwen2.5-3B-Instruct \
-  --metadata geneval/prompts/evaluation_metadata.jsonl --image-urls $URLS --out geneval/base --images-per-prompt 8
-python -m examples.experimental.prompt_enhancer.geneval --policy <run dir>/hf/iter_0000099 \
-  --metadata geneval/prompts/evaluation_metadata.jsonl --image-urls $URLS --out geneval/trained --images-per-prompt 8
-python geneval/evaluation/evaluate_images.py geneval/trained/images --outfile geneval/trained/results.jsonl ...
+METADATA=$GENEVAL/prompts/evaluation_metadata.jsonl
+CKPT=/root/shared_data/$RUN_ID/hf/iter_99  # the launcher's --save-hf export after 100 steps
+CUDA_VISIBLE_DEVICES=0 python -m examples.experimental.prompt_enhancer.geneval --policy /root/models/Qwen2.5-3B-Instruct \
+  --metadata $METADATA --image-urls $URLS --out geneval/base --images-per-prompt 8
+CUDA_VISIBLE_DEVICES=0 python -m examples.experimental.prompt_enhancer.geneval --policy $CKPT \
+  --metadata $METADATA --image-urls $URLS --out geneval/trained --images-per-prompt 8
+for arm in base trained; do
+  (cd $GENEVAL && python evaluation/evaluate_images.py ../geneval/$arm/images \
+     --outfile ../geneval/$arm/results.jsonl --model-path <detector weights dir> --model-config $MASK2FORMER \
+   && python evaluation/summary_scores.py ../geneval/$arm/results.jsonl)
+done
 ```
 
-The rewriter runs as RePrompt's GenEval script runs it: bf16, greedy, 512 new tokens. Image `k` of prompt `i` has seed `i * 1000 + k` in every arm, so images pair across arms by prompt and seed, which an exact McNemar test on image-level correctness needs. A GenEval difference between two runs of this recipe needs at least 8 images per prompt and 2 training seeds per side to read: one seed moves GenEval by about 0.015 here.
+An output directory belongs to one set of inputs (policy, prompts, seed offset, image count, sampling): rerunning with the same ones resumes, and any other is refused, so give each arm and each seed offset its own `--out`.
+
+The rewriter runs as RePrompt's GenEval script runs it: bf16, greedy, 512 new tokens. Image `k` of prompt `i` has seed `i * 1000 + k + --seed-offset` in every arm, so images pair across arms by prompt and seed, which an exact McNemar test on image-level correctness needs. A GenEval difference between two runs of this recipe needs at least 8 images per prompt and 2 training seeds per side to read: one seed moves GenEval by about 0.015 here. To pool two trained seeds, pair each with its own base cohort at a distinct `--seed-offset`, so no base image is counted twice.

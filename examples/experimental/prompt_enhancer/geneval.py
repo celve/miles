@@ -13,12 +13,14 @@ Engines are plain `sglang serve` processes, one per GPU; space their ports, whic
     python -m examples.experimental.prompt_enhancer.geneval --policy /root/shared_data/<run>/hf/iter_0000099 \\
         --metadata geneval/prompts/evaluation_metadata.jsonl --image-urls http://127.0.0.1:30000 --out out/trained
 
-Output: `<out>/rewrites.jsonl`, and `<out>/images/<index:05>/{metadata.jsonl,samples/<k:05>.png}`; files that already
-exist are kept, so a stopped run resumes.
+Output: `<out>/inputs.json`, `<out>/rewrites.jsonl`, and `<out>/images/<index:05>/{metadata.jsonl,samples/<k:05>.png}`.
+A rerun with the same inputs keeps the files that exist, so a stopped run resumes; a rerun with any other input (policy,
+prompts, seeds, image count or sampling) is refused, so every image in a directory belongs to one cohort.
 """
 
 import argparse
 import asyncio
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -58,6 +60,20 @@ def rewrite(policy: str, prompts: list[str], *, batch_size: int, max_new_tokens:
     return responses
 
 
+def bind_inputs(out: Path, inputs: dict) -> None:
+    """Record the cohort's inputs in a new directory, or refuse a directory made from other inputs."""
+    path = out / "inputs.json"
+    if path.exists():
+        recorded = json.loads(path.read_text())
+        if recorded != inputs:
+            raise SystemExit(f"{out} holds images made from {recorded}; give a fresh --out for {inputs}")
+        return
+    if out.exists() and any(out.iterdir()):
+        raise SystemExit(f"{out} is not empty and records no inputs; give a fresh --out")
+    out.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(inputs, indent=2))
+
+
 async def render_all(jobs: list[tuple[ImageRequest, Path]], urls: list[str], *, concurrency: int) -> None:
     clients = [ImageGenerationClient(url, timeout_secs=600) for url in urls]
     semaphore = asyncio.Semaphore(concurrency)
@@ -94,9 +110,23 @@ def main() -> None:
     assert args.raw != bool(args.policy), "give exactly one of --policy and --raw"
     assert args.images_per_prompt <= _SEEDS_PER_PROMPT
 
-    metadatas = [json.loads(line) for line in args.metadata.read_text().splitlines() if line.strip()]
+    metadata_text = args.metadata.read_text()
+    metadatas = [json.loads(line) for line in metadata_text.splitlines() if line.strip()]
     prompts = [m["prompt"] for m in metadatas]
-    args.out.mkdir(parents=True, exist_ok=True)
+    policy = str(Path(args.policy).resolve()) if args.policy and Path(args.policy).exists() else args.policy
+    bind_inputs(
+        args.out,
+        dict(
+            policy=None if args.raw else policy,
+            metadata_sha256=hashlib.sha256(metadata_text.encode()).hexdigest(),
+            images_per_prompt=args.images_per_prompt,
+            seed_offset=args.seed_offset,
+            width=args.width,
+            height=args.height,
+            num_inference_steps=args.num_inference_steps,
+            guidance_scale=args.guidance_scale,
+        ),
+    )
     rewrites_path = args.out / "rewrites.jsonl"
     if not rewrites_path.exists():
         responses = [""] * len(prompts) if args.raw else rewrite(args.policy, prompts, batch_size=args.batch_size)
