@@ -4,9 +4,10 @@ from argparse import Namespace
 
 import pydantic
 import pytest
+from tests.fast.fixtures.args_fixtures import parse_fsdp_test_config
 from tests.fast.fixtures.sglang_config_fixtures import resolve_sglang_config
 
-from miles.backends.sglang_utils.sglang_config import EngineKind
+from miles.backends.sglang_utils.sglang_config import EngineKind, SglangConfig, _compute_raw_sglang_config
 
 _POLICY = """\
   - name: policy
@@ -45,10 +46,10 @@ def _resolve(tmp_path, yaml_text: str, **overrides):
     return resolve_sglang_config(_make_args(sglang_config=str(path), **overrides))
 
 
-def _generator(*, update_weights: str = "false", groups: str | None = None) -> str:
+def _generator(*, update_weights: str = "false", groups: str | None = None, name: str = "generator") -> str:
     groups = groups or ("      - worker_type: regular\n" "        engine_kind: diffusion\n" "        num_gpus: 2\n")
     return (
-        "  - name: generator\n"
+        f"  - name: {name}\n"
         "    model_path: /models/Z-Image-Turbo\n"
         f"    update_weights: {update_weights}\n"
         "    server_groups:\n" + groups
@@ -86,10 +87,12 @@ class TestEngineKindParsing:
 _RULES = {
     "update_weights": "update_weights must be false",
     "first": "must not be the first model",
+    "eval_name": "must not be named eval",
     "all_diffusion": "every server group must set engine_kind: diffusion",
     "router": "--router miles is required",
     "regular": "every server group must be worker_type: regular",
     "one_gpu": "num_gpus_per_engine must be 1",
+    "topology": "overrides must not set the engine's GPUs or ports",
     "colocate": "--colocate is not supported",
 }
 
@@ -133,27 +136,44 @@ class TestDiffusionModelValidation:
                 ),
                 {},
             ),
+            (
+                "topology",
+                "sglang:\n"
+                + _POLICY
+                + _generator(
+                    groups="      - worker_type: regular\n        engine_kind: diffusion\n        num_gpus: 2\n"
+                    "        overrides: {num_gpus: 2, master_port: 1234, batching_max_size: 4}\n"
+                ),
+                {},
+            ),
             ("colocate", "sglang:\n" + _POLICY + _generator(), {"colocate": True}),
+            ("eval_name", "sglang:\n" + _POLICY + _generator(name="eval"), {}),
         ],
     )
     def test_each_rule_alone_is_named(self, tmp_path, rule, yaml_text, overrides):
         with pytest.raises(ValueError) as exc_info:
             _resolve(tmp_path, yaml_text, **overrides)
         message = str(exc_info.value)
-        assert "Diffusion model 'generator'" in message
+        assert "Diffusion model '" in message
         assert [name for name, text in _RULES.items() if text in message] == [rule]
 
     def test_every_broken_rule_is_named_in_one_error(self, tmp_path):
         groups = (
             "      - worker_type: prefill\n        engine_kind: diffusion\n        num_gpus: 2\n"
-            "        num_gpus_per_engine: 2\n"
+            "        num_gpus_per_engine: 2\n        overrides: {tp_size: 2}\n"
             "      - worker_type: regular\n        num_gpus: 1\n"
         )
-        yaml_text = "sglang:\n" + _generator(update_weights="true", groups=groups) + _POLICY
+        yaml_text = "sglang:\n" + _generator(update_weights="true", groups=groups, name="eval") + _POLICY
         with pytest.raises(ValueError) as exc_info:
             _resolve(tmp_path, yaml_text, rollout_num_gpus=4, router="sglang", colocate=True)
         message = str(exc_info.value)
         assert [name for name, text in _RULES.items() if text in message] == list(_RULES)
+        assert "['tp_size']" in message
+
+    def test_a_broken_generator_is_named_before_the_run_wide_gpu_check(self, tmp_path):
+        """--colocate shrinks --rollout-num-gpus to the trainer's GPUs, which would otherwise fail the GPU sum first."""
+        with pytest.raises(ValueError, match="Diffusion model 'generator'.*--colocate is not supported"):
+            _resolve(tmp_path, "sglang:\n" + _POLICY + _generator(), rollout_num_gpus=1, colocate=True)
 
     def test_a_frozen_text_model_is_not_held_to_the_diffusion_rules(self, tmp_path):
         """A frozen text ref model beside the policy predates diffusion groups and must keep resolving."""
@@ -163,3 +183,42 @@ class TestDiffusionModelValidation:
         )
         cfg = _resolve(tmp_path, "sglang:\n" + _POLICY + ref, router="sglang")
         assert [m.engine_kind for m in cfg.models] == [EngineKind.TEXT, EngineKind.TEXT]
+
+
+class TestTextLookups:
+    def test_a_diffusion_override_does_not_disagree_with_the_text_engines(self, tmp_path):
+        """enable_metrics is a valid sglang.multimodal_gen arg; it must not break a lookup only text engines serve."""
+        groups = (
+            "      - {worker_type: regular, engine_kind: diffusion, num_gpus: 2, overrides: {enable_metrics: true}}\n"
+        )
+        path = tmp_path / "config.yaml"
+        path.write_text("sglang:\n" + _POLICY + _generator(groups=groups))
+        args = _make_args(sglang_config=str(path))
+        config, _ = SglangConfig.resolve(
+            raw=_compute_raw_sglang_config(args), args=args, base_args={"enable_metrics": False, "dp_size": 1}
+        )
+        assert config.common_value("enable_metrics") is False
+        assert config.common_value("dp_size") == 1
+
+
+class TestThroughTheArgumentParser:
+    def test_colocate_is_named_for_the_generator(self, tmp_path):
+        """The real parser rewrites --rollout-num-gpus under --colocate before the sglang config is read."""
+        path = tmp_path / "config.yaml"
+        path.write_text(
+            "sglang:\n"
+            + _POLICY
+            + _generator(groups="      - {worker_type: regular, engine_kind: diffusion, num_gpus: 1}\n")
+        )
+        with pytest.raises(
+            ValueError, match="Diffusion model 'generator' breaks these rules: --colocate is not supported"
+        ):
+            parse_fsdp_test_config(
+                "--sglang-config",
+                str(path),
+                "--router",
+                "miles",
+                "--rollout-num-gpus",
+                "2",
+                "--colocate",
+            )

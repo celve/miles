@@ -1,26 +1,7 @@
 {
   "default_layout": [
     {
-      "launch_inputs": {
-        "base_gpu_id": 1,
-        "disaggregation_bootstrap_port": null,
-        "dist_init_addr": "10.0.0.5:9000",
-        "engine_info_bootstrap_port": 12000,
-        "gated_launch_port": 13000,
-        "host": "10.0.0.5",
-        "interpreter_prefix": [
-          "python3"
-        ],
-        "nccl_port": 10000,
-        "node_rank": 0,
-        "num_gpus_per_engine": 2,
-        "port": 30000,
-        "random_seed": 42,
-        "sglang_overrides": {
-          "model_path": "/models/policy"
-        },
-        "worker_type": "WorkerType.REGULAR"
-      },
+      "launch_command": "python3 -m sglang.launch_server --trust-remote-code --model-path /models/policy --host 10.0.0.5 --port 30000 --device cuda --random-seed 42 --nccl-port 10000 --dist-init-addr 10.0.0.5:9000 --base-gpu-id 1 --gated-launch-port 13000 --tp-size 2 --skip-server-warmup --enable-draft-weights-cpu-backup --enable-metrics --no-enable-decoder-swa-bounded-replay --engine-info-bootstrap-port 12000 --lora-use-virtual-experts",
       "name": "inference-engine-all-0-0",
       "port_infos": [
         {
@@ -77,27 +58,7 @@
   ],
   "offload_rollout_resident": [
     {
-      "launch_inputs": {
-        "base_gpu_id": 1,
-        "disaggregation_bootstrap_port": null,
-        "dist_init_addr": "10.0.0.5:9000",
-        "engine_info_bootstrap_port": 12000,
-        "gated_launch_port": 13000,
-        "host": "10.0.0.5",
-        "interpreter_prefix": [
-          "python3"
-        ],
-        "nccl_port": 10000,
-        "node_rank": 0,
-        "num_gpus_per_engine": 1,
-        "port": 30000,
-        "random_seed": 42,
-        "sglang_overrides": {
-          "enable_memory_saver": false,
-          "model_path": "/models/policy"
-        },
-        "worker_type": "WorkerType.REGULAR"
-      },
+      "launch_command": "python3 -m sglang.launch_server --trust-remote-code --model-path /models/policy --host 10.0.0.5 --port 30000 --device cuda --random-seed 42 --nccl-port 10000 --dist-init-addr 10.0.0.5:9000 --base-gpu-id 1 --gated-launch-port 13000 --skip-server-warmup --enable-draft-weights-cpu-backup --enable-metrics --no-enable-decoder-swa-bounded-replay --engine-info-bootstrap-port 12000 --lora-use-virtual-experts",
       "name": "inference-engine-all-0-0",
       "port_infos": [
         {
@@ -152,27 +113,7 @@
       }
     },
     {
-      "launch_inputs": {
-        "base_gpu_id": 1,
-        "disaggregation_bootstrap_port": null,
-        "dist_init_addr": "10.0.0.5:9000",
-        "engine_info_bootstrap_port": 12000,
-        "gated_launch_port": 13000,
-        "host": "10.0.0.5",
-        "interpreter_prefix": [
-          "python3"
-        ],
-        "nccl_port": 10000,
-        "node_rank": 0,
-        "num_gpus_per_engine": 1,
-        "port": 30000,
-        "random_seed": 44,
-        "sglang_overrides": {
-          "enable_memory_saver": false,
-          "model_path": "/models/ref"
-        },
-        "worker_type": "WorkerType.REGULAR"
-      },
+      "launch_command": "python3 -m sglang.launch_server --trust-remote-code --model-path /models/ref --host 10.0.0.5 --port 30000 --device cuda --random-seed 44 --nccl-port 10000 --dist-init-addr 10.0.0.5:9000 --base-gpu-id 1 --gated-launch-port 13000 --skip-server-warmup --enable-draft-weights-cpu-backup --enable-metrics --no-enable-decoder-swa-bounded-replay --engine-info-bootstrap-port 12000 --lora-use-virtual-experts",
       "name": "inference-engine-all-1-0",
       "port_infos": [
         {
@@ -229,26 +170,7 @@
   ],
   "pd_disaggregation": [
     {
-      "launch_inputs": {
-        "base_gpu_id": 1,
-        "disaggregation_bootstrap_port": 11000,
-        "dist_init_addr": "10.0.0.5:9000",
-        "engine_info_bootstrap_port": 12000,
-        "gated_launch_port": 13000,
-        "host": "10.0.0.5",
-        "interpreter_prefix": [
-          "python3"
-        ],
-        "nccl_port": 10000,
-        "node_rank": 0,
-        "num_gpus_per_engine": 1,
-        "port": 30000,
-        "random_seed": 42,
-        "sglang_overrides": {
-          "model_path": "/models/policy"
-        },
-        "worker_type": "WorkerType.PREFILL"
-      },
+      "launch_command": "python3 -m sglang.launch_server --trust-remote-code --model-path /models/policy --host 10.0.0.5 --port 30000 --device cuda --random-seed 42 --nccl-port 10000 --dist-init-addr 10.0.0.5:9000 --base-gpu-id 1 --gated-launch-port 13000 --skip-server-warmup --enable-draft-weights-cpu-backup --enable-metrics --disaggregation-mode prefill --load-balance-method round_robin --disaggregation-bootstrap-port 11000 --no-enable-decoder-swa-bounded-replay --engine-info-bootstrap-port 12000 --lora-use-virtual-experts",
       "name": "inference-engine-all-0-0",
       "port_infos": [
         {
@@ -311,26 +233,7 @@
       }
     },
     {
-      "launch_inputs": {
-        "base_gpu_id": 1,
-        "disaggregation_bootstrap_port": null,
-        "dist_init_addr": "10.0.0.5:9000",
-        "engine_info_bootstrap_port": 12000,
-        "gated_launch_port": 13000,
-        "host": "10.0.0.5",
-        "interpreter_prefix": [
-          "python3"
-        ],
-        "nccl_port": 10000,
-        "node_rank": 0,
-        "num_gpus_per_engine": 1,
-        "port": 30000,
-        "random_seed": 44,
-        "sglang_overrides": {
-          "model_path": "/models/policy"
-        },
-        "worker_type": "WorkerType.DECODE"
-      },
+      "launch_command": "python3 -m sglang.launch_server --trust-remote-code --model-path /models/policy --host 10.0.0.5 --port 30000 --device cuda --random-seed 44 --nccl-port 10000 --dist-init-addr 10.0.0.5:9000 --base-gpu-id 1 --gated-launch-port 13000 --skip-server-warmup --enable-draft-weights-cpu-backup --enable-metrics --disaggregation-mode decode --no-enable-decoder-swa-bounded-replay --engine-info-bootstrap-port 12000 --lora-use-virtual-experts",
       "name": "inference-engine-all-0-1",
       "port_infos": [
         {
@@ -387,26 +290,7 @@
   ],
   "policy_and_frozen_ref": [
     {
-      "launch_inputs": {
-        "base_gpu_id": 1,
-        "disaggregation_bootstrap_port": null,
-        "dist_init_addr": "10.0.0.5:9000",
-        "engine_info_bootstrap_port": 12000,
-        "gated_launch_port": 13000,
-        "host": "10.0.0.5",
-        "interpreter_prefix": [
-          "python3"
-        ],
-        "nccl_port": 10000,
-        "node_rank": 0,
-        "num_gpus_per_engine": 1,
-        "port": 30000,
-        "random_seed": 42,
-        "sglang_overrides": {
-          "model_path": "/models/policy"
-        },
-        "worker_type": "WorkerType.REGULAR"
-      },
+      "launch_command": "python3 -m sglang.launch_server --trust-remote-code --model-path /models/policy --host 10.0.0.5 --port 30000 --device cuda --random-seed 42 --nccl-port 10000 --dist-init-addr 10.0.0.5:9000 --base-gpu-id 1 --gated-launch-port 13000 --skip-server-warmup --enable-draft-weights-cpu-backup --enable-metrics --no-enable-decoder-swa-bounded-replay --engine-info-bootstrap-port 12000 --lora-use-virtual-experts",
       "name": "inference-engine-all-0-0",
       "port_infos": [
         {
@@ -461,27 +345,7 @@
       }
     },
     {
-      "launch_inputs": {
-        "base_gpu_id": 1,
-        "disaggregation_bootstrap_port": null,
-        "dist_init_addr": "10.0.0.5:9000",
-        "engine_info_bootstrap_port": 12000,
-        "gated_launch_port": 13000,
-        "host": "10.0.0.5",
-        "interpreter_prefix": [
-          "python3"
-        ],
-        "nccl_port": 10000,
-        "node_rank": 0,
-        "num_gpus_per_engine": 2,
-        "port": 30000,
-        "random_seed": 44,
-        "sglang_overrides": {
-          "mem_fraction_static": 0.5,
-          "model_path": "/models/ref"
-        },
-        "worker_type": "WorkerType.REGULAR"
-      },
+      "launch_command": "python3 -m sglang.launch_server --trust-remote-code --model-path /models/ref --host 10.0.0.5 --port 30000 --device cuda --random-seed 44 --nccl-port 10000 --dist-init-addr 10.0.0.5:9000 --base-gpu-id 1 --gated-launch-port 13000 --tp-size 2 --skip-server-warmup --enable-draft-weights-cpu-backup --enable-metrics --no-enable-decoder-swa-bounded-replay --engine-info-bootstrap-port 12000 --mem-fraction-static 0.5 --lora-use-virtual-experts",
       "name": "inference-engine-all-1-0",
       "port_infos": [
         {

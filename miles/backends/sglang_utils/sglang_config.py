@@ -323,7 +323,8 @@ class SglangConfig(FrozenStrictBaseModel):
             self.base_args | group.overrides
             for model in self.models
             for group in model.server_groups
-            if group.worker_type != WorkerType.PLACEHOLDER
+            # A diffusion group's overrides are sglang.multimodal_gen args, not text-server ones.
+            if group.worker_type != WorkerType.PLACEHOLDER and group.engine_kind == EngineKind.TEXT
         ]
         return _list_of_dicts_get(values or [self.base_args], name)
 
@@ -382,10 +383,8 @@ class SglangConfig(FrozenStrictBaseModel):
         resolved = [ModelConfig.resolve(m, args, offset_cursor) for m in raw.models]
 
         assert offset_cursor.gpu == raw.total_num_gpus
-        models = [config for config, _ in resolved]
-        _validate_diffusion_models(models, args)
         return (
-            cls(models=models, base_args=base_args),
+            cls(models=[config for config, _ in resolved], base_args=base_args),
             SglangScalingConfig(groups={config.name: scalings for config, scalings in resolved}),
         )
 
@@ -394,17 +393,44 @@ class SglangConfig(FrozenStrictBaseModel):
         return any(m.has_pd_disaggregation for m in self.models)
 
 
-def _validate_diffusion_models(models: list[ModelConfig], args: Namespace) -> None:
-    """A diffusion model is a frozen generator beside the text policy; reject every rule it breaks at once."""
-    for index, model in enumerate(models):
+# Miles places each diffusion engine on one GPU and owns its ports; sglang.multimodal_gen reads these as its own.
+_DIFFUSION_TOPOLOGY_ARGS = (
+    "num_gpus",
+    "tp_size",
+    "sp_degree",
+    "ulysses_degree",
+    "ring_degree",
+    "dp_size",
+    "enable_cfg_parallel",
+    "cfg_parallel_degree",
+    "hsdp_replicate_dim",
+    "hsdp_shard_dim",
+    "base_gpu_id",
+    "gpu_ids",
+    "nccl_port",
+    "master_port",
+)
+
+
+def _validate_diffusion_models(raw: _RawSglangConfig, args: Namespace) -> None:
+    """A diffusion model is a frozen generator beside the text policy; reject every rule it breaks at once.
+
+    Runs on the YAML as written, before the run-wide GPU checks, so a broken generator is named even when the
+    rest of the layout is also wrong.
+    """
+    offset_cursor = _OffsetCursor(gpu=0, engine=0)
+    for index, raw_model in enumerate(raw.models):
+        model, _ = ModelConfig.resolve(raw_model, args, offset_cursor)
         if model.engine_kind != EngineKind.DIFFUSION:
             continue
         groups = model.server_groups
+        topology_overrides = sorted({key for g in groups for key in g.overrides if key in _DIFFUSION_TOPOLOGY_ARGS})
         broken = [
             rule
             for rule, holds in [
                 ("update_weights must be false", not model.update_weights),
                 ("it must not be the first model, whose router serves the policy", index > 0),
+                ("it must not be named eval, the name of the text eval fleet", model.name != "eval"),
                 (
                     "every server group must set engine_kind: diffusion",
                     all(g.engine_kind == EngineKind.DIFFUSION for g in groups),
@@ -418,6 +444,7 @@ def _validate_diffusion_models(models: list[ModelConfig], args: Namespace) -> No
                     all(g.worker_type == WorkerType.REGULAR for g in groups),
                 ),
                 ("num_gpus_per_engine must be 1", all(g.num_gpus_per_engine == 1 for g in groups)),
+                (f"overrides must not set the engine's GPUs or ports: {topology_overrides}", not topology_overrides),
                 ("--colocate is not supported", not args.colocate),
             ]
             if not holds
@@ -467,6 +494,7 @@ def _compute_raw_sglang_config(args) -> _RawSglangConfig:
 
     if args.sglang_config is not None:
         config = _RawSglangConfig.from_file_arg(args.sglang_config)
+        _validate_diffusion_models(config, args)
         expected = rollout_num_gpus + eval_num_gpus
         actual = config.total_num_gpus
         assert (

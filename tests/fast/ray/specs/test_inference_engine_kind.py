@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 from tests.fast.ray.rollout.conftest import make_args
 
-from miles.ray.specs import inference
 from miles.ray.specs.inference import InferenceEngineSpec
 from miles.utils.args.configs.scaling import ScalingConfig
 from miles.utils.workers.launch_gate import GATE_PORT_NAME
@@ -79,11 +78,6 @@ def _specs(args) -> list[InferenceEngineSpec]:
     return [spec.model_copy(update=dict(interpreter_prefix=["python3"])) for spec in InferenceEngineSpec.create(args)]
 
 
-def _record_launch(**kwargs) -> str:
-    # Everything Miles decides; the unchanged compute_engine_launch_cmd turns it into argv with sglang's defaults.
-    return json.dumps({name: value for name, value in kwargs.items() if name != "args"}, sort_keys=True, default=str)
-
-
 def _describe_specs(args) -> list[dict]:
     scaling = ScalingConfig(sglang_scaling=args.sglang_scaling)
     return [
@@ -91,7 +85,7 @@ def _describe_specs(args) -> list[dict]:
             name=spec.name,
             port_infos=[info.model_dump(mode="json") for info in spec.port_infos],
             static_meta=spec.compute_static_meta(scaling).resolve(cell_index=0),
-            launch_inputs=json.loads(spec.launch_command(_launch_ctx(args, spec))),
+            launch_command=spec.launch_command(_launch_ctx(args, spec)),
         )
         for spec in _specs(args)
     ]
@@ -99,21 +93,16 @@ def _describe_specs(args) -> list[dict]:
 
 def _capture_text_path(tmp_path: Path) -> dict:
     captured = {}
-    original = inference.compute_engine_launch_cmd
-    inference.compute_engine_launch_cmd = _record_launch
-    try:
-        for name, case in _TEXT_CASES.items():
-            case_dir = tmp_path / name
-            case_dir.mkdir()
-            captured[name] = _describe_specs(_make_case_args(case_dir, **case))
-    finally:
-        inference.compute_engine_launch_cmd = original
+    for name, case in _TEXT_CASES.items():
+        case_dir = tmp_path / name
+        case_dir.mkdir()
+        captured[name] = _describe_specs(_make_case_args(case_dir, **case))
     return json.loads(json.dumps(captured))
 
 
 class TestTextPathUnchanged:
     def test_configs_without_engine_kind_launch_as_main_does(self, tmp_path):
-        """Snapshot captured on main a18187f3ef; this test passes there and must keep passing unchanged."""
+        """Snapshot captured on main a18187f3ef; it pins the full launch command, so an SGLang bump regenerates it."""
         assert _capture_text_path(tmp_path) == json.loads(_TEXT_PATH_SNAPSHOT.read_text())
 
 
