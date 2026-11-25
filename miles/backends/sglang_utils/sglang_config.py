@@ -366,6 +366,8 @@ class SglangConfig(FrozenStrictBaseModel):
                 "num_gpus per group, and optional per-group 'overrides' dict of "
                 "ServerArgs field names that override the base --sglang-* CLI args. "
                 "Placeholder groups reserve GPU slots without creating engines. "
+                "A group with 'engine_kind: diffusion' serves a frozen sglang.multimodal_gen image generator, "
+                "which must be a later, update_weights: false model on one GPU per engine with --router miles. "
                 "A 'name: eval' model is filled in from the --eval-* args (model_path, "
                 "num_gpus_per_engine, --eval-sglang-* overrides) wherever the YAML leaves them unset. "
                 "Mutually exclusive with --prefill-num-servers."
