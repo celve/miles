@@ -8,6 +8,8 @@ from typing import Any
 from sglang.srt.constants import GPU_MEMORY_TYPE_WEIGHTS
 
 from miles.backends.sglang_utils.sglang_api_client import SGLangApiClient, WorkerType, probe_server_healthy
+from miles.backends.sglang_utils.sglang_config import EngineKind
+from miles.backends.sglang_utils.sglang_diffusion_api_client import DiffusionApiClient
 from miles.backends.sglang_utils.sglang_engine import build_server_url
 from miles.backends.sglang_utils.sglang_router_api_client import SGLangRouterApiClient
 from miles.ray.rollout.cell_state import (
@@ -54,6 +56,7 @@ class ServerCellMetadata(FrozenStrictBaseModel):
     needs_offload: bool
     update_weights: bool
     workers_hash: str
+    engine_kind: EngineKind = EngineKind.TEXT
 
 
 @dataclass
@@ -169,7 +172,8 @@ class ServerCell:
 
     @property
     def api_client(self) -> SGLangApiClient:
-        return SGLangApiClient(server_url=self.server_url, api_key=self.meta.sglang_api_key)
+        client_class = DiffusionApiClient if self.meta.engine_kind == EngineKind.DIFFUSION else SGLangApiClient
+        return client_class(server_url=self.server_url, api_key=self.meta.sglang_api_key)
 
     async def init(self) -> None:
         assert isinstance(self._state, StateUninitialized), f"{self._state=}"

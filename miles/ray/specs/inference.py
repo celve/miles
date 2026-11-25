@@ -5,7 +5,8 @@ from typing import Any, ClassVar
 from typing_extensions import Self
 
 from miles.backends.sglang_utils.sglang_api_client import WorkerType
-from miles.backends.sglang_utils.sglang_config import ModelConfig, ServerGroupConfig
+from miles.backends.sglang_utils.sglang_config import EngineKind, ModelConfig, ServerGroupConfig
+from miles.backends.sglang_utils.sglang_diffusion_engine import compute_diffusion_engine_launch_cmd
 from miles.backends.sglang_utils.sglang_engine import compute_engine_launch_cmd
 from miles.backends.sglang_utils.sglang_scaling_config import ServerGroupScalingConfig
 from miles.ray.utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST
@@ -337,6 +338,16 @@ class InferenceEngineSpec(BaseCommandSpec):
         group_scaling = ctx.scaling.sglang_scaling.group(model_name=self.model_cfg.name, group_index=self.group_index)
         interpreter_prefix = self.interpreter_prefix
         dist_init = ctx.self_addrs["dist_init"]
+        if server_group_config.engine_kind == EngineKind.DIFFUSION:
+            return compute_diffusion_engine_launch_cmd(
+                interpreter_prefix=interpreter_prefix,
+                base_gpu_id=ctx.local_gpu_ids[0],
+                sglang_overrides=server_group_config.overrides,
+                host=ctx.self_addrs["primary"].host,
+                port=ctx.self_addrs["primary"].port,
+                nccl_port=ctx.self_addrs["nccl"].port,
+                master_port=dist_init.port,
+            )
         # TODO: only node 0's seed is used by sglang; node != 0 should get node 0's number
         random_seed = (
             args.seed + group_scaling.engine_offset + ctx.cell_index * num_workers_per_cell + ctx.worker_in_cell_index
@@ -401,6 +412,7 @@ def _compute_spec_inference_engine(
         f"remaining ranks"
     )
 
+    is_diffusion = server_group_config.engine_kind == EngineKind.DIFFUSION
     return InferenceEngineSpec(
         args=args,
         model_cfg=model_cfg,
@@ -425,8 +437,15 @@ def _compute_spec_inference_engine(
                 if server_group_config.worker_type == WorkerType.PREFILL
                 else []
             ),
-            PortInfo(name="engine_info_bootstrap", static_port=12000, mode="master", allow_dynamic=True),
-            PortInfo(name=GATE_PORT_NAME, static_port=13000, mode="master", allow_dynamic=True),
+            # sglang.multimodal_gen serves neither; its cell then skips activating a gate.
+            *(
+                []
+                if is_diffusion
+                else [
+                    PortInfo(name="engine_info_bootstrap", static_port=12000, mode="master", allow_dynamic=True),
+                    PortInfo(name=GATE_PORT_NAME, static_port=13000, mode="master", allow_dynamic=True),
+                ]
+            ),
         ],
         # TODO: reduce complexity around passing around configs later during arguments refactor
         partial_static_meta=StaticMeta(
@@ -437,6 +456,8 @@ def _compute_spec_inference_engine(
                 sglang_api_key=args.sglang.get_value("api_key", group=server_group_config),
                 needs_offload=server_group_config.needs_offload,
                 update_weights=model_cfg.update_weights,
+                # Set only on diffusion cells, so a text cell's metadata stays what it was before the key existed.
+                **({"engine_kind": EngineKind.DIFFUSION.value} if is_diffusion else {}),
             ),
         ),
     )

@@ -4,6 +4,7 @@ import logging
 from typing import Any
 
 from miles.backends.sglang_utils.sglang_api_client import SGLangApiClient
+from miles.backends.sglang_utils.sglang_config import EngineKind
 from miles.backends.sglang_utils.sglang_router_api_client import SGLangRouterApiClient
 from miles.ray.rollout.server_cell import ServerCell, ServerCellMetadata
 from miles.ray.rollout.serving_registry import ServingRegistry
@@ -48,6 +49,7 @@ async def create_rollout_servers(
             router_port=router_addr.port,
             model_name=model_cfg.name,
             update_weights=model_cfg.update_weights,
+            engine_kind=model_cfg.engine_kind,
             init_expected_num_cells=_compute_init_expected_num_cells(args, engine_provider, model_cfg=model_cfg),
         )
 
@@ -81,6 +83,7 @@ class RolloutServer:
     router_port: int | None = None
     model_name: str = "default"
     update_weights: bool = True
+    engine_kind: EngineKind = EngineKind.TEXT
     health_checker_activeness: ActivenessTracker = dataclasses.field(
         default_factory=lambda: ActivenessTracker(active=True)
     )

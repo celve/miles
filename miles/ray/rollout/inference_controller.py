@@ -8,6 +8,7 @@ from typing import Any
 from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH, GPU_MEMORY_TYPE_KV_CACHE, GPU_MEMORY_TYPE_WEIGHTS
 
 from miles.backends.sglang_utils.sglang_api_client import SGLangApiClient
+from miles.backends.sglang_utils.sglang_config import EngineKind
 from miles.dashboard import hooks as dashboard_hooks
 from miles.ray.rollout.eval_fleet import EvalFleetInfo, EvalFleetPin, InferenceControllerEvalFleet
 from miles.ray.rollout.rollout_server import RolloutServer, create_rollout_servers
@@ -374,8 +375,13 @@ class InferenceController:
 
     @with_lock
     async def get_inference_runtime_immut_state(self) -> InferenceRuntimeImmutState:
+        # A frozen diffusion generator serves images, so neither the policy's request cap nor its tokens per GPU
+        # counts it; a frozen text model still counts, as before.
         engine_gpu_counts = [
-            count for name, srv in self.servers.items() if name != "eval" for count in srv.engine_gpu_counts
+            count
+            for name, srv in self.servers.items()
+            if name != "eval" and srv.engine_kind == EngineKind.TEXT
+            for count in srv.engine_gpu_counts
         ]
         eval_srv = self.servers.get("eval")
         return InferenceRuntimeImmutState(
@@ -513,4 +519,6 @@ def _compute_server_cell_meta_from_info(info: CellInfo) -> ServerCellMetadata:
         needs_offload=info.meta["needs_offload"],
         update_weights=info.meta["update_weights"],
         workers_hash=info.workers_hash,
+        # Text cells carry no engine_kind, keeping their metadata as it was before diffusion cells existed.
+        engine_kind=info.meta.get("engine_kind", EngineKind.TEXT),
     )

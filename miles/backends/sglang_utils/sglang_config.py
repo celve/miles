@@ -1,6 +1,7 @@
 """Configuration models for SGLang engine deployment."""
 
 import argparse
+import enum
 import logging
 from argparse import Namespace
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from miles.backends.sglang_utils.arguments import (
 )
 from miles.backends.sglang_utils.sglang_api_client import WorkerType
 from miles.backends.sglang_utils.sglang_scaling_config import ServerGroupScalingConfig, SglangScalingConfig
+from miles.router.backend import RouterKind
 from miles.utils.args.configs.sglang_client import SglangClientConfig
 from miles.utils.file_arg_utils import resolve_file_arg
 from miles.utils.lora.utils import is_multi_lora_enabled
@@ -24,6 +26,11 @@ from miles.utils.output_store.config import SGLANG_OUTPUT_STORE_FIELDS
 from miles.utils.pydantic_utils import FrozenStrictBaseModel
 
 logger = logging.getLogger(__name__)
+
+
+class EngineKind(str, enum.Enum):
+    TEXT = "text"
+    DIFFUSION = "diffusion"
 
 
 # ---------------------------- raw config -----------------------------
@@ -41,12 +48,15 @@ class _RawServerGroupConfig(FrozenStrictBaseModel):
         overrides: Optional dict of SGLang ``ServerArgs`` field overrides.
                    These are applied on top of the base CLI ``--sglang-*``
                    arguments in ``_compute_server_args``.
+        engine_kind: ``text`` (``sglang.launch_server``) or ``diffusion``
+                     (``sglang.multimodal_gen``, a frozen image generator).
     """
 
     worker_type: WorkerType
     num_gpus: int
     num_gpus_per_engine: int | None = None
     overrides: dict = {}
+    engine_kind: EngineKind = EngineKind.TEXT
 
 
 class _RawModelConfig(FrozenStrictBaseModel):
@@ -157,6 +167,7 @@ class ServerGroupConfig(FrozenStrictBaseModel):
     num_gpus_per_engine: int = pydantic.Field(gt=0)
     overrides: dict = pydantic.Field(default_factory=dict)
     needs_offload: bool
+    engine_kind: EngineKind = EngineKind.TEXT
 
     @property
     def model_path(self) -> str:
@@ -190,9 +201,11 @@ class ServerGroupConfig(FrozenStrictBaseModel):
         needs_offload = args.offload_rollout and group_abs_start < megatron_num_gpus
 
         num_gpus_per_engine = x if (x := raw.num_gpus_per_engine) is not None else default_gpus_per_engine
+        # enable_memory_saver is a text-server arg; sglang.multimodal_gen would reject it.
+        disables_memory_saver = args.offload_rollout and not needs_offload and raw.engine_kind == EngineKind.TEXT
         overrides = {
             "model_path": default_model_path,
-            **({"enable_memory_saver": False} if args.offload_rollout and not needs_offload else {}),
+            **({"enable_memory_saver": False} if disables_memory_saver else {}),
             **raw.overrides,
         }
 
@@ -201,6 +214,7 @@ class ServerGroupConfig(FrozenStrictBaseModel):
             num_gpus_per_engine=num_gpus_per_engine,
             overrides=overrides,
             needs_offload=needs_offload,
+            engine_kind=raw.engine_kind,
         )
         scaling = ServerGroupScalingConfig(
             num_gpus=raw.num_gpus, gpu_offset=gpu_offset, engine_offset=offset_cursor.engine
@@ -274,6 +288,13 @@ class ModelConfig(FrozenStrictBaseModel):
     @property
     def has_pd_disaggregation(self) -> bool:
         return any(g.worker_type in (WorkerType.PREFILL, WorkerType.DECODE) for g in self.server_groups)
+
+    @property
+    def engine_kind(self) -> EngineKind:
+        """``diffusion`` when any group is; ``_validate_diffusion_models`` makes that every group."""
+        if any(g.engine_kind == EngineKind.DIFFUSION for g in self.server_groups):
+            return EngineKind.DIFFUSION
+        return EngineKind.TEXT
 
     def num_server_cells(self, scaling: SglangScalingConfig) -> int:
         return sum(
@@ -359,14 +380,48 @@ class SglangConfig(FrozenStrictBaseModel):
         resolved = [ModelConfig.resolve(m, args, offset_cursor) for m in raw.models]
 
         assert offset_cursor.gpu == raw.total_num_gpus
+        models = [config for config, _ in resolved]
+        _validate_diffusion_models(models, args)
         return (
-            cls(models=[config for config, _ in resolved], base_args=base_args),
+            cls(models=models, base_args=base_args),
             SglangScalingConfig(groups={config.name: scalings for config, scalings in resolved}),
         )
 
     @property
     def has_pd_disaggregation(self) -> bool:
         return any(m.has_pd_disaggregation for m in self.models)
+
+
+def _validate_diffusion_models(models: list[ModelConfig], args: Namespace) -> None:
+    """A diffusion model is a frozen generator beside the text policy; reject every rule it breaks at once."""
+    for index, model in enumerate(models):
+        if model.engine_kind != EngineKind.DIFFUSION:
+            continue
+        groups = model.server_groups
+        broken = [
+            rule
+            for rule, holds in [
+                ("update_weights must be false", not model.update_weights),
+                ("it must not be the first model, whose router serves the policy", index > 0),
+                (
+                    "every server group must set engine_kind: diffusion",
+                    all(g.engine_kind == EngineKind.DIFFUSION for g in groups),
+                ),
+                (
+                    "--router miles is required, since sgl-router has no image route",
+                    RouterKind(args.router) == RouterKind.MILES,
+                ),
+                (
+                    "every server group must be worker_type: regular",
+                    all(g.worker_type == WorkerType.REGULAR for g in groups),
+                ),
+                ("num_gpus_per_engine must be 1", all(g.num_gpus_per_engine == 1 for g in groups)),
+                ("--colocate is not supported", not args.colocate),
+            ]
+            if not holds
+        ]
+        if broken:
+            raise ValueError(f"Diffusion model '{model.name}' breaks these rules: " + "; ".join(broken))
 
 
 def _extract_base_args(args: Namespace) -> dict[str, Any]:
