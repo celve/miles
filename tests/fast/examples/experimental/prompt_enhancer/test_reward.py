@@ -235,3 +235,16 @@ def test_the_image_is_scored_by_exactly_one_of_a_pool_and_scorer_servers(engine,
 
     with pytest.raises(NonRetryableError, match="one of --pe-scorer-pool and --pe-scorer-urls"):
         asyncio.run(prompt_enhancer_rm(args, _sample(), hpsv3_pool=_Pool()))
+
+
+def test_the_log_hook_reads_samples_saved_before_the_pool(monkeypatch):
+    logged = []
+    monkeypatch.setattr(reward.tracking, "log", lambda args, metrics, step_key: logged.append(metrics))
+    sample = _sample()
+    sample.metadata[REWARD_KEY] = dict(t2i=0.2, format=1.0, length=1.0, image_reward=0.8, render_secs=1, score_secs=1)
+    sample.reward = 2.2
+    log_args = SimpleNamespace(pe_sample_log=None, reward_key=None, wandb_always_use_train_step=False)
+
+    log_rollout_data(3, log_args, [sample], {}, 0.0)
+
+    assert logged[0]["rollout/pe/image_score"] == 0.8

@@ -193,7 +193,8 @@ def log_rollout_data(rollout_id, args, samples: list[Sample], rollout_extra_metr
         return False
     parts = [s.metadata[REWARD_KEY] for s in scored]
     metrics = {f"rollout/pe/{key}": float(np.mean([p[key] for p in parts])) for key in ("t2i", "format", "length")}
-    metrics["rollout/pe/image_score"] = float(np.mean([p["image_score"] for p in parts]))
+    # Samples saved before the pool, as debug rollout data, hold ImageReward's score under its old key.
+    metrics["rollout/pe/image_score"] = float(np.mean([p.get("image_score", p.get("image_reward")) for p in parts]))
     metrics["rollout/pe/reward"] = float(np.mean([s.get_reward_value(args) for s in scored]))
     metrics["rollout/pe/completion_tokens"] = float(np.mean([s.response_length for s in scored]))
     for key in ("render_secs", "score_secs"):
