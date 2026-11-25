@@ -67,25 +67,26 @@ class TestEntryPoint:
         sglang_diffusion_engine_main.pin_gpu(base_gpu_id)
         assert sglang_diffusion_engine_main.os.environ["CUDA_VISIBLE_DEVICES"] == expected
 
-    def test_sglang_names_every_unknown_arg_before_loading_the_model(self):
-        """Nested-config, pipeline and server args SGLang registers pass; typos and text-server args do not."""
+    def test_only_sglang_option_names_pass_before_the_model_loads(self):
+        """Registered names pass with native values; typos, aliases and text-server args are named."""
         server_args = {
             "model_path": "/m",
             "dit_precision": "bf16",
             "dit_config.torch_compile_mode": "max-autotune",
             "kv_cache_quant": "off",
-            "batching_max_size": 4,
+            "warmup_sampling_params": {"width": 512, "height": 512},
             "enable_metrics": True,
             "enable_memory_saver": False,
-            "not_an_arg": 1,
+            "master-port": 32001,
+            "typo": {},
             "dit_config.no_such_field": 1,
         }
         result = _run_entry_point(server_args)
         assert result.returncode != 0
         assert (
-            "unrecognized arguments: --enable-memory-saver false --not-an-arg 1 --dit-config.no-such-field 1"
-            in result.stderr
-        )
+            "sglang.multimodal_gen has no server option named: "
+            "['dit_config.no_such_field', 'enable_memory_saver', 'master-port', 'typo']"
+        ) in result.stderr
 
 
 def _run_entry_point(server_args: dict) -> subprocess.CompletedProcess:

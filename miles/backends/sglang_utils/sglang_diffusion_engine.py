@@ -30,7 +30,7 @@ def compute_diffusion_engine_launch_cmd(
 
 
 def compute_diffusion_server_args(*, sglang_overrides: dict, host: str, port: int, master_port: int) -> dict:
-    """``sglang.multimodal_gen`` server args, named as in its YAML config file (``--config``).
+    """``sglang.multimodal_gen`` server args, keyed by its CLI option destinations.
 
     The group's overrides, which carry the model's ``model_path``, win over these defaults, as they do for text
     engines; none of the run-wide ``--sglang-*`` text-server args apply.

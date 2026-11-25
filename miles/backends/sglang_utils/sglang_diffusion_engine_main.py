@@ -3,11 +3,6 @@
 import argparse
 import json
 import os
-import runpy
-import sys
-import tempfile
-
-_SGLANG_LAUNCHER = "sglang.multimodal_gen.runtime.launch_server"
 
 
 def pin_gpu(base_gpu_id: int) -> None:
@@ -15,20 +10,10 @@ def pin_gpu(base_gpu_id: int) -> None:
     os.environ["CUDA_VISIBLE_DEVICES"] = visible.split(",")[base_gpu_id] if visible else str(base_gpu_id)
 
 
-def to_sglang_argv(server_args: dict) -> list[str]:
-    """The command line SGLang's own launcher parses, so it names unknown args and rejects conflicting topology."""
-    from sglang.multimodal_gen.runtime.server_args import ServerArgs
-    from sglang.multimodal_gen.runtime.utils.argparse import FlexibleArgumentParser
-
-    parser = FlexibleArgumentParser()
-    ServerArgs.add_cli_args(parser)
-    with tempfile.NamedTemporaryFile("w", suffix=".json") as config_file:
-        json.dump(server_args, config_file)
-        config_file.flush()
-        # SGLang's own expansion of a --config file, booleans and nested configs included.
-        argv = parser._load_config_file(config_file.name)
-    # Only parse_args turns underscores into dashes; the launcher's parse_known_args does not.
-    return ["--" + arg[2:].replace("_", "-") if arg.startswith("--") else arg for arg in argv]
+def reject_unknown_server_args(server_args: dict, *, option_names: set[str]) -> None:
+    """Accept only the names SGLang's own CLI registers, spelled as its option destinations (no aliases)."""
+    if unknown := sorted(server_args.keys() - option_names):
+        raise ValueError(f"sglang.multimodal_gen has no server option named: {unknown}")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -37,10 +22,25 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--server-args", type=json.loads, required=True)
     cli = parser.parse_args(argv)
 
-    # Before any sglang import: sglang.multimodal_gen initializes CUDA on import.
     pin_gpu(cli.base_gpu_id)
-    sys.argv = [_SGLANG_LAUNCHER, *to_sglang_argv(cli.server_args)]
-    runpy.run_module(_SGLANG_LAUNCHER, run_name="__main__", alter_sys=True)
+
+    # Imported after pinning: sglang.multimodal_gen initializes CUDA on import.
+    from sglang.multimodal_gen.runtime.launch_server import dispatch_launch
+    from sglang.multimodal_gen.runtime.server_args import ServerArgs
+    from sglang.multimodal_gen.runtime.utils.argparse import FlexibleArgumentParser
+    from sglang.multimodal_gen.runtime.utils.process import kill_process_tree
+
+    sglang_parser = FlexibleArgumentParser()
+    ServerArgs.add_cli_args(sglang_parser)
+    option_names = {action.dest for action in sglang_parser._actions} - {"help"}
+    reject_unknown_server_args(cli.server_args, option_names=option_names)
+    # The dict constructor SGLang's own CLI ends in; it keeps structured values such as warmup_sampling_params.
+    server_args = ServerArgs.from_dict(dict(cli.server_args))
+    assert server_args.num_gpus == 1, f"a diffusion engine runs on one GPU, but SGLang resolved {server_args.num_gpus}"
+    try:
+        dispatch_launch(server_args)
+    finally:
+        kill_process_tree(os.getpid(), include_parent=False)
 
 
 if __name__ == "__main__":
