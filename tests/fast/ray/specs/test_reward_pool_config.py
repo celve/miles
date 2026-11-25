@@ -95,6 +95,13 @@ def test_a_declared_pool_runs_only_where_the_rollout_can_host_it(tmp_path, argv,
         _parse(tmp_path, [_HPSV3], *_GPUS, *argv)
 
 
+@pytest.mark.parametrize("flag", ["--rollout-function-path", "--eval-function-path"])
+def test_a_plain_rollout_function_cannot_take_pools(tmp_path, flag):
+    """The legacy adapter calls a plain function as fn(args, rollout_id, data_source), with no pools to hand on."""
+    with pytest.raises(ValueError, match="class-based rollout functions"):
+        _parse(tmp_path, [_HPSV3], *_GPUS, flag, "miles.rollout.sglang_rollout.generate_rollout")
+
+
 def test_the_v1_rollout_cannot_take_pools(tmp_path, monkeypatch):
     monkeypatch.setenv("MILES_USE_LEGACY_ROLLOUT_V1", "1")
 

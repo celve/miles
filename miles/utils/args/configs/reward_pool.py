@@ -1,8 +1,11 @@
+import inspect
+
 import pydantic
 import yaml
 
 from miles.utils.environ import use_legacy_rollout_v1
 from miles.utils.file_arg_utils import resolve_file_arg
+from miles.utils.function_registry import load_function
 from miles.utils.pydantic_utils import FrozenStrictBaseModel
 from miles.utils.workers.types import ClusterBackend, DeployComponent, WorkerCommBackend
 
@@ -91,5 +94,20 @@ def _check_run_can_host_reward_pools(args) -> None:
     if use_legacy_rollout_v1():
         # The v1 rollout calls the reward function without the pools.
         problems.append("the v2 rollout (MILES_USE_LEGACY_ROLLOUT_V1 unset)")
+    if plain := _plain_rollout_functions(args):
+        problems.append(f"class-based rollout functions, which take the pools (not the plain functions {plain})")
     if problems:
         raise ValueError(f"--reward-pool-config needs {'; '.join(problems)}")
+
+
+def _plain_rollout_functions(args) -> list[str]:
+    """Rollout and eval functions that are not BaseRolloutFn classes: their adapter calls them without the pools."""
+    # Local: miles.rollout imports the argument configs this module belongs to.
+    from miles.rollout.base_types import BaseRolloutFn
+
+    paths = {config.path for config in (args.rollout_function_path, args.eval_function_path) if config is not None}
+    return sorted(
+        path
+        for path in paths
+        if not (inspect.isclass(fn := load_function(path)) and issubclass(fn, BaseRolloutFn))
+    )
