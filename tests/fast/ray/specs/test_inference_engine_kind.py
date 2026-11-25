@@ -163,6 +163,12 @@ class TestDiffusionEngineSpec:
         assert GATE_PORT_NAME in [info.name for info in policy.port_infos]
         assert [info.name for info in generator.port_infos] == ["primary", "dist_init", "nccl"]
 
+    def test_the_generator_reserves_the_port_after_its_own(self, diffusion_args):
+        """Its offline-request broker binds port + 1; given to another port, the engine reports itself unhealthy."""
+        _, generator = _specs(diffusion_args)
+        (primary,) = [info for info in generator.port_infos if info.name == "primary"]
+        assert primary.num_consecutive == 2
+
     def test_only_generator_cells_carry_the_engine_kind(self, diffusion_args):
         scaling = ScalingConfig(sglang_scaling=diffusion_args.sglang_scaling)
         policy, generator = _specs(diffusion_args)

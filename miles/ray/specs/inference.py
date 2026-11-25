@@ -423,7 +423,8 @@ def _compute_spec_inference_engine(
         category=POOL_CATEGORY_INFERENCE_ENGINE,
         deploy_component=DeployComponent.INFERENCE,
         port_infos=[
-            PortInfo(name="primary", static_port=8000, allow_dynamic=True),
+            # sglang.multimodal_gen also binds its offline-request broker on port + 1.
+            PortInfo(name="primary", static_port=8000, allow_dynamic=True, num_consecutive=2 if is_diffusion else 1),
             PortInfo(
                 name="dist_init",
                 static_port=9000,
