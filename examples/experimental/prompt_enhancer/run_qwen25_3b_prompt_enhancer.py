@@ -107,7 +107,8 @@ def prepare(args: ScriptArgs):
     U.convert_checkpoint(
         model_name=POLICY.split("/")[1],
         megatron_model_type=MEGATRON_MODEL_TYPE,
-        num_gpus_per_node=args.num_gpus_per_node,
+        # The trainer's GPUs: Qwen2.5-3B's 36 layers do not split into pipeline stages over the whole job's 7.
+        num_gpus_per_node=args.train_gpus,
         dir_dst=args.model_dir,
         hf_checkpoint=args.policy_path,
         megatron_path=args.megatron_path,

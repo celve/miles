@@ -1,10 +1,11 @@
 """The launcher's argv, parsed by Miles: LIN-3046's GRPO settings plus a frozen diffusion generator behind Miles' router."""
 
 import shlex
+from types import SimpleNamespace
 
 import pytest
 from examples.experimental.prompt_enhancer.reward import PromptEnhancerLogConfig, PromptEnhancerRewardConfig
-from examples.experimental.prompt_enhancer.run_qwen25_3b_prompt_enhancer import ScriptArgs, _train_args
+from examples.experimental.prompt_enhancer.run_qwen25_3b_prompt_enhancer import ScriptArgs, _train_args, prepare
 from tests.fast.fixtures.args_fixtures import parse_megatron_test_config
 from transformers import Qwen2Config
 
@@ -98,3 +99,17 @@ def test_without_a_training_seed_miles_defaults_stay(config):
 def test_a_split_that_does_not_fill_the_job_is_refused():
     with pytest.raises(AssertionError, match="must add up to"):
         ScriptArgs(generator_gpus=2)
+
+
+def test_the_checkpoint_is_converted_on_the_trainers_gpus(monkeypatch):
+    conversions = []
+    backend = SimpleNamespace(
+        exec_command_cpu=lambda cmd: None, convert_checkpoint=lambda **kw: conversions.append(kw)
+    )
+    monkeypatch.setattr(ScriptArgs, "create_backend", lambda self: backend)
+
+    prepare(ScriptArgs(model_dir="/m"))
+
+    (conversion,) = conversions
+    assert conversion["num_gpus_per_node"] == 1
+    assert (conversion["hf_checkpoint"], conversion["dir_dst"]) == ("/m/Qwen2.5-3B-Instruct", "/m")
