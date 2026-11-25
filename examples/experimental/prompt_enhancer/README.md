@@ -35,7 +35,7 @@ GPU layout on one 8-GPU node: the job holds 1 trainer, 1 policy engine and 5 gen
    ```bash
    uv venv /root/venv-ir --python 3.11
    uv pip install --python /root/venv-ir/bin/python torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
-   uv pip install --python /root/venv-ir/bin/python transformers==4.51.3 image-reward==1.5 "numpy<2" pillow \
+   uv pip install --python /root/venv-ir/bin/python transformers==4.51.3 image-reward==1.5 datasets==3.5.0 pyarrow==19.0.1 "numpy<2" pillow \
      fairscale timm==0.6.13 ftfy regex "git+https://github.com/openai/CLIP.git" "setuptools<70"
    CUDA_VISIBLE_DEVICES=7 /root/venv-ir/bin/python examples/experimental/prompt_enhancer/scorer_server.py --port 18200
    ```
@@ -54,10 +54,12 @@ The generator is declared in `--sglang-config` as a second model with `update_we
 Start one engine per GPU with SGLang's own CLI, render each arm, then score with GenEval's detector in its own environment ([GenEval](https://github.com/djghosh13/geneval)):
 
 ```bash
+# SGLang derives an engine's other ports from --port, so neighbours 1 apart collide: space them and set the rest.
 for g in 0 1 2 3 4 5 6 7; do
-  CUDA_VISIBLE_DEVICES=$g sglang serve --model-path /root/models/Z-Image-Turbo --port $((30000 + g)) &
+  CUDA_VISIBLE_DEVICES=$g sglang serve --model-path /root/models/Z-Image-Turbo --port $((30000 + 100 * g)) \
+    --master-port $((31000 + 100 * g)) --scheduler-port $((32000 + 100 * g)) &
 done
-URLS=$(seq -s, -f "http://127.0.0.1:%g" 30000 30007)
+URLS=$(seq -s, -f "http://127.0.0.1:%g" 30000 100 30700)
 python -m examples.experimental.prompt_enhancer.geneval --policy /root/models/Qwen2.5-3B-Instruct \
   --metadata geneval/prompts/evaluation_metadata.jsonl --image-urls $URLS --out geneval/base --images-per-prompt 8
 python -m examples.experimental.prompt_enhancer.geneval --policy <run dir>/hf/iter_0000099 \

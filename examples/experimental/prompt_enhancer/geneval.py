@@ -6,8 +6,9 @@ the assistant prefix, rendered with `add_generation_prompt=True`, greedy decodin
 weights in bf16, and the first `<answer>` taken (or "a photo"). `--raw` sends GenEval's prompt unchanged. Image `k` of
 prompt `i` uses seed `i * 1000 + k + --seed-offset` in every arm, so images pair across arms by (prompt, seed).
 
-Engines are plain `sglang serve` processes, one per GPU, e.g.:
-    CUDA_VISIBLE_DEVICES=0 sglang serve --model-path /root/models/Z-Image-Turbo --port 30000
+Engines are plain `sglang serve` processes, one per GPU; space their ports, which SGLang derives others from (README.md):
+    CUDA_VISIBLE_DEVICES=0 sglang serve --model-path /root/models/Z-Image-Turbo --port 30000 \\
+        --master-port 31000 --scheduler-port 32000
 
     python -m examples.experimental.prompt_enhancer.geneval --policy /root/shared_data/<run>/hf/iter_0000099 \\
         --metadata geneval/prompts/evaluation_metadata.jsonl --image-urls http://127.0.0.1:30000 --out out/trained
