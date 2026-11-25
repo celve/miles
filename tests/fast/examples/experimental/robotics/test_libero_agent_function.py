@@ -31,13 +31,17 @@ def answer(action=ACTION, thinking="the drawer is to the right") -> str:
 
 
 @contextmanager
-def serve(handle):
-    """A local HTTP server that answers POSTs with ``handle(path, body) -> (status, payload)``."""
+def serve(handle, require=None):
+    """A local HTTP server that answers POSTs with ``handle(path, body) -> (status, payload)``.
+
+    A request missing any of ``require``'s headers gets 401, as the sandbox service answers one without its token.
+    """
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            status, payload = handle(self.path, body)
+            missing = any(self.headers.get(name) != value for name, value in (require or {}).items())
+            status, payload = (401, {}) if missing else handle(self.path, body)
             data = json.dumps(payload).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
@@ -116,6 +120,7 @@ class FakePolicy:
 
 class FakeSandbox:
     instances: list["FakeSandbox"] = []
+    headers: dict[str, str] = {}
 
     def __init__(self, *, template, max_lifetime_s, labels):
         self.template, self.max_lifetime_s, self.labels = template, max_lifetime_s, labels
@@ -138,8 +143,8 @@ def episode(monkeypatch, tmp_path):
     monkeypatch.setenv("LIBERO_TEMPLATE", "libero-sim-test")
     FakeSandbox.instances = []
 
-    async def play(policy, simulator, *, metadata=None, request_kwargs=None):
-        with serve(simulator) as sim_url, serve(policy) as policy_url:
+    async def play(policy, simulator, *, metadata=None, request_kwargs=None, require=None):
+        with serve(simulator, require) as sim_url, serve(policy) as policy_url:
             FakeSandbox.sim_url = sim_url
             return await laf.run(
                 base_url=policy_url,
@@ -179,6 +184,17 @@ async def test_success_scores_one_and_sends_pears_conversation(episode):
     ]
     # the assistant turn goes back whole, reasoning included, for the session server's prefix match
     assert last[2]["reasoning_content"] == "r" and last[2]["content"] == answer()
+
+
+async def test_every_simulator_request_carries_the_sandboxs_traffic_token(episode, monkeypatch):
+    token = {"e2b-traffic-access-token": "traffic-token"}
+    monkeypatch.setattr(FakeSandbox, "headers", token)
+    simulator = FakeSimulator(done_at=2)
+
+    result = await episode(FakePolicy([answer()] * 2), simulator, require=token)
+
+    assert result["reward"] == 1.0
+    assert [path for path, _ in simulator.requests] == ["/reset", "/act", "/act"]
 
 
 async def test_done_without_success_scores_zero(episode):
