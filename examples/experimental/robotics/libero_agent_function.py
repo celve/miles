@@ -147,8 +147,10 @@ def parse_action(text: str) -> tuple[dict[str, Any] | None, str | None]:
 
 
 class SimulatorClient:
-    def __init__(self, url: str, timeout_s: float):
-        self._client = httpx.AsyncClient(base_url=url, timeout=timeout_s, proxy=libero_sandbox.proxy())
+    def __init__(self, url: str, timeout_s: float, headers: dict[str, str] | None = None):
+        self._client = httpx.AsyncClient(
+            base_url=url, headers=headers, timeout=timeout_s, proxy=libero_sandbox.proxy()
+        )
 
     async def post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -310,7 +312,7 @@ async def run(
     started = time.monotonic()
     sandbox = await _start_sandbox(env_args, max_episode_s)
     sandbox_start_s = time.monotonic() - started
-    sim = SimulatorClient(sandbox.url, float(os.environ.get("LIBERO_SIM_TIMEOUT_S", "300")))
+    sim = SimulatorClient(sandbox.url, float(os.environ.get("LIBERO_SIM_TIMEOUT_S", "300")), sandbox.headers)
     policy = AsyncOpenAI(base_url=openai_session_url(base_url), api_key="EMPTY")
     log = EpisodeLog()
     try:

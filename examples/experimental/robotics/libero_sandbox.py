@@ -43,6 +43,7 @@ PEAR_ROOT = "/opt/pear"
 PEAR_WORK = "/opt/pear-work"
 SIM_DIR = "/opt/libero-sim"
 SERVER_PORT = 8000
+TRAFFIC_TOKEN_HEADER = "e2b-traffic-access-token"
 # built before the server answers /health: the imports and the first scene take longer than the gateway lets
 # a request run (it answers 504), so a sandbox pays them while starting
 WARM_EPISODE = '{"suite": "libero_goal", "task_id": 0, "trial_id": 0}'
@@ -147,6 +148,7 @@ class Sandbox:
             **self._opts,
         )
         self.sandbox_id = self._handle.sandbox_id
+        self.headers = traffic_headers(self._handle)
         self._alive = True
         try:
             self._handle.commands.run(
@@ -156,7 +158,8 @@ class Sandbox:
             )
             scheme = os.environ.get("LIBERO_E2B_URL_SCHEME", "http")
             self.url = f"{scheme}://{self._handle.get_host(SERVER_PORT)}"
-            wait_ready(self.url, timeout_s=float(os.environ.get("LIBERO_READY_TIMEOUT_S", "300")))
+            ready_s = float(os.environ.get("LIBERO_READY_TIMEOUT_S", "300"))
+            wait_ready(self.url, timeout_s=ready_s, headers=self.headers)
         except BaseException:
             self.kill()
             raise
@@ -191,12 +194,22 @@ class Sandbox:
                 failures += 1
 
 
-def wait_ready(url: str, *, timeout_s: float) -> None:
+def traffic_headers(handle) -> dict[str, str]:
+    """What every request to the simulator's port carries.
+
+    The service answers 401 without the token for a sandbox with private ports, its default from AgentENV#203 on;
+    a sandbox with public ports has no token and needs nothing.
+    """
+    token = handle.traffic_access_token
+    return {TRAFFIC_TOKEN_HEADER: token} if token else {}
+
+
+def wait_ready(url: str, *, timeout_s: float, headers: dict[str, str] | None = None) -> None:
     deadline = time.monotonic() + timeout_s
     last_error: Exception | None = None
     while time.monotonic() < deadline:
         try:
-            if httpx.get(f"{url}/health", timeout=10, proxy=proxy()).status_code == 200:
+            if httpx.get(f"{url}/health", headers=headers, timeout=10, proxy=proxy()).status_code == 200:
                 return
         except httpx.HTTPError as exc:
             last_error = exc
