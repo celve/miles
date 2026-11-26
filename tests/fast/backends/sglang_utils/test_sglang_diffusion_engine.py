@@ -68,6 +68,12 @@ class TestEntryPoint:
         sglang_engine.pin_gpu(base_gpu_id)
         assert sglang_engine.os.environ["CUDA_VISIBLE_DEVICES"] == expected
 
+    def test_the_entry_point_module_loads_no_sglang_srt_before_the_pin(self):
+        """sglang.srt initializes CUDA on every GPU the process sees, which the pin must come before."""
+        code = "import sys, miles.backends.sglang_utils.sglang_engine; print([m for m in sys.modules if m.startswith('sglang.srt')])"
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=300)
+        assert result.stdout.strip() == "[]", result.stderr
+
     def test_only_sglang_option_names_pass_before_the_model_loads(self):
         """Registered names pass, the selected pipeline's own ones included; typos, aliases and text-server args fail."""
         server_args = {

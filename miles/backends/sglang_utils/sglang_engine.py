@@ -7,10 +7,6 @@ import os
 import shlex
 import sys
 
-from sglang.srt.server_args import ServerArgs
-
-from miles.backends.sglang_utils.arguments import sglang_attention_dp_enabled
-from miles.backends.sglang_utils.server_args_utils import server_args_to_argv
 from miles.backends.sglang_utils.sglang_api_client import WorkerType
 from miles.utils.lora.utils import (
     LORA_ADAPTER_NAME,
@@ -19,8 +15,10 @@ from miles.utils.lora.utils import (
     lora_base_cpu_backup_enabled,
     lora_rollout_enabled,
 )
-from miles.utils.output_store.config import sglang_output_store_server_args
 from miles.utils.workers.argv_utils import _record_field_names
+
+# This module also runs as a diffusion engine's process, which pins its GPU first, so the text-engine functions import
+# what initializes CUDA (sglang.srt) when called.
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +75,8 @@ def compute_engine_launch_cmd(
         random_seed=random_seed,
     )
 
+    from miles.backends.sglang_utils.server_args_utils import server_args_to_argv
+
     launch_args = {**server_args_dict, "host": server_args_dict["host"].strip("[]")}
     return shlex.join([*interpreter_prefix, "-m", "sglang.launch_server", *server_args_to_argv(launch_args)])
 
@@ -98,6 +98,11 @@ def _compute_server_args(
     gated_launch_port: int,
     random_seed: int,
 ):
+    from sglang.srt.server_args import ServerArgs
+
+    from miles.backends.sglang_utils.arguments import sglang_attention_dp_enabled
+    from miles.utils.output_store.config import sglang_output_store_server_args
+
     base_args = args.sglang.base_args
     _gpus_per_engine = num_gpus_per_engine or args.rollout_num_gpus_per_engine
     nnodes = max(1, _gpus_per_engine // args.num_gpus_per_node)
@@ -237,6 +242,8 @@ def _compute_server_args(
 
 @functools.cache
 def _assert_launch_gate_served() -> None:
+    from sglang.srt.server_args import ServerArgs
+
     assert "gated_launch_port" in _record_field_names(ServerArgs), (
         "this sglang has no --gated-launch-port, and miles launches every inference engine through "
         "that gate; upgrade sglang to one that serves it"
@@ -352,18 +359,11 @@ def serve_diffusion_engine(server_args: dict) -> None:
 def main(argv: list[str] | None = None) -> None:
     """Entry point of one ``sglang.multimodal_gen`` server process."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("--base-gpu-id", type=int)
+    parser.add_argument("--base-gpu-id", type=int, required=True)
     parser.add_argument("--server-args", type=json.loads, required=True)
     cli = parser.parse_args(argv)
-    if cli.base_gpu_id is None:
-        serve_diffusion_engine(cli.server_args)
-        return
     pin_gpu(cli.base_gpu_id)
-    # This module's imports already initialized CUDA on every GPU, and SGLang queries device 0 in this process.
-    os.execv(
-        sys.executable,
-        [sys.executable, "-m", _DIFFUSION_ENTRY_MODULE, "--server-args", json.dumps(cli.server_args)],
-    )
+    serve_diffusion_engine(cli.server_args)
 
 
 if __name__ == "__main__":
