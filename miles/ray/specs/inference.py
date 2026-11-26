@@ -457,8 +457,6 @@ def _compute_spec_inference_engine(
                 sglang_api_key=args.sglang.get_value("api_key", group=server_group_config),
                 needs_offload=server_group_config.needs_offload,
                 update_weights=model_cfg.update_weights,
-                # Set only on diffusion cells, so a text cell's metadata stays what it was before the key existed.
-                **({"engine_kind": EngineKind.DIFFUSION.value} if is_diffusion else {}),
             ),
         ),
     )

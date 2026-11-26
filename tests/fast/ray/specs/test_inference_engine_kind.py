@@ -157,12 +157,10 @@ class TestDiffusionEngineSpec:
         (primary,) = [info for info in generator.port_infos if info.name == "primary"]
         assert primary.num_consecutive == 2
 
-    def test_only_generator_cells_carry_the_engine_kind(self, diffusion_args):
+    def test_generator_cells_are_frozen_after_the_policy_gpus(self, diffusion_args):
         scaling = ScalingConfig(sglang_scaling=diffusion_args.sglang_scaling)
-        policy, generator = _specs(diffusion_args)
-        assert "engine_kind" not in policy.compute_static_meta(scaling).resolve(cell_index=0)
+        _, generator = _specs(diffusion_args)
         generator_meta = generator.compute_static_meta(scaling).resolve(cell_index=1)
-        assert generator_meta["engine_kind"] == "diffusion"
         assert generator_meta["update_weights"] is False
         assert generator_meta["gpu_offset"] == 2
 

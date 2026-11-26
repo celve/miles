@@ -167,19 +167,19 @@ class RolloutServer:
 
     @requires_lock
     async def pause_generation(self, mode: str):
-        return await asyncio.gather(*[cell.pause_generation(mode=mode) for cell in self._addressable_cells()])
+        return await asyncio.gather(*[cell.pause_generation(mode=mode) for cell in self._generation_cells()])
 
     @requires_lock
     async def continue_generation(self):
-        return await asyncio.gather(*[cell.continue_generation() for cell in self._addressable_cells()])
+        return await asyncio.gather(*[cell.continue_generation() for cell in self._generation_cells()])
 
     @requires_lock
     async def flush_cache(self):
-        return await asyncio.gather(*[cell.flush_cache() for cell in self._addressable_cells()])
+        return await asyncio.gather(*[cell.flush_cache() for cell in self._generation_cells()])
 
     @requires_lock
     async def abort_all(self) -> None:
-        cells = self._addressable_cells()
+        cells = self._generation_cells()
         await async_utils.gather_and_raise_first(
             [asyncio.wait_for(cell.abort_all(), timeout=ABORT_ALL_TIMEOUT_SECONDS) for cell in cells],
             describe_failure=lambda index: (
@@ -211,6 +211,11 @@ class RolloutServer:
     @requires_lock
     def _addressable_cells(self) -> list[ServerCell]:
         return [cell for cell in self.all_server_cells.values() if cell.is_pending_weights_or_serving]
+
+    @requires_lock
+    def _generation_cells(self) -> list[ServerCell]:
+        """Cells that take pause, continue, flush and abort; sglang.multimodal_gen serves none of those routes."""
+        return self._addressable_cells() if self.engine_kind == EngineKind.TEXT else []
 
     @lock_exempt
     async def wait_init_expected_num_cells(self, timeout: float = 3600):

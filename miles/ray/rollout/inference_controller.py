@@ -375,8 +375,8 @@ class InferenceController:
 
     @with_lock
     async def get_inference_runtime_immut_state(self) -> InferenceRuntimeImmutState:
-        # A frozen diffusion generator serves images, so neither the policy's request cap nor its tokens per GPU
-        # counts it; a frozen text model still counts, as before.
+        # LLM engines only: the counts size the policy's request cap, HTTP pool and tokens-per-GPU metric, and a
+        # diffusion engine serves no policy request; a frozen text model still counts.
         engine_gpu_counts = [
             count
             for name, srv in self.servers.items()
@@ -519,6 +519,4 @@ def _compute_server_cell_meta_from_info(info: CellInfo) -> ServerCellMetadata:
         needs_offload=info.meta["needs_offload"],
         update_weights=info.meta["update_weights"],
         workers_hash=info.workers_hash,
-        # Text cells carry no engine_kind, keeping their metadata as it was before diffusion cells existed.
-        engine_kind=info.meta.get("engine_kind", EngineKind.TEXT),
     )

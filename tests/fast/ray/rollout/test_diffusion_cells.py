@@ -7,7 +7,6 @@ from types import SimpleNamespace
 import pytest
 from tests.fast.ray.rollout.conftest import make_args
 
-from miles.backends.sglang_utils.sglang_config import EngineKind
 from miles.ray.rollout.inference_controller import InferenceController, _compute_server_cell_meta_from_info
 from miles.ray.rollout.rollout_server import create_rollout_servers
 from miles.utils.context_lock import ContextLock
@@ -77,7 +76,7 @@ class _Provider:
         return None
 
 
-def _cell_info(*, cell_id: str, model_id: str, gpu_offset: int, engine_kind: str | None) -> CellInfo:
+def _cell_info(*, cell_id: str, model_id: str, gpu_offset: int) -> CellInfo:
     return CellInfo(
         cell_id=cell_id,
         pool_id=f"pool-{model_id}",
@@ -92,7 +91,6 @@ def _cell_info(*, cell_id: str, model_id: str, gpu_offset: int, engine_kind: str
             sglang_api_key=None,
             needs_offload=False,
             update_weights=model_id == "policy",
-            **({"engine_kind": engine_kind} if engine_kind else {}),
         ),
     )
 
@@ -133,8 +131,8 @@ async def generator_and_policy(tmp_path):
     servers, lock, provider = await _make_servers(
         tmp_path,
         [
-            _cell_info(cell_id="gen-0", model_id="generator", gpu_offset=2, engine_kind="diffusion"),
-            _cell_info(cell_id="policy-0", model_id="policy", gpu_offset=0, engine_kind=None),
+            _cell_info(cell_id="gen-0", model_id="generator", gpu_offset=2),
+            _cell_info(cell_id="policy-0", model_id="policy", gpu_offset=0),
         ],
     )
     yield servers, lock, provider
@@ -155,12 +153,6 @@ class TestDiffusionCellControl:
         assert provider.engines["gen-0"].paths == []
         assert len(provider.engines["policy-0"].paths) == 1
 
-    def test_a_text_cell_without_the_key_reads_as_text(self):
-        meta = _compute_server_cell_meta_from_info(
-            _cell_info(cell_id="p", model_id="policy", gpu_offset=0, engine_kind=None)
-        )
-        assert meta.engine_kind == EngineKind.TEXT
-
 
 class TestPolicyEngineCount:
     async def test_generator_engines_are_left_out_of_the_policy_count(self, tmp_path):
@@ -168,10 +160,10 @@ class TestPolicyEngineCount:
         servers, lock, provider = await _make_servers(
             tmp_path,
             [
-                _cell_info(cell_id="policy-0", model_id="policy", gpu_offset=0, engine_kind=None),
-                _cell_info(cell_id="ref-0", model_id="ref", gpu_offset=1, engine_kind=None),
-                _cell_info(cell_id="gen-0", model_id="generator", gpu_offset=2, engine_kind="diffusion"),
-                _cell_info(cell_id="gen-1", model_id="generator", gpu_offset=3, engine_kind="diffusion"),
+                _cell_info(cell_id="policy-0", model_id="policy", gpu_offset=0),
+                _cell_info(cell_id="ref-0", model_id="ref", gpu_offset=1),
+                _cell_info(cell_id="gen-0", model_id="generator", gpu_offset=2),
+                _cell_info(cell_id="gen-1", model_id="generator", gpu_offset=3),
             ],
         )
         controller = InferenceController.__new__(InferenceController)
