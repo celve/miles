@@ -68,8 +68,10 @@ reward, so the missing-reward filter drops the sample's group.
 `max_concurrency` caps the client's requests in flight; unset, nothing caps
 them.
 
-The same request gives the same bytes: the seed fixes the image. Z-Image-Turbo
-rounds sizes to a multiple of 16, so keep width and height multiples of 16.
+With engine batching off, the default, the same request gives the same bytes:
+the seed fixes the image (batching changes images; see Throughput).
+Z-Image-Turbo rounds sizes to a multiple of 16, so keep width and height
+multiples of 16.
 
 ## Reward pools
 
@@ -133,11 +135,20 @@ and needs `--rollout-skip-special-tokens`. Its log hook
 | `rollout/pe/policy_secs` | Rollout start to the last completion reaching the reward |
 | `rollout/pe/render_tail_secs` | Last completion to the last image |
 | `rollout/pe/score_tail_secs` | Last image to the last score |
+| `rollout/pe/after_score_secs` | Last score to the rollout's end |
 | `rollout/pe/render_window_secs` | First render start to the last image |
 | `rollout/pe/images_per_sec` | Images rendered over the render window |
 
-Policy, render tail and score tail add up to the rollout's wall time,
-`perf/rollout_time`; the trainer logs `perf/train_time` and `perf/step_time`.
+All of them count the step's scored samples only: an image whose score failed,
+or one in a dropped group, is not among them. The four phases add up to the
+rollout's wall time, `perf/rollout_time`; `after_score_secs` holds what the
+rollout does after the last score, such as filtering. When a dropped group is
+replaced, its replacement's completion comes late, so `policy_secs` then also
+holds the earlier samples' renders and scores. The phases, render window and
+images per second are logged only when every scored sample was rendered within
+the step's rollout, so not for replayed or injected rollout data, fully async
+rollouts or partial rollouts. The trainer logs `perf/train_time` and
+`perf/step_time`.
 
 ## Throughput
 
@@ -171,7 +182,7 @@ steps 1–7, in seconds:
 |---|---|---|---|---|---|---|
 | 1 | 1.3 | 32.6 | 0.10 | 3.0 | 37.8 | 3.85 |
 | 2 (ImageReward scoring) | 1.2 | 16.1 | 0.03 | 2.7 | 20.9 | 7.68 |
-| 5 (the launcher's default, estimated) | 1.3 | ≈6.6 | ≈0.1–0.6 | 3.0 | ≈12 | ≈19 |
+| 5 (the launcher's default, estimated) | 1.3 | ≈6.6 | ≈0.1–0.7 | 3.0 | ≈12 | ≈19 |
 
 Rendering is the step: the policy's 128 completions take about a second, and
 the images queue behind them. The five-engine row is not measured; it scales
@@ -196,10 +207,13 @@ The levers, in the order to pull them:
    recipe's 600 s client timeout, so `max_concurrency` stays unset.
 
 The recipe's pool coalesces for 50 ms (`max_wait_ms: 50`; the pool's own
-default is 0). Five engines deliver about 19 images per second, a little more
-than HPSv3's 17.6 one at a time; at that rate 50 ms gathers one or two images
-per call, which keeps about level. A scorer that falls behind shows as a
-growing `rollout/pe/score_tail_secs`.
+default is 0). At one engine it makes no difference (a step's score tail is one
+call, 0.1 s). Five engines deliver about 19 images per second, a little more
+than HPSv3's 17.6 one at a time; evenly spaced, those images arrive 52 ms apart,
+so 50 ms would batch little and the scorer would trail the last image by about
+0.7 s (128 images at 17.6 per second against a 6.6 s render window). Renders
+that finish in bursts batch more and shorten that; how much is not measured.
+A scorer that falls behind shows as a growing `rollout/pe/score_tail_secs`.
 
 ## Known limits
 
@@ -207,8 +221,9 @@ growing `rollout/pe/score_tail_secs`.
   group with a `None` reward.
 - In-run eval shares the training generator's engines.
 - A diffusion cell's restart under fault tolerance is untested.
-- Multi-GPU diffusion engines, training the diffusion model, video, and batching
-  that keeps rollout trajectories are out of scope.
+- Out of scope: multi-GPU diffusion engines, training the diffusion model,
+  video and multi-turn image environments, and batching that keeps rollout
+  trajectories.
 - A 200 answer that breaks SGLang's format in one of two ways is not stopped as
   it should be: non-ASCII text in `b64_json` raises a bare `ValueError` (the
   group is dropped instead of the run stopping), and a 24-byte answer ending

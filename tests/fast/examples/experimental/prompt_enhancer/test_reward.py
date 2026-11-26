@@ -248,14 +248,27 @@ def test_the_log_hook_reads_samples_saved_before_the_pool(monkeypatch):
     sample.metadata[REWARD_KEY] = dict(t2i=0.2, format=1.0, length=1.0, image_reward=0.8, render_secs=1, score_secs=1)
     sample.reward = 2.2
 
-    log_rollout_data(3, _log_args(load_debug_rollout_data=True), [sample], {}, 0.0)
+    log_rollout_data(3, _log_args(), [sample], {}, 0.0)
 
     assert logged[0]["rollout/pe/image_score"] == 0.8
     assert "rollout/pe/policy_secs" not in logged[0]
 
 
+def test_samples_timed_in_another_rollout_log_no_split(monkeypatch, engine, scorer):
+    # As --ci-inject-rollout-data-path or a fully async drain hands the hook: rendered before this rollout began.
+    logged = []
+    monkeypatch.setattr(reward.tracking, "log", lambda args, metrics, step_key: logged.append(metrics))
+    sample = _sample()
+    (sample.reward,) = _rewards(_args(engine, scorer), [sample])
+    sample.metadata[REWARD_KEY]["render_start"] -= 3600.0
+
+    log_rollout_data(3, _log_args(), [sample], {}, 60.0)
+
+    assert "rollout/pe/policy_secs" not in logged[0] and logged[0]["rollout/pe/render_secs_max"] >= 0.0
+
+
 def _log_args(**overrides) -> SimpleNamespace:
-    values = dict(pe_sample_log=None, reward_key=None, wandb_always_use_train_step=False, load_debug_rollout_data=False)
+    values = dict(pe_sample_log=None, reward_key=None, wandb_always_use_train_step=False)
     return SimpleNamespace(**(values | overrides))
 
 
@@ -266,12 +279,13 @@ def _timed(render_start: float, render_secs: float, score_secs: float) -> dict:
 def test_the_rollout_splits_into_policy_then_the_render_and_score_tails():
     parts = [_timed(110.0, 2.0, 0.5), _timed(112.0, 5.0, 1.0), _timed(111.0, 1.0, 0.2)]
 
-    split = rollout_time_split(parts, rollout_start=100.0)
+    split = rollout_time_split(parts, rollout_start=100.0, rollout_time=20.0)
 
     assert split == {
         "rollout/pe/policy_secs": 12.0,
         "rollout/pe/render_tail_secs": 5.0,
         "rollout/pe/score_tail_secs": 1.0,
+        "rollout/pe/after_score_secs": 2.0,
         "rollout/pe/render_window_secs": 7.0,
         "rollout/pe/images_per_sec": pytest.approx(3 / 7),
     }
@@ -281,11 +295,17 @@ def test_the_tails_follow_the_last_image_and_score_not_the_last_completion():
     # The last completion renders fast; an earlier one's image and score finish last.
     parts = [_timed(101.0, 9.0, 3.0), _timed(105.0, 1.0, 0.5)]
 
-    split = rollout_time_split(parts, rollout_start=100.0)
+    split = rollout_time_split(parts, rollout_start=100.0, rollout_time=13.0)
 
     assert split["rollout/pe/policy_secs"] == 5.0
     assert split["rollout/pe/render_tail_secs"] == 5.0
     assert split["rollout/pe/score_tail_secs"] == 3.0
+
+
+def test_one_sample_rendered_before_the_rollout_began_drops_the_split():
+    parts = [_timed(110.0, 2.0, 0.5), _timed(99.0, 1.0, 0.2)]
+
+    assert rollout_time_split(parts, rollout_start=100.0, rollout_time=20.0) == {}
 
 
 def test_the_reward_stamps_when_each_render_started(engine, scorer):

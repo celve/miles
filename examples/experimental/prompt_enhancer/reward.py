@@ -205,9 +205,7 @@ def log_rollout_data(rollout_id, args, samples: list[Sample], rollout_extra_metr
         metrics[f"rollout/pe/{key}_p50"] = float(np.percentile(values, 50))
         metrics[f"rollout/pe/{key}_p95"] = float(np.percentile(values, 95))
         metrics[f"rollout/pe/{key}_max"] = float(max(values))
-    # Replayed debug samples were timed in the run that saved them.
-    if not args.load_debug_rollout_data:
-        metrics |= rollout_time_split(parts, rollout_start=time.time() - rollout_time)
+    metrics |= rollout_time_split(parts, rollout_start=time.time() - rollout_time, rollout_time=rollout_time)
     metrics["rollout/pe/unscored"] = float(len(samples) - len(scored))
     metrics["rollout/step"] = compute_rollout_step(args, rollout_id)
     logger.info(f"prompt_enhancer {rollout_id}: {json.dumps(metrics)}")
@@ -224,13 +222,18 @@ def log_rollout_data(rollout_id, args, samples: list[Sample], rollout_extra_metr
 log_rollout_data.config_class = PromptEnhancerLogConfig
 
 
-def rollout_time_split(parts: list[dict], *, rollout_start: float) -> dict[str, float]:
+def rollout_time_split(parts: list[dict], *, rollout_start: float, rollout_time: float) -> dict[str, float]:
     """Split a rollout's wall time by what it waited on last, from each scored sample's render start and latencies.
 
     A sample's render starts when the policy's completion reaches the reward, so the policy phase runs from the
-    rollout's start to the last render start, and rendering and scoring add the tails after it. The images per second
-    are those rendered over the window from the first render start to the last image.
+    rollout's start to the last render start; rendering and scoring add the tails after it, and whatever the rollout
+    did after the last score (filtering, waiting for dropped groups' replacements) comes last; the four add up to the
+    rollout's wall time. Only scored samples count, and images per second are theirs over the window from the first
+    render start to the last image. Empty unless every sample was rendered within this rollout: replayed, injected,
+    fully async or partial-rollout samples were timed in another one.
     """
+    if not all(p.get("render_start", -1.0) >= rollout_start for p in parts):
+        return {}
     render_starts = [p["render_start"] for p in parts]
     rendered = [start + p["render_secs"] for start, p in zip(render_starts, parts, strict=True)]
     scored = [end + p["score_secs"] for end, p in zip(rendered, parts, strict=True)]
@@ -239,6 +242,7 @@ def rollout_time_split(parts: list[dict], *, rollout_start: float) -> dict[str, 
         "rollout/pe/policy_secs": max(render_starts) - rollout_start,
         "rollout/pe/render_tail_secs": max(rendered) - max(render_starts),
         "rollout/pe/score_tail_secs": max(scored) - max(rendered),
+        "rollout/pe/after_score_secs": rollout_start + rollout_time - max(scored),
         "rollout/pe/render_window_secs": render_window,
         "rollout/pe/images_per_sec": len(parts) / render_window if render_window > 0 else 0.0,
     }
