@@ -44,9 +44,10 @@ Argument parsing rejects a diffusion model that breaks any of these rules:
 - `--router miles`, the router with an image route.
 - `overrides` do not set `num_gpus`, `master_port` or `scheduler_port`.
 
-The engine has no pause, abort or cache-flush routes, so the controller's calls
-to them are no-ops on a diffusion engine, and images in flight during a policy
-weight update finish. The policy's request cap counts text engines only.
+The engine has no pause, abort or cache-flush routes, so the rollout server
+leaves a diffusion model's engines out of pause, continue, flush and abort, and
+images in flight during a policy weight update finish. The policy's request cap
+counts text engines only.
 
 ## Asking for an image
 
