@@ -17,7 +17,7 @@ from miles.backends.sglang_utils.arguments import (
     collect_eval_sglang_overrides,
 )
 from miles.backends.sglang_utils.sglang_api_client import WorkerType
-from miles.backends.sglang_utils.sglang_diffusion_engine import MILES_OWNED_DIFFUSION_ARGS
+from miles.backends.sglang_utils.sglang_engine import MILES_OWNED_DIFFUSION_ARGS
 from miles.backends.sglang_utils.sglang_scaling_config import ServerGroupScalingConfig, SglangScalingConfig
 from miles.router.backend import RouterKind
 from miles.utils.args.configs.sglang_client import SglangClientConfig

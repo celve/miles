@@ -127,7 +127,7 @@ class TestDiffusionEngineSpec:
         assert argv[:6] == [
             "python3",
             "-m",
-            "miles.backends.sglang_utils.sglang_diffusion_engine_main",
+            "miles.backends.sglang_utils.sglang_engine",
             "--base-gpu-id",
             "1",
             "--server-args",

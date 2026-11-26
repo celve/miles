@@ -8,8 +8,8 @@ import types
 
 import pytest
 
-from miles.backends.sglang_utils import sglang_diffusion_engine_main
-from miles.backends.sglang_utils.sglang_diffusion_engine import compute_diffusion_engine_launch_cmd
+from miles.backends.sglang_utils import sglang_engine
+from miles.backends.sglang_utils.sglang_engine import compute_diffusion_engine_launch_cmd
 
 
 def _launch_argv(**overrides) -> list[str]:
@@ -30,7 +30,7 @@ class TestLaunchCommand:
         assert argv[:6] == [
             "/usr/bin/python3",
             "-m",
-            "miles.backends.sglang_utils.sglang_diffusion_engine_main",
+            "miles.backends.sglang_utils.sglang_engine",
             "--base-gpu-id",
             "2",
             "--server-args",
@@ -65,8 +65,8 @@ class TestEntryPoint:
             monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
         else:
             monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible)
-        sglang_diffusion_engine_main.pin_gpu(base_gpu_id)
-        assert sglang_diffusion_engine_main.os.environ["CUDA_VISIBLE_DEVICES"] == expected
+        sglang_engine.pin_gpu(base_gpu_id)
+        assert sglang_engine.os.environ["CUDA_VISIBLE_DEVICES"] == expected
 
     def test_only_sglang_option_names_pass_before_the_model_loads(self):
         """Registered names pass, the selected pipeline's own ones included; typos, aliases and text-server args fail."""
@@ -98,14 +98,14 @@ class TestAllocatedArgs:
         allocated = {"num_gpus": 1, "port": 20004, "master_port": 20006}
         resolved = types.SimpleNamespace(num_gpus=1, port=20004, master_port=20043)
         with pytest.raises(ValueError, match=r"resolved \{'master_port': 20043\}"):
-            sglang_diffusion_engine_main.reject_moved_allocations(allocated, resolved=resolved)
-        sglang_diffusion_engine_main.reject_moved_allocations(allocated, resolved=types.SimpleNamespace(**allocated))
+            sglang_engine.reject_moved_allocations(allocated, resolved=resolved)
+        sglang_engine.reject_moved_allocations(allocated, resolved=types.SimpleNamespace(**allocated))
 
 
 def _run_entry_point(server_args: dict) -> subprocess.CompletedProcess:
     # A fresh interpreter: torchtitan's compat shim, loaded by this test session, breaks sglang.multimodal_gen imports.
     return subprocess.run(
-        [sys.executable, "-m", "miles.backends.sglang_utils.sglang_diffusion_engine_main", "--base-gpu-id", "0"]
+        [sys.executable, "-m", "miles.backends.sglang_utils.sglang_engine", "--base-gpu-id", "0"]
         + ["--server-args", json.dumps(server_args)],
         capture_output=True,
         text=True,

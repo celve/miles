@@ -1,8 +1,11 @@
+import argparse
 import functools
 import ipaddress
+import json
 import logging
 import os
 import shlex
+import sys
 
 from sglang.srt.server_args import ServerArgs
 
@@ -238,3 +241,130 @@ def _assert_launch_gate_served() -> None:
         "this sglang has no --gated-launch-port, and miles launches every inference engine through "
         "that gate; upgrade sglang to one that serves it"
     )
+
+
+# Miles sets these for each diffusion engine, or leaves them to SGLang (the scheduler binds a free port when none is
+# set); sglang.multimodal_gen itself rejects any other topology that does not fit on the one GPU they give it.
+MILES_OWNED_DIFFUSION_ARGS = ("num_gpus", "master_port", "scheduler_port")
+# Ports and GPUs Miles allocated for a diffusion engine; SGLang may move a busy port when it builds its args.
+_ALLOCATED_DIFFUSION_ARGS = ("num_gpus", "port", "master_port")
+_DIFFUSION_ENTRY_MODULE = "miles.backends.sglang_utils.sglang_engine"
+
+
+def compute_diffusion_engine_launch_cmd(
+    *,
+    interpreter_prefix: list[str],
+    base_gpu_id: int,
+    sglang_overrides: dict,
+    host: str,
+    port: int,
+    master_port: int,
+) -> str:
+    server_args = compute_diffusion_server_args(
+        sglang_overrides=sglang_overrides, host=host, port=port, master_port=master_port
+    )
+    return shlex.join(
+        [
+            *interpreter_prefix,
+            "-m",
+            _DIFFUSION_ENTRY_MODULE,
+            "--base-gpu-id",
+            str(base_gpu_id),
+            "--server-args",
+            json.dumps(server_args),
+        ]
+    )
+
+
+def compute_diffusion_server_args(*, sglang_overrides: dict, host: str, port: int, master_port: int) -> dict:
+    """``sglang.multimodal_gen`` server args, keyed by its CLI option destinations.
+
+    The group's overrides, which carry the model's ``model_path``, win over these defaults, as they do for text
+    engines; none of the run-wide ``--sglang-*`` text-server args apply.
+    """
+    server_args = {
+        "trust_remote_code": True,
+        "host": host.strip("[]"),
+        "port": port,
+        "master_port": master_port,
+        "num_gpus": 1,
+        "warmup_mode": "off",
+        # Miles places engines on GPUs of their own; the automatic policy would offload by free memory at startup.
+        "performance_mode": "manual",
+    }
+    return {**server_args, **sglang_overrides}
+
+
+def pin_gpu(base_gpu_id: int) -> None:
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    os.environ["CUDA_VISIBLE_DEVICES"] = visible.split(",")[base_gpu_id] if visible else str(base_gpu_id)
+
+
+def reject_unknown_server_args(server_args: dict, *, option_names: set[str]) -> None:
+    """Accept only the names SGLang's own CLI registers, spelled as its option destinations (no aliases)."""
+    if unknown := sorted(server_args.keys() - option_names):
+        raise ValueError(f"sglang.multimodal_gen has no server option named: {unknown}")
+
+
+def reject_moved_allocations(server_args: dict, *, resolved) -> None:
+    resolved_values = {
+        key: getattr(resolved, key) for key in _ALLOCATED_DIFFUSION_ARGS  # config-access-exempt: SGLang's args
+    }
+    moved = {key: value for key, value in resolved_values.items() if value != server_args[key]}
+    if moved:
+        raise ValueError(f"sglang.multimodal_gen resolved {moved}, not what Miles allocated for this engine")
+
+
+def sglang_option_names(server_args: dict) -> set[str]:
+    """The options SGLang's `serve` command takes for this model, its pipeline's own ones included."""
+    from sglang.multimodal_gen.runtime.entrypoints.cli.serve import add_multimodal_gen_serve_args
+    from sglang.multimodal_gen.runtime.utils.argparse import FlexibleArgumentParser
+
+    # SGLang picks the pipeline's extra options from the command line it is parsing.
+    selector = [
+        f"--{key.replace('_', '-')}={server_args[key]}"
+        for key in ("model_path", "pipeline_class_name")
+        if key in server_args
+    ]
+    saved_argv, sys.argv = sys.argv, [sys.argv[0], *selector]
+    try:
+        parser = add_multimodal_gen_serve_args(FlexibleArgumentParser())
+    finally:
+        sys.argv = saved_argv
+    return {action.dest for action in parser._actions} - {"help", "config"}
+
+
+def serve_diffusion_engine(server_args: dict) -> None:
+    from sglang.multimodal_gen.runtime.launch_server import dispatch_launch
+    from sglang.multimodal_gen.runtime.server_args import ServerArgs
+    from sglang.multimodal_gen.runtime.utils.process import kill_process_tree
+
+    reject_unknown_server_args(server_args, option_names=sglang_option_names(server_args))
+    # The dict constructor SGLang's own CLI ends in; it keeps structured values such as warmup_sampling_params.
+    resolved = ServerArgs.from_dict(dict(server_args))
+    reject_moved_allocations(server_args, resolved=resolved)
+    try:
+        dispatch_launch(resolved)
+    finally:
+        kill_process_tree(os.getpid(), include_parent=False)
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Entry point of one ``sglang.multimodal_gen`` server process."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--base-gpu-id", type=int)
+    parser.add_argument("--server-args", type=json.loads, required=True)
+    cli = parser.parse_args(argv)
+    if cli.base_gpu_id is None:
+        serve_diffusion_engine(cli.server_args)
+        return
+    pin_gpu(cli.base_gpu_id)
+    # This module's imports already initialized CUDA on every GPU, and SGLang queries device 0 in this process.
+    os.execv(
+        sys.executable,
+        [sys.executable, "-m", _DIFFUSION_ENTRY_MODULE, "--server-args", json.dumps(cli.server_args)],
+    )
+
+
+if __name__ == "__main__":
+    main()
